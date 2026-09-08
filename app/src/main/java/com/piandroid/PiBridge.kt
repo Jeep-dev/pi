@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.delay
 
 class PiBridge(private val context: Context) {
     private val termux = "com.termux"
@@ -28,6 +29,14 @@ class PiBridge(private val context: Context) {
     }
 
     suspend fun start(cwd: String): Result<String> = request("/start", "{\"cwd\":${json(cwd)}}")
+    suspend fun waitForBridge(timeoutMillis: Long = 12_000): Result<Unit> {
+        val attempts = (timeoutMillis / 250).toInt().coerceAtLeast(1)
+        repeat(attempts) {
+            if (request("/health", null).isSuccess) return Result.success(Unit)
+            delay(250)
+        }
+        return Result.failure(IllegalStateException("Termux bridge 启动超时，请确认 Termux 仍在运行"))
+    }
     suspend fun prompt(message: String): Result<String> = request("/prompt", "{\"message\":${json(message)}}")
     suspend fun terminal(command: String): Result<String> = request("/terminal", "{\"command\":${json(command)}}")
     suspend fun files(path: String = ""): Result<List<PiFile>> = request("/files?path=${encode(path)}", null).map { body ->

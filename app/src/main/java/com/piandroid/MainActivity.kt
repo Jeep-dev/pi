@@ -100,11 +100,23 @@ private fun PiScreen(bridge: PiBridge) {
             Button(onClick = { scope.launch {
                 status = "正在启动 Termux bridge"
                 bridge.installAndStartBridge(cwd).fold(
-                    onSuccess = { bridge.start(cwd).onSuccess { status = "运行中" }.onFailure { status = it.message ?: "Pi 启动失败" } },
+                    onSuccess = {
+                        status = "等待 Termux bridge"
+                        bridge.waitForBridge().fold(
+                            onSuccess = { bridge.start(cwd).onSuccess { status = "运行中" }.onFailure { status = it.message ?: "Pi 启动失败" } },
+                            onFailure = { status = it.message ?: "Termux bridge 启动失败" }
+                        )
+                    },
                     onFailure = { status = it.message ?: "启动失败" }
                 )
             } }) { Text("连接 Pi") }
-            Button(onClick = { scope.launch { bridge.start(cwd).onSuccess { status = "运行中" }.onFailure { status = it.message ?: "启动失败" } } }) { Text("启动") }
+            Button(onClick = { scope.launch {
+                status = "检查 Termux bridge"
+                bridge.waitForBridge().fold(
+                    onSuccess = { bridge.start(cwd).onSuccess { status = "运行中" }.onFailure { status = it.message ?: "启动失败" } },
+                    onFailure = { status = it.message ?: "Termux bridge 未运行" }
+                )
+            } }) { Text("启动") }
         }
         when (view) {
             "chat" -> LazyColumn(Modifier.weight(1f)) { items(output) { Text(it, Modifier.padding(vertical = 4.dp)) } }
