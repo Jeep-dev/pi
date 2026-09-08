@@ -2,7 +2,7 @@ name: Build Pi Android
 on:
   workflow_dispatch:
   push:
-    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "tools/build_patch_v46.py", "tools/build_patch_v47.py", "tools/build_patch_v48.py", "tools/build_patch_v49.py", "tools/build_patch_v50.py", "tools/build_patch_v51.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
+    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "tools/build_patch_v46.py", "tools/build_patch_v47.py", "tools/build_patch_v48.py", "tools/build_patch_v49.py", "tools/build_patch_v50.py", "tools/build_patch_v51.py", "tools/build_patch_v52.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -24,6 +24,8 @@ jobs:
         run: python3 tools/build_patch_v50.py
       - name: Apply PiTouch v5.1 deterministic bridge lifecycle fix
         run: python3 tools/build_patch_v51.py
+      - name: Apply PiTouch v5.2 connection resilience patch
+        run: python3 tools/build_patch_v52.py
       - name: Validate Pi bridge JavaScript
         run: node --check app/src/main/assets/pi-android-bridge.mjs
       - uses: actions/setup-java@v4
@@ -32,4 +34,4 @@ jobs:
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
-        with: { name: pi-android-v5.1-debug, path: app/build/outputs/apk/debug/*.apk }
+        with: { name: pi-android-v5.2-debug, path: app/build/outputs/apk/debug/*.apk }
