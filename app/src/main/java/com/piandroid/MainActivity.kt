@@ -1,6 +1,7 @@
 package com.piandroid
 
 import android.content.pm.PackageManager
+import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,13 +25,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -52,7 +55,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -66,6 +71,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = AndroidColor.BLACK
+        window.navigationBarColor = AndroidColor.BLACK
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = 0
+        }
         requestTermuxPermissionIfNeeded()
         setContent { PiTouchApp(PiBridge(this)) }
     }
@@ -83,15 +94,18 @@ private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Set
 private data class ChatLine(val role: String, val text: String, val streaming: Boolean = false)
 private data class LocalCommand(val name: String, val description: String)
 
-private val Bg = Color(0xFF050607)
+private val Bg = Color(0xFF000000)
+private val HeaderBg = Color(0xFF05080A)
 private val PanelBg = Color(0xFF0D1116)
 private val CardBg = Color(0xFF171B21)
+private val ToolBg = Color(0xFF263229)
 private val UserBg = Color(0xFF30313A)
 private val Border = Color(0xFF284864)
 private val Accent = Color(0xFF70E69A)
 private val Blue = Color(0xFF79C5FF)
 private val TextMain = Color(0xFFE8EAF0)
 private val TextMuted = Color(0xFF858C96)
+private val ThinkingText = Color(0xFF9A9A9A)
 private val Danger = Color(0xFFFF8D8D)
 
 @Composable
@@ -104,9 +118,7 @@ private fun PiTouchApp(bridge: PiBridge) {
         onSurface = TextMain
     )
     MaterialTheme(colorScheme = scheme) {
-        Surface(Modifier.fillMaxSize(), color = Bg) {
-            PiScreen(bridge)
-        }
+        Surface(Modifier.fillMaxSize(), color = Bg) { PiScreen(bridge) }
     }
 }
 
@@ -130,31 +142,39 @@ private fun PiScreen(bridge: PiBridge) {
     var bashInput by rememberSaveable { mutableStateOf("") }
     var bashOutput by remember { mutableStateOf("") }
     var bashRunning by remember { mutableStateOf(false) }
-
     var currentPath by rememberSaveable { mutableStateOf("") }
     var files by remember { mutableStateOf<List<PiFile>>(emptyList()) }
     var selectedFile by remember { mutableStateOf("") }
     var fileText by remember { mutableStateOf("") }
     var diffText by remember { mutableStateOf("") }
-
     var pendingUi by remember { mutableStateOf<PiUiRequest?>(null) }
     var dialogInput by remember { mutableStateOf("") }
 
     val localCommands = remember {
         listOf(
-            LocalCommand("model", "切换真实 Pi 模型"),
-            LocalCommand("thinking", "切换真实 thinking level"),
-            LocalCommand("tree", "打开真实 Session Tree"),
-            LocalCommand("new", "新建 Pi session"),
-            LocalCommand("session", "查看 session/token/cost"),
+            LocalCommand("resume", "选择并继续以前的 session"),
+            LocalCommand("model", "切换模型"),
+            LocalCommand("thinking", "切换 thinking level"),
+            LocalCommand("new", "新建 session"),
+            LocalCommand("name", "给当前 session 命名"),
+            LocalCommand("session", "查看 session / token / cost"),
+            LocalCommand("tree", "打开当前 Session Tree"),
+            LocalCommand("fork", "从以前的用户消息创建 fork"),
+            LocalCommand("clone", "克隆当前 active branch"),
+            LocalCommand("compact", "压缩当前上下文"),
+            LocalCommand("settings", "连接与启动设置"),
             LocalCommand("run", "通过 Pi RPC 执行 bash"),
             LocalCommand("files", "浏览当前项目文件"),
             LocalCommand("diff", "查看当前 Git diff"),
-            LocalCommand("compact", "压缩当前上下文"),
-            LocalCommand("clone", "克隆当前 active branch"),
-            LocalCommand("abort", "停止当前 Agent 操作"),
-            LocalCommand("settings", "连接与启动设置")
+            LocalCommand("abort", "停止当前 Agent 操作")
         )
+    }
+
+    suspend fun loadHistory() {
+        bridge.history().onSuccess { history ->
+            lines.clear()
+            history.forEach { message -> lines.add(ChatLine(message.role, message.text)) }
+        }
     }
 
     suspend fun refreshMeta() {
@@ -168,20 +188,44 @@ private fun PiScreen(bridge: PiBridge) {
         if (text.isNotBlank()) lines.add(ChatLine("system", text))
     }
 
-    fun appendAssistant(delta: String) {
+    fun appendStream(role: String, delta: String) {
         if (delta.isEmpty()) return
         val last = lines.lastOrNull()
-        if (last?.role == "assistant" && last.streaming) {
+        if (last?.role == role && last.streaming) {
             lines[lines.lastIndex] = last.copy(text = last.text + delta)
         } else {
-            lines.add(ChatLine("assistant", delta, streaming = true))
+            lines.add(ChatLine(role, delta, streaming = true))
         }
     }
 
-    fun settleAssistant() {
-        if (lines.isNotEmpty()) {
-            val last = lines.last()
-            if (last.role == "assistant" && last.streaming) lines[lines.lastIndex] = last.copy(streaming = false)
+    fun startTool(text: String) {
+        lines.add(ChatLine("tool", text, streaming = true))
+    }
+
+    fun updateTool(text: String) {
+        if (text.isBlank()) return
+        val last = lines.lastOrNull()
+        if (last?.role == "tool" && last.streaming) {
+            val title = last.text.substringBefore("\n\n")
+            lines[lines.lastIndex] = last.copy(text = "$title\n\n$text")
+        } else {
+            lines.add(ChatLine("tool", text, streaming = true))
+        }
+    }
+
+    fun finishTool(text: String) {
+        val last = lines.lastOrNull()
+        if (last?.role == "tool" && last.streaming) {
+            val suffix = if (text.isBlank()) "" else "\n\n$text"
+            lines[lines.lastIndex] = last.copy(text = last.text + suffix, streaming = false)
+        } else if (text.isNotBlank()) {
+            lines.add(ChatLine("tool", text))
+        }
+    }
+
+    fun settleStreams() {
+        for (i in lines.indices) {
+            if (lines[i].streaming) lines[i] = lines[i].copy(streaming = false)
         }
     }
 
@@ -201,7 +245,7 @@ private fun PiScreen(bridge: PiBridge) {
                                     connected = true
                                     status = "Ready"
                                     panel = Panel.Chat
-                                    addSystem("Pi RPC 已连接：${it.modelName.ifBlank { it.modelId }}")
+                                    loadHistory()
                                     refreshMeta()
                                 },
                                 onFailure = {
@@ -224,6 +268,12 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
+    fun sendExtensionCommand(text: String) {
+        scope.launch {
+            bridge.prompt(text).onFailure { addSystem("命令失败：${it.message}") }
+        }
+    }
+
     fun executeInput(raw: String) {
         val text = raw.trim()
         if (text.isBlank()) return
@@ -234,6 +284,7 @@ private fun PiScreen(bridge: PiBridge) {
         val command = text.substringBefore(' ')
         val args = text.substringAfter(' ', "").trim()
         when (command) {
+            "/resume", "/tree", "/fork", "/name" -> sendExtensionCommand(text)
             "/model" -> panel = Panel.Models
             "/thinking" -> panel = Panel.Thinking
             "/session" -> {
@@ -247,7 +298,7 @@ private fun PiScreen(bridge: PiBridge) {
                     scope.launch {
                         bashRunning = true
                         bridge.bash(args).fold(
-                            onSuccess = { bashOutput = "$ ${args}\n${it.output}\n[exit ${it.exitCode}]" },
+                            onSuccess = { bashOutput = "$ $args\n${it.output}\n[exit ${it.exitCode}]" },
                             onFailure = { bashOutput = "ERROR: ${it.message}" }
                         )
                         bashRunning = false
@@ -257,19 +308,19 @@ private fun PiScreen(bridge: PiBridge) {
             }
             "/files" -> {
                 panel = Panel.Files
-                scope.launch {
-                    bridge.files(currentPath).onSuccess { files = it }.onFailure { addSystem(it.message.orEmpty()) }
-                }
+                scope.launch { bridge.files(currentPath).onSuccess { files = it }.onFailure { addSystem(it.message.orEmpty()) } }
             }
             "/diff" -> {
                 panel = Panel.Diff
-                scope.launch {
-                    bridge.diff().onSuccess { diffText = it.ifBlank { "没有未提交改动" } }.onFailure { diffText = "ERROR: ${it.message}" }
-                }
+                scope.launch { bridge.diff().onSuccess { diffText = it.ifBlank { "没有未提交改动" } }.onFailure { diffText = "ERROR: ${it.message}" } }
             }
             "/new" -> scope.launch {
                 bridge.newSession().fold(
-                    onSuccess = { lines.clear(); addSystem("已创建新的 Pi session"); refreshMeta() },
+                    onSuccess = {
+                        lines.clear()
+                        addSystem("已创建新的 Pi session")
+                        refreshMeta()
+                    },
                     onFailure = { addSystem("/new 失败：${it.message}") }
                 )
             }
@@ -283,22 +334,24 @@ private fun PiScreen(bridge: PiBridge) {
             }
             "/clone" -> scope.launch {
                 bridge.cloneSession().fold(
-                    onSuccess = { addSystem("当前 active branch 已克隆"); refreshMeta() },
+                    onSuccess = { addSystem("当前 active branch 已克隆"); refreshMeta(); loadHistory() },
                     onFailure = { addSystem("/clone 失败：${it.message}") }
                 )
             }
             "/abort" -> scope.launch {
+                status = "Stopping"
                 bridge.abort().fold(
-                    onSuccess = { status = "Ready"; addSystem("已发送 abort") },
-                    onFailure = { addSystem("abort 失败：${it.message}") }
+                    onSuccess = { addSystem("已发送取消") },
+                    onFailure = { addSystem("取消失败：${it.message}") }
                 )
             }
             "/settings" -> panel = Panel.Settings
             else -> {
                 lines.add(ChatLine("user", text))
                 scope.launch {
-                    bridge.prompt(text, if (currentState?.streaming == true) "steer" else null).fold(
-                        onSuccess = { status = "Running" },
+                    val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
+                    bridge.prompt(text, behavior).fold(
+                        onSuccess = { status = "Working" },
                         onFailure = { addSystem("发送失败：${it.message}") }
                     )
                 }
@@ -313,23 +366,36 @@ private fun PiScreen(bridge: PiBridge) {
                 cursor = batch.latest
                 batch.events.forEach { event ->
                     when (event.type) {
-                        "agent_start" -> status = "Running"
-                        "agent_end", "agent_settled" -> {
-                            settleAssistant()
+                        "agent_start" -> status = "Working"
+                        "agent_end" -> Unit
+                        "agent_settled" -> {
+                            settleStreams()
                             status = "Ready"
+                            refreshMeta()
                         }
                         "message_update" -> when (event.subtype) {
-                            "text_delta" -> appendAssistant(event.text)
-                            "thinking_delta" -> Unit
-                            "toolcall_start" -> addSystem(event.text)
+                            "text_delta" -> appendStream("assistant", event.text)
+                            "thinking_delta" -> appendStream("thinking", event.text)
+                            else -> Unit
                         }
-                        "tool_execution_start", "tool_execution_end", "stderr", "process_exit", "extension_error" -> addSystem(event.text)
+                        "tool_execution_start" -> startTool(event.text)
+                        "tool_execution_update" -> updateTool(event.text)
+                        "tool_execution_end" -> finishTool(event.text)
+                        "stderr", "process_exit", "extension_error" -> addSystem(event.text)
                         "compaction_start" -> status = "Compacting"
                         "compaction_end" -> status = "Ready"
                         "extension_ui_request" -> {
                             val req = event.uiRequest
                             when (req?.method) {
-                                "notify" -> addSystem(req.message)
+                                "notify" -> {
+                                    if (req.message == "ANDROID_SESSION_SWITCHED") {
+                                        loadHistory()
+                                        refreshMeta()
+                                        status = "Ready"
+                                    } else {
+                                        addSystem(req.message)
+                                    }
+                                }
                                 "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
                                 "set_editor_text" -> if (req.message.isNotBlank()) input = req.message
                                 "select", "confirm", "input", "editor" -> {
@@ -346,7 +412,7 @@ private fun PiScreen(bridge: PiBridge) {
                 connected = false
                 addSystem("Bridge 连接中断：${it.message}")
             }
-            delay(180)
+            delay(160)
         }
     }
 
@@ -354,11 +420,18 @@ private fun PiScreen(bridge: PiBridge) {
         if (lines.isNotEmpty()) chatListState.animateScrollToItem(lines.lastIndex)
     }
 
-    LaunchedEffect(connected, status) {
+    LaunchedEffect(connected) {
         if (!connected) return@LaunchedEffect
+        var knownSession = currentState?.sessionId.orEmpty()
         while (connected) {
-            delay(2500)
-            bridge.state().onSuccess { currentState = it }
+            delay(1500)
+            bridge.state().onSuccess { state ->
+                if (knownSession.isNotBlank() && state.sessionId.isNotBlank() && state.sessionId != knownSession) {
+                    loadHistory()
+                }
+                knownSession = state.sessionId
+                currentState = state
+            }
             bridge.stats().onSuccess { currentStats = it }
         }
     }
@@ -386,6 +459,11 @@ private fun PiScreen(bridge: PiBridge) {
             }
         )
     }
+
+    val busy = connected && (
+        status == "Working" || status == "Compacting" || status == "Stopping" ||
+            currentState?.streaming == true || currentState?.compacting == true
+        )
 
     Column(
         Modifier
@@ -496,8 +574,7 @@ private fun PiScreen(bridge: PiBridge) {
                     modifier = Modifier.align(Alignment.BottomCenter),
                     onPick = { name, remote ->
                         input = ""
-                        if (remote && name != "tree") input = "/$name "
-                        else executeInput("/$name")
+                        if (remote) input = "/$name " else executeInput("/$name")
                     }
                 )
             }
@@ -508,12 +585,20 @@ private fun PiScreen(bridge: PiBridge) {
         if (panel == Panel.Chat) {
             Composer(
                 value = input,
+                busy = busy,
                 onValue = { input = it },
                 onSlash = { input = if (input.startsWith("/")) "" else "/" },
-                onSend = {
-                    val value = input
-                    input = ""
-                    executeInput(value)
+                onPrimary = {
+                    if (busy) {
+                        status = "Stopping"
+                        scope.launch {
+                            bridge.abort().onFailure { addSystem("取消失败：${it.message}") }
+                        }
+                    } else {
+                        val value = input
+                        input = ""
+                        executeInput(value)
+                    }
                 }
             )
         }
@@ -532,7 +617,7 @@ private fun TerminalHeader(
     Column(
         Modifier
             .fillMaxWidth()
-            .background(Color(0xFF090C0F))
+            .background(HeaderBg)
             .border(1.dp, Color(0xFF151B21))
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
@@ -548,17 +633,17 @@ private fun TerminalHeader(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Model: ${model.ifBlank { "—" }}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            Text(status, color = if (connected) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         }
     }
 }
 
 @Composable
-private fun ChatPanel(lines: List<ChatLine>, listState: androidx.compose.foundation.lazy.LazyListState) {
+private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 14.dp),
+        contentPadding = PaddingValues(vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         if (lines.isEmpty()) {
@@ -590,6 +675,23 @@ private fun ChatPanel(lines: List<ChatLine>, listState: androidx.compose.foundat
                     lineHeight = 23.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
                 )
+                "thinking" -> Text(
+                    line.text,
+                    color = ThinkingText,
+                    fontFamily = FontFamily.Monospace,
+                    fontStyle = FontStyle.Italic,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
+                )
+                "tool" -> Text(
+                    line.text,
+                    color = TextMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(12.dp)
+                )
                 else -> Text(
                     line.text,
                     color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
@@ -618,7 +720,7 @@ private fun CommandPalette(
         remote.filter { it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach {
             add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true)
         }
-    }.take(9)
+    }.take(12)
     if (choices.isEmpty()) return
     Column(
         modifier
@@ -628,13 +730,13 @@ private fun CommandPalette(
             .border(1.dp, Border, RoundedCornerShape(12.dp))
             .padding(vertical = 4.dp)
     ) {
-        Text("Command Palette", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(12.dp, 8.dp))
+        Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(12.dp, 8.dp))
         choices.forEach { (cmd, remote) ->
             Row(
-                Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 10.dp),
+                Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(100.dp))
+                Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(104.dp))
                 Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
             }
         }
@@ -642,9 +744,15 @@ private fun CommandPalette(
 }
 
 @Composable
-private fun Composer(value: String, onValue: (String) -> Unit, onSlash: () -> Unit, onSend: () -> Unit) {
+private fun Composer(
+    value: String,
+    busy: Boolean,
+    onValue: (String) -> Unit,
+    onSlash: () -> Unit,
+    onPrimary: () -> Unit
+) {
     Row(
-        Modifier.fillMaxWidth().background(Color(0xFF07090B)).border(1.dp, Color(0xFF19232C)).padding(8.dp),
+        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C)).padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -657,13 +765,18 @@ private fun Composer(value: String, onValue: (String) -> Unit, onSlash: () -> Un
             value = value,
             onValueChange = onValue,
             modifier = Modifier.weight(1f),
-            placeholder = { Text("输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
+            placeholder = { Text(if (busy) "Pi 正在工作，可点右侧停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() })
+            keyboardActions = KeyboardActions(onSend = { onPrimary() })
         )
-        Button(onClick = onSend, modifier = Modifier.height(48.dp), enabled = value.isNotBlank()) {
-            Text("↵", fontFamily = FontFamily.Monospace, fontSize = 18.sp)
+        Button(
+            onClick = onPrimary,
+            modifier = Modifier.height(48.dp),
+            enabled = busy || value.isNotBlank(),
+            colors = if (busy) ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030)) else ButtonDefaults.buttonColors()
+        ) {
+            Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 18.sp)
         }
     }
 }
@@ -678,7 +791,7 @@ private fun Footer(state: PiState?, stats: PiStats?, status: String) {
         Text("ctx $context", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         Text("msg ${state?.messageCount ?: 0}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         Spacer(Modifier.weight(1f))
-        Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(status, color = if (status == "Ready") Accent else if (status == "Working") Blue else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
     }
 }
 
@@ -714,7 +827,7 @@ private fun ModelsPanel(models: List<PiModel>, state: PiState?, onBack: () -> Un
 
 @Composable
 private fun ThinkingPanel(current: String, onBack: () -> Unit, onPick: (String) -> Unit) {
-    val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh")
+    val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
     Column(Modifier.fillMaxSize()) {
         PanelHeader("/thinking", onBack)
         levels.forEach { level ->
@@ -750,8 +863,8 @@ private fun BashPanel(
             modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)
         )
         Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(input, onInput, Modifier.weight(1f), singleLine = true, label = { Text("$ command") })
-            if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF512C2C))) { Text("停止") }
+            OutlinedTextField(value = input, onValueChange = onInput, modifier = Modifier.weight(1f), singleLine = true, label = { Text("$ command") })
+            if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030))) { Text("停止") }
             else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") }
         }
     }
@@ -770,7 +883,7 @@ private fun FilesPanel(
     onSave: () -> Unit
 ) {
     Column(Modifier.fillMaxSize()) {
-        PanelHeader("/files · /${path}", onBack)
+        PanelHeader("/files · /$path", onBack)
         if (selectedFile.isBlank()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onUp, enabled = path.isNotBlank()) { Text("↑ 上级") }
@@ -793,7 +906,7 @@ private fun FilesPanel(
                 value = fileText,
                 onValueChange = onText,
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(10.dp),
-                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMain)
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMain)
             )
             Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onSave) { Text("保存") }
@@ -858,26 +971,24 @@ private fun SettingsPanel(
             onValueChange = onCwd,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             label = { Text("Pi 工作目录") },
-            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         )
         OutlinedTextField(
             value = launchCommand,
             onValueChange = onLaunch,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             label = { Text("Pi RPC 启动命令") },
-            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         )
         Text(
-            "默认直接使用 Termux 中的 Pi。若你的 Pi 在 proot/Ubuntu 中，把这里改成从 Termux 能执行的完整 RPC 启动命令。不要删掉 --mode rpc；如需真实 /tree，请保留 -e ~/.pi/android/pi-android-mobile.ts。",
+            "默认直接使用 Termux 中的 Pi。不要删掉 --mode rpc；Android 的 /resume、/tree、/fork 依赖 -e ~/.pi/android/pi-android-mobile.ts。",
             color = TextMuted,
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
             lineHeight = 18.sp,
             modifier = Modifier.padding(14.dp)
         )
-        Button(onClick = onConnect, modifier = Modifier.padding(14.dp)) {
-            Text(if (connected) "重新连接" else "连接 Pi")
-        }
+        Button(onClick = onConnect, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") }
     }
 }
 
@@ -896,7 +1007,7 @@ private fun ExtensionDialog(
             onDismissRequest = onDismiss,
             title = { Text(request.title.ifBlank { "选择" }) },
             text = {
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                LazyColumn(Modifier.heightIn(max = 460.dp)) {
                     items(request.options) { option ->
                         Text(
                             option,
