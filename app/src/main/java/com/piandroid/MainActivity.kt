@@ -587,7 +587,6 @@ private fun PiScreen(bridge: PiBridge) {
                 value = input,
                 busy = busy,
                 onValue = { input = it },
-                onSlash = { input = if (input.startsWith("/")) "" else "/" },
                 onPrimary = {
                     if (busy) {
                         status = "Stopping"
@@ -748,7 +747,6 @@ private fun Composer(
     value: String,
     busy: Boolean,
     onValue: (String) -> Unit,
-    onSlash: () -> Unit,
     onPrimary: () -> Unit
 ) {
     Row(
@@ -756,11 +754,6 @@ private fun Composer(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        TextButton(
-            onClick = onSlash,
-            modifier = Modifier.width(46.dp).height(48.dp),
-            colors = ButtonDefaults.textButtonColors(contentColor = Blue)
-        ) { Text("/", fontFamily = FontFamily.Monospace, fontSize = 21.sp) }
         OutlinedTextField(
             value = value,
             onValueChange = onValue,
