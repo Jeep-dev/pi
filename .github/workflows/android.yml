@@ -2,7 +2,7 @@ name: Build Pi Android
 on:
   workflow_dispatch:
   push:
-    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
+    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "tools/build_patch_v46.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -12,6 +12,8 @@ jobs:
         run: python3 tools/build_patch_v44.py
       - name: Apply PiTouch v4.5 direct resume patch
         run: python3 tools/build_patch_v45.py
+      - name: Apply PiTouch v4.6 command scroll and reasoning effort patch
+        run: python3 tools/build_patch_v46.py
       - name: Validate Pi bridge JavaScript
         run: node --check app/src/main/assets/pi-android-bridge.mjs
       - uses: actions/setup-java@v4
@@ -20,4 +22,4 @@ jobs:
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
-        with: { name: pi-android-v4.5-debug, path: app/build/outputs/apk/debug/*.apk }
+        with: { name: pi-android-v4.6-debug, path: app/build/outputs/apk/debug/*.apk }
