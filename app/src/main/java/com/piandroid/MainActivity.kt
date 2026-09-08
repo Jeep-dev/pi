@@ -1,5 +1,7 @@
 package com.piandroid
 
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -30,7 +32,24 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContent { PiScreen(PiBridge(this)) } }
+    private val termuxRunCommandPermission = "com.termux.permission.RUN_COMMAND"
+    private val termuxPermissionRequestCode = 7001
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestTermuxPermissionIfNeeded()
+        setContent { PiScreen(PiBridge(this)) }
+    }
+
+    private fun requestTermuxPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val termuxInstalled = runCatching {
+            packageManager.getPackageInfo("com.termux", 0)
+        }.isSuccess
+        if (termuxInstalled && checkSelfPermission(termuxRunCommandPermission) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(termuxRunCommandPermission), termuxPermissionRequestCode)
+        }
+    }
 }
 
 @Composable

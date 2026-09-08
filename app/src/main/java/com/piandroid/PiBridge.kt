@@ -66,6 +66,8 @@ class PiBridge(private val context: Context) {
                 .putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", pending)
             context.startService(intent)
             Result.success(Unit)
+        } catch (e: SecurityException) {
+            Result.failure(IllegalStateException("请在系统设置中给 Pi Android 开启“在 Termux 环境中运行命令”权限"))
         } catch (e: Exception) { Result.failure(e) }
     }
 
