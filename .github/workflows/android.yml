@@ -8,6 +8,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Pi bridge JavaScript
+        run: node --check app/src/main/assets/pi-android-bridge.mjs
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21", cache: gradle }
       - uses: android-actions/setup-android@v3
