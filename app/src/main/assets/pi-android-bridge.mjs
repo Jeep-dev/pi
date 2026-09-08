@@ -2,14 +2,21 @@ import http from "node:http";
 import { spawn, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import { existsSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17642);
 const execFileAsync = promisify(execFile);
+const termuxPrefix = process.env.PREFIX || "/data/data/com.termux/files/usr";
+const termuxHome = process.env.HOME || "/data/data/com.termux/files/home";
+const termuxBin = path.join(termuxPrefix, "bin");
+const termuxBash = path.join(termuxBin, "bash");
+const termuxPi = path.join(termuxBin, "pi");
+const nodeExecutable = process.execPath || path.join(termuxBin, "node");
 let child = null;
-let cwd = process.env.HOME || process.cwd();
+let cwd = termuxHome;
 let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
 let sequence = 0;
 let lastStderr = "";
@@ -75,22 +82,121 @@ function stopPi() {
   pending.clear();
 }
 
+function termuxEnvironment() {
+  const currentPath = process.env.PATH || "";
+  const requiredPath = [termuxBin, path.join(termuxBin, "applets")].filter(Boolean).join(":");
+  return {
+    ...process.env,
+    PREFIX: termuxPrefix,
+    HOME: termuxHome,
+    TMPDIR: process.env.TMPDIR || path.join(termuxPrefix, "tmp"),
+    PATH: currentPath.includes(termuxBin) ? currentPath : `${requiredPath}:${currentPath}`,
+  };
+}
+
+function expandHome(value) {
+  if (value === "~") return termuxHome;
+  if (value.startsWith("~/")) return path.join(termuxHome, value.slice(2));
+  return value;
+}
+
+function splitCommand(command) {
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let escaped = false;
+
+  for (const ch of command) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (escaped) current += "\\";
+  if (quote) throw new Error("Pi launch command has an unterminated quote");
+  if (current) parts.push(current);
+  return parts;
+}
+
+function spawnPi(nextLaunchCommand, nextCwd) {
+  const parts = splitCommand(nextLaunchCommand);
+  if (!parts.length) throw new Error("Pi launch command is empty");
+
+  const executable = expandHome(parts[0]);
+  const args = parts.slice(1).map(expandHome);
+  const isPiCommand = executable === "pi" || executable === termuxPi || path.basename(executable) === "pi";
+  const env = termuxEnvironment();
+
+  if (isPiCommand) {
+    const piScript = executable === "pi" ? termuxPi : executable;
+    if (!existsSync(nodeExecutable)) throw new Error(`Termux Node not found: ${nodeExecutable}`);
+    if (!existsSync(piScript)) throw new Error(`Pi executable not found: ${piScript}`);
+
+    addEvent({
+      type: "launcher_info",
+      text: `Starting Pi with Node directly: ${nodeExecutable} ${piScript}`,
+    });
+
+    return spawn(nodeExecutable, [piScript, ...args], {
+      cwd: nextCwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  if (!existsSync(termuxBash)) throw new Error(`Termux bash not found: ${termuxBash}`);
+  addEvent({ type: "launcher_info", text: `Starting custom command with Termux bash: ${nextLaunchCommand}` });
+  return spawn(termuxBash, ["-lc", nextLaunchCommand], {
+    cwd: nextCwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
 async function startPi(nextCwd, nextLaunchCommand) {
   stopPi();
-  cwd = nextCwd || cwd;
+  cwd = expandHome((nextCwd || cwd).trim()) || termuxHome;
   launchCommand = (nextLaunchCommand || launchCommand).trim();
   if (!launchCommand) throw new Error("Pi launch command is empty");
   lastStderr = "";
-  child = spawn("bash", ["-lc", launchCommand], {
-    cwd,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+
+  try {
+    child = spawnPi(launchCommand, cwd);
+  } catch (error) {
+    throw new Error(`Pi launcher failed: ${String(error?.message || error)}`);
+  }
+
   attachJsonl(child.stdout);
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", text => {
     lastStderr = (lastStderr + text).slice(-8000);
     addEvent({ type: "stderr", text });
+  });
+  child.on("error", error => {
+    lastStderr = (lastStderr + `\n${error.message}`).slice(-8000);
+    addEvent({ type: "stderr", text: error.message });
   });
   child.on("exit", (code, signal) => {
     addEvent({ type: "process_exit", code, signal, stderr: lastStderr });
@@ -101,7 +207,7 @@ async function startPi(nextCwd, nextLaunchCommand) {
     pending.clear();
     child = null;
   });
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await new Promise(resolve => setTimeout(resolve, 450));
   if (!child || child.exitCode != null) throw new Error(lastStderr.trim() || "Pi failed to start");
 }
 
@@ -173,6 +279,13 @@ const server = http.createServer(async (req, res) => {
         launchCommand,
         latest: sequence,
         lastStderr,
+        launcher: {
+          node: nodeExecutable,
+          pi: termuxPi,
+          bash: termuxBash,
+          prefix: termuxPrefix,
+          home: termuxHome,
+        },
       });
     }
 
