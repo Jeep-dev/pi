@@ -16,7 +16,8 @@ import java.net.URLEncoder
 class PiBridge(private val context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
-    private val port = 17642
+    private val port = 17643
+    private val expectedBridgeVersion = "2026-09-09.3"
     private var nextId = 3000
 
     fun termuxAvailable(): Boolean = runCatching {
@@ -38,21 +39,31 @@ class PiBridge(private val context: Context) {
                 printf '%s' '$extension' | base64 -d > ~/.pi/android/pi-android-mobile.ts &&
                 chmod 700 ~/.pi/android/bridge.mjs &&
                 if [ -f ~/.pi/android/bridge.pid ]; then kill "\$(cat ~/.pi/android/bridge.pid)" 2>/dev/null || true; fi &&
-                sleep 0.2 &&
-                nohup node ~/.pi/android/bridge.mjs > ~/.pi/android/bridge.log 2>&1 &
+                sleep 0.35 &&
+                PI_ANDROID_PORT=$port nohup node ~/.pi/android/bridge.mjs > ~/.pi/android/bridge.log 2>&1 &
                 echo \$! > ~/.pi/android/bridge.pid
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
         }
     }
 
-    suspend fun waitForBridge(timeoutMillis: Long = 12_000): Result<Unit> {
+    suspend fun waitForBridge(timeoutMillis: Long = 15_000): Result<Unit> {
         val attempts = (timeoutMillis / 250).toInt().coerceAtLeast(1)
+        var lastSeenVersion = ""
         repeat(attempts) {
-            if (request("/health", null, 1200).isSuccess) return Result.success(Unit)
+            request("/health", null, 1200).onSuccess { raw ->
+                val version = runCatching { JSONObject(raw).optString("bridgeVersion") }.getOrDefault("")
+                lastSeenVersion = version
+                if (version == expectedBridgeVersion) return Result.success(Unit)
+            }
             delay(250)
         }
-        return Result.failure(IllegalStateException("Bridge 启动超时。打开 Termux 检查 ~/.pi/android/bridge.log"))
+        val detail = if (lastSeenVersion.isBlank()) {
+            "没有检测到新版 bridge"
+        } else {
+            "检测到旧 bridge：$lastSeenVersion，期望：$expectedBridgeVersion"
+        }
+        return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 ~/.pi/android/bridge.log"))
     }
 
     suspend fun start(cwd: String, launchCommand: String): Result<PiState> {
