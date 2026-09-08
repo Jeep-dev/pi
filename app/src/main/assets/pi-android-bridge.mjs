@@ -7,7 +7,8 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-const port = Number(process.env.PI_ANDROID_PORT || 17642);
+const port = Number(process.env.PI_ANDROID_PORT || 17643);
+const bridgeVersion = "2026-09-09.3";
 const execFileAsync = promisify(execFile);
 const termuxPrefix = process.env.PREFIX || "/data/data/com.termux/files/usr";
 const termuxHome = process.env.HOME || "/data/data/com.termux/files/home";
@@ -274,6 +275,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/health") {
       return send(res, 200, {
         ok: true,
+        bridgeVersion,
         piRunning: !!child && child.exitCode == null,
         cwd,
         launchCommand,
@@ -399,5 +401,5 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Pi Android bridge listening on 127.0.0.1:${port}`);
+  console.log(`Pi Android bridge ${bridgeVersion} listening on 127.0.0.1:${port}`);
 });
