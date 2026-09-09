@@ -1,5 +1,8 @@
 package com.piandroid
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.os.Build
@@ -273,23 +276,38 @@ private fun PiScreen(bridge: PiBridge) {
     var dialogInput by remember { mutableStateOf("") }
     var resumeSessions by remember { mutableStateOf<List<PiSession>>(emptyList()) }
     var resumeOpen by remember { mutableStateOf(false) }
+    var resumeFilter by remember { mutableStateOf("") }
+    var modelInitialSearch by remember { mutableStateOf("") }
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
 
     val localCommands = remember {
         listOf(
+            LocalCommand("help", "查看 Android Agent 命令总览"),
             LocalCommand("resume", "选择并继续以前的 session"),
-            LocalCommand("model", "切换模型"),
-            LocalCommand("thinking", "切换 thinking level"),
+            LocalCommand("model", "选择模型，支持 provider/model 参数"),
+            LocalCommand("thinking", "设置 thinking level"),
+            LocalCommand("scoped-models", "浏览可用模型并设置默认模型"),
             LocalCommand("new", "新建 session"),
             LocalCommand("name", "给当前 session 命名"),
             LocalCommand("session", "查看 session / token / cost"),
-            LocalCommand("tree", "打开当前 Session Tree"),
+            LocalCommand("tree", "导航当前 session 的完整分支树"),
             LocalCommand("fork", "从以前的用户消息创建 fork"),
             LocalCommand("clone", "克隆当前 active branch"),
-            LocalCommand("compact", "压缩当前上下文"),
-            LocalCommand("settings", "连接与启动设置"),
-            LocalCommand("run", "通过 Pi RPC 执行 bash"),
-            LocalCommand("files", "浏览当前项目文件"),
+            LocalCommand("compact", "压缩当前上下文，可带自定义指令"),
+            LocalCommand("export", "导出当前分支为 HTML 或 JSONL"),
+            LocalCommand("import", "导入并继续 JSONL session"),
+            LocalCommand("share", "创建私密 Gist 分享当前分支"),
+            LocalCommand("copy", "复制最后一条助手消息"),
+            LocalCommand("trust", "保存项目目录信任设置"),
+            LocalCommand("reload", "重新加载扩展、skills、prompts 和上下文"),
+            LocalCommand("login", "查看安全的 Provider 登录方式"),
+            LocalCommand("logout", "查看安全的 Provider 退出方式"),
+            LocalCommand("hotkeys", "查看移动端手势与操作"),
+            LocalCommand("changelog", "查看此 Android 版本更新内容"),
+            LocalCommand("quit", "保存并停止当前 Pi 进程"),
+            LocalCommand("settings", "连接与运行设置"),
+            LocalCommand("run", "通过 Pi RPC 执行 bash（也支持 ! / !!）"),
+            LocalCommand("files", "浏览及编辑当前项目文件"),
             LocalCommand("diff", "查看当前 Git diff"),
             LocalCommand("abort", "停止当前 Agent 操作")
         )
@@ -476,25 +494,127 @@ private fun PiScreen(bridge: PiBridge) {
             addSystem("还没有连接 Pi。点顶部 Connect 或输入 /settings。")
             return
         }
+        if (text.startsWith("!")) {
+            val excluded = text.startsWith("!!")
+            val bashCommand = text.removePrefix(if (excluded) "!!" else "!").trim()
+            if (bashCommand.isBlank()) return
+            panel = Panel.Bash
+            bashInput = bashCommand
+            scope.launch {
+                bashRunning = true
+                bashOutput = "$ ${if (excluded) "!" else ""}$bashCommand\n"
+                bridge.bash(bashCommand, excluded).fold(
+                    onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]${if (excluded) " · excluded from context" else ""}" },
+                    onFailure = { bashOutput += "ERROR: ${it.message}" }
+                )
+                bashRunning = false
+                refreshMeta()
+            }
+            return
+        }
+
         val command = text.substringBefore(' ')
         val args = text.substringAfter(' ', "").trim()
         when (command) {
+            "/help" -> addSystem(
+                """Pi Android 命令
+                |会话：/new /resume [搜索] /name /tree [id] /fork [id] /clone /compact [指令]
+                |模型：/model [provider/model] /thinking [level] /scoped-models
+                |数据：/session /copy /export [file] /import <file.jsonl> /share
+                |运行：!command（写入上下文） · !!command（不写入上下文） · /abort
+                |资源：/reload /trust /files /diff /settings
+                |系统：/hotkeys /changelog /login /logout /quit""".trimMargin()
+            )
             "/resume" -> scope.launch {
                 bridge.sessions().fold(
                     onSuccess = { sessions ->
                         resumeSessions = sessions
+                        resumeFilter = args
                         resumeOpen = true
                     },
                     onFailure = { addSystem("/resume 失败：${it.message}") }
                 )
             }
-            "/tree", "/fork", "/name" -> sendExtensionCommand(text)
-            "/model" -> panel = Panel.Models
-            "/thinking" -> panel = Panel.Thinking
+            "/tree", "/fork", "/name", "/export", "/import", "/share", "/trust", "/reload", "/login", "/logout", "/quit" -> sendExtensionCommand(text)
+            "/copy" -> scope.launch {
+                bridge.lastAssistantText().fold(
+                    onSuccess = { copied ->
+                        if (copied.isBlank()) {
+                            addSystem("还没有可复制的助手消息")
+                        } else {
+                            val clipboard = bridge.applicationContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Pi assistant message", copied))
+                            addSystem("已复制最后一条助手消息")
+                        }
+                    },
+                    onFailure = { addSystem("/copy 失败：${it.message}") }
+                )
+            }
+            "/model" -> {
+                if (args.isBlank()) {
+                    modelInitialSearch = ""
+                    panel = Panel.Models
+                } else {
+                    val needle = args.lowercase()
+                    val exact = models.filter {
+                        it.id.lowercase() == needle ||
+                            "${it.provider}/${it.id}".lowercase() == needle ||
+                            it.name.lowercase() == needle
+                    }
+                    if (exact.size == 1) scope.launch {
+                        bridge.setModel(exact.first()).fold(
+                            onSuccess = { refreshMeta(); addSystem("模型已切换为 ${exact.first().provider}/${exact.first().id}") },
+                            onFailure = { addSystem("切换模型失败：${it.message}") }
+                        )
+                    } else {
+                        modelInitialSearch = args
+                        panel = Panel.Models
+                        if (exact.isEmpty()) addSystem("没有唯一精确匹配，已按“$args”筛选模型")
+                    }
+                }
+            }
+            "/scoped-models" -> {
+                modelInitialSearch = ""
+                panel = Panel.Models
+                addSystem("移动端没有 Ctrl+P 循环；可在此切换当前模型或设置新会话默认模型")
+            }
+            "/thinking" -> {
+                if (args.isBlank()) panel = Panel.Thinking
+                else {
+                    val levels = setOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+                    val level = args.lowercase()
+                    if (level !in levels) addSystem("未知 thinking level：$args；可用：${levels.joinToString()}")
+                    else scope.launch {
+                        bridge.setThinking(level).fold(
+                            onSuccess = { refreshMeta(); addSystem("Thinking = $level") },
+                            onFailure = { addSystem("Thinking 设置失败：${it.message}") }
+                        )
+                    }
+                }
+            }
             "/session" -> {
                 panel = Panel.Stats
                 scope.launch { bridge.stats().onSuccess { currentStats = it }.onFailure { addSystem(it.message.orEmpty()) } }
             }
+            "/hotkeys" -> addSystem(
+                """移动端操作
+                |• 输入 /：打开可搜索命令面板
+                |• 发送中点击 ■：中止当前 Agent
+                |• 滑动离开底部：暂停跟随；回到底部自动恢复
+                |• 滑动时右侧 ↑/↓：跳到顶部/真实底部
+                |• 长按消息：选择并复制文本
+                |• 工具卡片：默认 10 行，可展开全部实时输出
+                |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
+            )
+            "/changelog" -> addSystem(
+                """Pi Android v5.12
+                |• 补齐原版 Pi 核心斜杠命令入口
+                |• /tree 完整分支导航、搜索、摘要和编辑器恢复
+                |• /export、/import、/share、/copy、/trust、/reload、/quit
+                |• /model 与 /thinking 支持直接参数
+                |• 支持原版 ! / !! bash 语义
+                |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
+            )
             "/run" -> {
                 panel = Panel.Bash
                 if (args.isNotBlank()) {
@@ -605,7 +725,14 @@ private fun PiScreen(bridge: PiBridge) {
                         "tool_execution_start" -> startTool(event.toolCallId, event.text)
                         "tool_execution_update" -> updateTool(event.toolCallId, event.text)
                         "tool_execution_end" -> finishTool(event.toolCallId, event.text)
-                        "stderr", "process_exit", "extension_error" -> addSystem(event.text)
+                        "stderr", "extension_error" -> addSystem(event.text)
+                        "process_exit" -> {
+                            settleStreams()
+                            addSystem(event.text)
+                            status = "Disconnected"
+                            connected = false
+                            AgentKeepAliveService.stop(bridge.applicationContext())
+                        }
                         "compaction_start" -> status = "Compacting"
                         "compaction_end" -> status = "Ready"
                         "extension_ui_request" -> {
@@ -701,11 +828,26 @@ private fun PiScreen(bridge: PiBridge) {
             onDismissRequest = { resumeOpen = false },
             title = { Text("/resume · 选择会话") },
             text = {
-                if (resumeSessions.isEmpty()) {
-                    Text("当前工作目录没有可恢复的 Pi session。", color = TextMuted)
-                } else {
-                    LazyColumn(Modifier.heightIn(max = 500.dp)) {
-                        items(resumeSessions) { session ->
+                val resumeTokens = resumeFilter.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+                val visibleSessions = resumeSessions.filter { session ->
+                    val searchable = "${session.title} ${session.path}".lowercase()
+                    resumeTokens.all { it in searchable }
+                }
+                Column(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = resumeFilter,
+                        onValueChange = { resumeFilter = it },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        placeholder = { Text("搜索名称、首条消息或 Session ID") },
+                        singleLine = true,
+                        textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    )
+                    if (resumeSessions.isEmpty()) {
+                        Text("当前工作目录没有可恢复的 Pi session。", color = TextMuted)
+                    } else if (visibleSessions.isEmpty()) {
+                        Text("没有匹配的 session。", color = TextMuted, modifier = Modifier.padding(vertical = 12.dp))
+                    } else LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                        items(visibleSessions) { session ->
                             Column(
                                 Modifier
                                     .fillMaxWidth()
@@ -783,6 +925,7 @@ private fun PiScreen(bridge: PiBridge) {
                 Panel.Models -> ModelsPanel(
                     models = models,
                     state = currentState,
+                    initialSearch = modelInitialSearch,
                     defaultModelKey = defaultModelKey,
                     onBack = { panel = Panel.Chat },
                     onSetDefault = { model ->
@@ -873,9 +1016,18 @@ private fun PiScreen(bridge: PiBridge) {
                     cwd = cwd,
                     launchCommand = launchCommand,
                     connected = connected,
+                    autoCompaction = currentState?.autoCompactionEnabled ?: true,
                     onCwd = { cwd = it },
                     onLaunch = { launchCommand = it },
                     onConnect = connect,
+                    onAutoCompaction = { enabled ->
+                        scope.launch {
+                            bridge.setAutoCompaction(enabled).fold(
+                                onSuccess = { refreshMeta(); addSystem("自动压缩：${if (enabled) "开启" else "关闭"}") },
+                                onFailure = { addSystem("自动压缩设置失败：${it.message}") }
+                            )
+                        }
+                    },
                     onBack = { panel = Panel.Chat }
                 )
             }
@@ -923,7 +1075,7 @@ private fun PiScreen(bridge: PiBridge) {
                     modifier = Modifier.align(Alignment.BottomCenter),
                     onPick = { name, remote ->
                         input = ""
-                        if (remote) input = "/$name " else executeInput("/$name")
+                        if (remote || name == "import") input = "/$name " else executeInput("/$name")
                     }
                 )
             }
@@ -1333,13 +1485,20 @@ private fun PanelHeader(title: String, onBack: () -> Unit) {
 private fun ModelsPanel(
     models: List<PiModel>,
     state: PiState?,
+    initialSearch: String,
     defaultModelKey: String,
     onBack: () -> Unit,
     onSetDefault: (PiModel) -> Unit,
     onPick: (PiModel) -> Unit,
     onEffort: (String) -> Unit
 ) {
-    val effortLevels = listOf("low", "medium", "high", "xhigh", "max")
+    val effortLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+    var search by remember(initialSearch) { mutableStateOf(initialSearch) }
+    val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+    val visibleModels = models.filter { model ->
+        val searchable = "${model.provider} ${model.id} ${model.name}".lowercase()
+        tokens.all { it in searchable }
+    }
     Column(Modifier.fillMaxSize()) {
         PanelHeader("/model", onBack)
         LazyColumn(
@@ -1372,9 +1531,23 @@ private fun ModelsPanel(
                 }
             }
             item {
-                Text("Models", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    placeholder = { Text("搜索 provider、模型名称或 ID") },
+                    singleLine = true,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                )
+                Text(
+                    "Models · ${visibleModels.size}/${models.size}",
+                    color = TextMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
+                )
             }
-            items(models) { model ->
+            items(visibleModels) { model ->
                 val selected = state?.provider == model.provider && state.modelId == model.id
                 val isDefault = defaultModelKey == "${model.provider}/${model.id}"
                 Row(
@@ -1531,9 +1704,11 @@ private fun SettingsPanel(
     cwd: String,
     launchCommand: String,
     connected: Boolean,
+    autoCompaction: Boolean,
     onCwd: (String) -> Unit,
     onLaunch: (String) -> Unit,
     onConnect: () -> Unit,
+    onAutoCompaction: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -1552,6 +1727,17 @@ private fun SettingsPanel(
             label = { Text("Pi RPC 启动命令") },
             textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         )
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp)
+            }
+            Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace)
+        }
         Text(
             "默认直接使用 Termux 中的 Pi。不要删掉 --mode rpc；Android 的 /resume、/tree、/fork 依赖 -e ~/.pi/android/pi-android-mobile.ts。",
             color = TextMuted,

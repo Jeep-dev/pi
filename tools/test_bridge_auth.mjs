@@ -61,7 +61,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-10.1");
+  assert.equal(health.bridgeVersion, "2026-09-10.2");
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -69,6 +69,12 @@ try {
   });
   assert.equal(idleEvents.status, 200);
   assert.ok(Date.now() - waitStarted >= 90, "event endpoint should long-poll while idle");
+
+  const resetCursor = await fetch(`http://127.0.0.1:${port}/events?after=999999&wait=0`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(resetCursor.status, 200);
+  assert.equal((await resetCursor.json()).gap, true, "a cursor ahead of a restarted bridge must trigger history recovery");
 
   const missing = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(missing.status, 401);

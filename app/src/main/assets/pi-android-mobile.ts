@@ -1,3 +1,12 @@
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, join, parse, resolve } from "node:path";
+import { promisify } from "node:util";
+import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
+
+const execFileAsync = promisify(execFile);
+
 export default function (pi: any) {
   function textOf(content: any): string {
     if (typeof content === "string") return content;
@@ -11,6 +20,65 @@ export default function (pi: any) {
   function preview(value: string, limit = 92): string {
     const clean = value.replace(/\s+/g, " ").trim();
     return clean.length > limit ? clean.slice(0, limit) + "…" : clean || "(empty)";
+  }
+
+  function pathArgument(value: string): string {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  }
+
+  function resolveUserPath(value: string, cwd: string): string {
+    const trimmed = pathArgument(value);
+    if (trimmed === "~") return homedir();
+    if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+    return resolve(cwd, trimmed);
+  }
+
+  function writeActiveBranch(ctx: any, outputPath: string): string {
+    const source = ctx.sessionManager.getSessionFile();
+    const header = source && existsSync(source)
+      ? JSON.parse(readFileSync(source, "utf8").split(/\r?\n/, 1)[0])
+      : {
+          type: "session",
+          version: 3,
+          id: ctx.sessionManager.getSessionId(),
+          timestamp: new Date().toISOString(),
+          cwd: ctx.cwd,
+        };
+    const lines = [JSON.stringify({ ...header, cwd: ctx.cwd })];
+    let parentId: string | null = null;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      lines.push(JSON.stringify({ ...entry, parentId }));
+      parentId = String(entry.id);
+    }
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+    return outputPath;
+  }
+
+  async function exportActiveBranch(ctx: any, requested: string): Promise<string> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputPath = resolveUserPath(requested || `pi-session-${stamp}.html`, ctx.cwd);
+    if (extname(outputPath).toLowerCase() === ".jsonl") return writeActiveBranch(ctx, outputPath);
+
+    const htmlPath = extname(outputPath) ? outputPath : `${outputPath}.html`;
+    const temporaryJsonl = join(tmpdir(), `pi-android-export-${process.pid}-${Date.now()}.jsonl`);
+    writeActiveBranch(ctx, temporaryJsonl);
+    try {
+      const piExecutable = join(process.env.PREFIX || "/data/data/com.termux/files/usr", "bin", "pi");
+      await execFileAsync(piExecutable, ["--export", temporaryJsonl, htmlPath], {
+        cwd: ctx.cwd,
+        env: process.env,
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return htmlPath;
+    } finally {
+      try { await import("node:fs/promises").then((fs) => fs.unlink(temporaryJsonl)); } catch {}
+    }
   }
 
   function userPoints(ctx: any) {
@@ -222,6 +290,133 @@ export default function (pi: any) {
       if (name === undefined) return;
       pi.setSessionName(String(name).trim());
       ctx.ui.notify(`会话名称：${String(name).trim() || "(none)"}`, "info");
+    },
+  });
+
+  pi.registerCommand("export", {
+    description: "Export the active branch to HTML or JSONL",
+    handler: async (args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      try {
+        const output = await exportActiveBranch(ctx, pathArgument(String(args || "")));
+        ctx.ui.notify(`已导出当前分支：${output}`, "info");
+      } catch (error: any) {
+        ctx.ui.notify(`导出失败：${error?.message || error}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("import", {
+    description: "Import and resume a JSONL session",
+    handler: async (args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const input = pathArgument(String(args || ""));
+      if (!input) {
+        ctx.ui.notify("用法：/import <path.jsonl>", "warning");
+        return;
+      }
+      const source = resolveUserPath(input, ctx.cwd);
+      if (!existsSync(source) || extname(source).toLowerCase() !== ".jsonl") {
+        ctx.ui.notify(`找不到 JSONL session：${source}`, "error");
+        return;
+      }
+      const confirmed = await ctx.ui.confirm("Import session", `导入并切换到 ${source}？`);
+      if (!confirmed) return;
+
+      const currentFile = ctx.sessionManager.getSessionFile();
+      const sessionDir = currentFile ? dirname(currentFile) : join(homedir(), ".pi", "agent", "sessions");
+      mkdirSync(sessionDir, { recursive: true });
+      let destination = join(sessionDir, basename(source));
+      if (resolve(source) !== resolve(destination)) {
+        const parts = parse(destination);
+        let suffix = 1;
+        while (existsSync(destination)) destination = join(parts.dir, `${parts.name}-${suffix++}${parts.ext}`);
+        copyFileSync(source, destination, constants.COPYFILE_EXCL);
+      }
+      const importedFrom = source;
+      const result = await ctx.switchSession(destination, {
+        withSession: async (next: any) => {
+          next.ui.notify(`已导入 session：${importedFrom}`, "info");
+          next.ui.notify("ANDROID_SESSION_SWITCHED", "info");
+        },
+      });
+      if (result.cancelled) ctx.ui.notify("导入已取消", "warning");
+    },
+  });
+
+  pi.registerCommand("share", {
+    description: "Share the active branch as a private GitHub gist",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const confirmed = await ctx.ui.confirm("Share session", "将当前分支导出并创建私密 GitHub Gist？");
+      if (!confirmed) return;
+      const directory = join(tmpdir(), `pi-android-share-${process.pid}-${Date.now()}`);
+      mkdirSync(directory, { recursive: true });
+      const html = join(directory, "session.html");
+      try {
+        await exportActiveBranch(ctx, html);
+        const { stdout } = await execFileAsync("gh", ["gist", "create", "--public=false", html], {
+          cwd: ctx.cwd,
+          env: process.env,
+          timeout: 120_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const gistUrl = stdout.trim();
+        const gistId = gistUrl.split("/").pop();
+        if (!gistId) throw new Error("无法读取 Gist ID");
+        ctx.ui.notify(`分享链接：https://pi.dev/session/#${gistId}\nGist：${gistUrl}`, "info");
+      } catch (error: any) {
+        ctx.ui.notify(`分享失败：${error?.message || error}。请先在 Termux 运行 gh auth login。`, "error");
+      } finally {
+        try { await import("node:fs/promises").then((fs) => fs.rm(directory, { recursive: true, force: true })); } catch {}
+      }
+    },
+  });
+
+  pi.registerCommand("trust", {
+    description: "Save the project trust decision",
+    handler: async (_args: string, ctx: any) => {
+      const store = new ProjectTrustStore(join(homedir(), ".pi", "agent"));
+      const existing = store.get(ctx.cwd);
+      const choice = await ctx.ui.select(`Project trust · 当前：${existing === null ? "未设置" : existing ? "trusted" : "untrusted"}`, [
+        "Trust this directory",
+        "Do not trust this directory",
+        "Clear saved decision",
+      ]);
+      if (!choice) return;
+      store.set(ctx.cwd, choice === "Clear saved decision" ? null : choice === "Trust this directory");
+      ctx.ui.notify("信任设置已保存；执行 /reload 或重新连接后生效", "info");
+    },
+  });
+
+  pi.registerCommand("reload", {
+    description: "Reload extensions, skills, prompts, themes, and context files",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      await ctx.reload();
+      ctx.ui.notify("资源已重新加载", "info");
+    },
+  });
+
+  pi.registerCommand("login", {
+    description: "Show secure provider authentication instructions",
+    handler: async (_args: string, ctx: any) => {
+      ctx.ui.notify("为避免在 Android 对话记录中暴露密钥，认证请在 Termux 原版 Pi 中执行 /login；完成后回到这里执行 /reload。", "warning");
+    },
+  });
+
+  pi.registerCommand("logout", {
+    description: "Show secure provider logout instructions",
+    handler: async (_args: string, ctx: any) => {
+      ctx.ui.notify("凭据删除请在 Termux 原版 Pi 中执行 /logout；完成后回到这里执行 /reload。", "warning");
+    },
+  });
+
+  pi.registerCommand("quit", {
+    description: "Gracefully stop the current Pi RPC process",
+    handler: async (_args: string, ctx: any) => {
+      const confirmed = await ctx.ui.confirm("Quit Pi", "保存 session 并停止当前 Agent？");
+      if (confirmed) ctx.shutdown();
     },
   });
 }

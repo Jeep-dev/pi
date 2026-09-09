@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.1";
+const bridgeVersion = "2026-09-10.2";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -576,15 +576,38 @@ const server = http.createServer(async (req, res) => {
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") });
     }
+    if (req.method === "POST" && url.pathname === "/cycle-model") return rpcResponse(res, { type: "cycle_model" });
 
     if (req.method === "POST" && url.pathname === "/thinking") {
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") });
     }
+    if (req.method === "POST" && url.pathname === "/cycle-thinking") return rpcResponse(res, { type: "cycle_thinking_level" });
+
+    if (req.method === "POST" && url.pathname === "/auto-compaction") {
+      const input = JSON.parse(await readBody(req));
+      return rpcResponse(res, { type: "set_auto_compaction", enabled: Boolean(input.enabled) });
+    }
+
+    if (req.method === "GET" && url.pathname === "/last-assistant") {
+      return rpcResponse(res, { type: "get_last_assistant_text" });
+    }
+
+    if (req.method === "POST" && url.pathname === "/export-html") {
+      const input = JSON.parse(await readBody(req) || "{}");
+      return rpcResponse(res, {
+        type: "export_html",
+        ...(input.outputPath ? { outputPath: String(input.outputPath) } : {}),
+      }, 120_000);
+    }
 
     if (req.method === "POST" && url.pathname === "/bash") {
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "bash", command: String(input.command || "") }, 4 * 60 * 60 * 1000);
+      return rpcResponse(res, {
+        type: "bash",
+        command: String(input.command || ""),
+        excludeFromContext: Boolean(input.excludeFromContext),
+      }, 4 * 60 * 60 * 1000);
     }
 
     if (req.method === "POST" && url.pathname === "/abort-bash") return rpcResponse(res, { type: "abort_bash" });
@@ -604,7 +627,7 @@ const server = http.createServer(async (req, res) => {
         events: events.filter(item => item.seq > after),
         latest: sequence,
         earliest,
-        gap: after > 0 && after < earliest - 1,
+        gap: after > sequence || (after > 0 && after < earliest - 1),
       });
     }
 

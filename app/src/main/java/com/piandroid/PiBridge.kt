@@ -18,7 +18,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.1"
+    private val expectedBridgeVersion = "2026-09-10.2"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -181,6 +181,21 @@ class PiBridge(context: Context) {
         return request("/thinking", JSONObject().put("level", level).toString()).map { Unit }
     }
 
+    suspend fun setAutoCompaction(enabled: Boolean): Result<Unit> {
+        return request("/auto-compaction", JSONObject().put("enabled", enabled).toString()).map { Unit }
+    }
+
+    suspend fun lastAssistantText(): Result<String> = rpcData("/last-assistant").mapCatching { data ->
+        data.optString("text")
+    }
+
+    suspend fun exportHtml(outputPath: String = ""): Result<String> {
+        val body = JSONObject().apply { if (outputPath.isNotBlank()) put("outputPath", outputPath) }
+        return request("/export-html", body.toString(), 130_000).mapCatching { raw ->
+            JSONObject(raw).optJSONObject("data")?.optString("path").orEmpty()
+        }
+    }
+
     suspend fun commands(): Result<List<PiCommand>> = rpcData("/commands").mapCatching { data ->
         val array = data.optJSONArray("commands") ?: JSONArray()
         buildList {
@@ -197,8 +212,11 @@ class PiBridge(context: Context) {
         }
     }
 
-    suspend fun bash(command: String): Result<PiBashResult> {
-        val body = JSONObject().put("command", command).toString()
+    suspend fun bash(command: String, excludeFromContext: Boolean = false): Result<PiBashResult> {
+        val body = JSONObject()
+            .put("command", command)
+            .put("excludeFromContext", excludeFromContext)
+            .toString()
         return request("/bash", body, 4 * 60 * 60 * 1000).mapCatching { raw ->
             val data = JSONObject(raw).optJSONObject("data") ?: JSONObject()
             PiBashResult(

@@ -29,6 +29,10 @@ class AgentKeepAliveService : Service() {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
             bridgeContext.startForegroundService(intent)
         }
+
+        fun stop(bridgeContext: Context) {
+            bridgeContext.stopService(Intent(bridgeContext, AgentKeepAliveService::class.java))
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
