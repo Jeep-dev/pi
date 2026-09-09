@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -645,7 +646,7 @@ private fun PiScreen(bridge: PiBridge) {
     }
 
     LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput) {
-        if (followOutput && lines.isNotEmpty()) chatListState.scrollToItem(lines.lastIndex)
+        if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
     }
 
     LaunchedEffect(connected) {
@@ -885,7 +886,7 @@ private fun PiScreen(bridge: PiBridge) {
                         .clickable {
                             followOutput = true
                             scope.launch {
-                                if (lines.isNotEmpty()) chatListState.animateScrollToItem(lines.lastIndex)
+                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
                             }
                         }
                         .padding(horizontal = 17.dp, vertical = 10.dp)
@@ -963,6 +964,16 @@ private fun TerminalHeader(
     }
 }
 
+private suspend fun LazyListState.scrollToRealBottom(lastIndex: Int) {
+    if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) {
+        scrollToItem(lastIndex)
+    }
+    repeat(8) {
+        val moved = scrollBy(1_000_000f)
+        if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return
+    }
+}
+
 @Composable
 private fun ChatPanel(
     lines: List<ChatLine>,
@@ -976,13 +987,7 @@ private fun ChatPanel(
     onFollowChange: (Boolean) -> Unit,
     onToggleTool: (String) -> Unit
 ) {
-    fun isAtBottom(): Boolean {
-        val layout = listState.layoutInfo
-        if (layout.totalItemsCount == 0) return true
-        val last = layout.visibleItemsInfo.lastOrNull() ?: return false
-        return last.index == layout.totalItemsCount - 1 &&
-            last.offset + last.size <= layout.viewportEndOffset + 2
-    }
+    fun isAtBottom(): Boolean = !listState.canScrollForward
 
     val userScrollLock = remember(listState) {
         object : NestedScrollConnection {
@@ -1007,13 +1012,13 @@ private fun ChatPanel(
         state = listState,
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = 3.dp)
             .nestedScroll(userScrollLock),
         contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item(key = "session-meta") {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 2.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                     Text(
@@ -1083,11 +1088,11 @@ private fun ChatPanel(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 15.sp,
                     lineHeight = 22.sp,
-                    modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(14.dp)
+                    modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 12.dp)
                 )
                 "assistant" -> PiMarkdown(
                     visibleText,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
                 )
                 "thinking" -> Text(
                     markdownText(visibleText),
@@ -1096,10 +1101,10 @@ private fun ChatPanel(
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                     lineHeight = 20.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 3.dp)
                 )
                 "tool", "tool-draft" -> Column(
-                    Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(10.dp)
+                    Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(horizontal = 6.dp, vertical = 10.dp)
                 ) {
                     Text(
                         visibleText,
