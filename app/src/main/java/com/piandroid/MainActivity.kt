@@ -38,6 +38,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +56,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -68,6 +71,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
     private val permissionRequestCode = 7001
+    private val bridge by lazy { PiBridge(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,7 +82,7 @@ class MainActivity : ComponentActivity() {
             window.decorView.systemUiVisibility = 0
         }
         requestTermuxPermissionIfNeeded()
-        setContent { PiTouchApp(PiBridge(this)) }
+        setContent { PiTouchApp(bridge) }
     }
 
     private fun requestTermuxPermissionIfNeeded() {
@@ -125,9 +129,10 @@ private fun PiTouchApp(bridge: PiBridge) {
 @Composable
 private fun PiScreen(bridge: PiBridge) {
     var cwd by rememberSaveable { mutableStateOf("/data/data/com.termux/files/home") }
-    var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts") }
+    var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc") }
     var input by rememberSaveable { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
+    var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
     var panel by remember { mutableStateOf(Panel.Chat) }
     var currentState by remember { mutableStateOf<PiState?>(null) }
@@ -135,6 +140,7 @@ private fun PiScreen(bridge: PiBridge) {
     var models by remember { mutableStateOf<List<PiModel>>(emptyList()) }
     var remoteCommands by remember { mutableStateOf<List<PiCommand>>(emptyList()) }
     var cursor by remember { mutableLongStateOf(0L) }
+    var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
@@ -149,6 +155,8 @@ private fun PiScreen(bridge: PiBridge) {
     var diffText by remember { mutableStateOf("") }
     var pendingUi by remember { mutableStateOf<PiUiRequest?>(null) }
     var dialogInput by remember { mutableStateOf("") }
+    var resumeSessions by remember { mutableStateOf<List<PiSession>>(emptyList()) }
+    var resumeOpen by remember { mutableStateOf(false) }
 
     val localCommands = remember {
         listOf(
@@ -229,7 +237,9 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    val connect: () -> Unit = {
+    val connect: () -> Unit = connect@{
+        if (connecting) return@connect
+        connecting = true
         scope.launch {
             status = "Installing bridge"
             connected = false
@@ -265,6 +275,7 @@ private fun PiScreen(bridge: PiBridge) {
                     addSystem(it.message ?: "Bridge 安装失败")
                 }
             )
+            connecting = false
         }
     }
 
@@ -284,7 +295,16 @@ private fun PiScreen(bridge: PiBridge) {
         val command = text.substringBefore(' ')
         val args = text.substringAfter(' ', "").trim()
         when (command) {
-            "/resume", "/tree", "/fork", "/name" -> sendExtensionCommand(text)
+            "/resume" -> scope.launch {
+                bridge.sessions().fold(
+                    onSuccess = { sessions ->
+                        resumeSessions = sessions
+                        resumeOpen = true
+                    },
+                    onFailure = { addSystem("/resume 失败：${it.message}") }
+                )
+            }
+            "/tree", "/fork", "/name" -> addSystem("$command 尚未接入当前无扩展 RPC 版本，避免把命令误发给模型。")
             "/model" -> panel = Panel.Models
             "/thinking" -> panel = Panel.Thinking
             "/session" -> {
@@ -363,6 +383,7 @@ private fun PiScreen(bridge: PiBridge) {
         if (!connected) return@LaunchedEffect
         while (connected) {
             bridge.events(cursor).onSuccess { batch ->
+                eventFailures = 0
                 cursor = batch.latest
                 batch.events.forEach { event ->
                     when (event.type) {
@@ -407,12 +428,15 @@ private fun PiScreen(bridge: PiBridge) {
                         }
                     }
                 }
-            }.onFailure {
-                status = "Disconnected"
-                connected = false
-                addSystem("Bridge 连接中断：${it.message}")
+            }.onFailure { error ->
+                eventFailures += 1
+                if (eventFailures >= 5) {
+                    status = "Disconnected"
+                    connected = false
+                    addSystem("Bridge 连接中断（连续 $eventFailures 次）：${error.message}")
+                }
             }
-            delay(160)
+            delay(400)
         }
     }
 
@@ -460,6 +484,63 @@ private fun PiScreen(bridge: PiBridge) {
         )
     }
 
+
+    if (resumeOpen) {
+        AlertDialog(
+            onDismissRequest = { resumeOpen = false },
+            title = { Text("/resume · 选择会话") },
+            text = {
+                if (resumeSessions.isEmpty()) {
+                    Text("当前工作目录没有可恢复的 Pi session。", color = TextMuted)
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 500.dp)) {
+                        items(resumeSessions) { session ->
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !session.current) {
+                                        resumeOpen = false
+                                        scope.launch {
+                                            status = "Switching session"
+                                            bridge.switchSession(session.path).fold(
+                                                onSuccess = {
+                                                    loadHistory()
+                                                    refreshMeta()
+                                                    status = "Ready"
+                                                },
+                                                onFailure = {
+                                                    addSystem("切换 session 失败：${it.message}")
+                                                    status = "Ready"
+                                                }
+                                            )
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp)
+                            ) {
+                                Text(
+                                    (if (session.current) "✓ 当前 · " else "") + session.title,
+                                    color = if (session.current) Accent else TextMain,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
+                                )
+                                Text(
+                                    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                                        .format(java.util.Date(session.modified)),
+                                    color = TextMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { resumeOpen = false }) { Text("取消") } }
+        )
+    }
+
     val busy = connected && (
         status == "Working" || status == "Compacting" || status == "Stopping" ||
             currentState?.streaming == true || currentState?.compacting == true
@@ -473,26 +554,39 @@ private fun PiScreen(bridge: PiBridge) {
             .imePadding()
             .background(Bg)
     ) {
-        TerminalHeader(
-            cwd = cwd,
-            model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
-            status = status,
-            connected = connected,
-            onConnect = connect,
-            onSettings = { panel = Panel.Settings }
-        )
-
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (panel) {
-                Panel.Chat -> ChatPanel(lines, chatListState)
-                Panel.Models -> ModelsPanel(models, currentState, onBack = { panel = Panel.Chat }) { model ->
-                    scope.launch {
-                        bridge.setModel(model).fold(
-                            onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("模型已切换为 ${model.provider}/${model.id}") },
-                            onFailure = { addSystem("切换模型失败：${it.message}") }
-                        )
+                Panel.Chat -> ChatPanel(
+                    lines = lines,
+                    listState = chatListState,
+                    cwd = cwd,
+                    model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
+                    status = status,
+                    connected = connected,
+                    onConnect = connect,
+                    onSettings = { panel = Panel.Settings }
+                )
+                Panel.Models -> ModelsPanel(
+                    models = models,
+                    state = currentState,
+                    onBack = { panel = Panel.Chat },
+                    onPick = { model ->
+                        scope.launch {
+                            bridge.setModel(model).fold(
+                                onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") },
+                                onFailure = { addSystem("切换模型失败：${it.message}") }
+                            )
+                        }
+                    },
+                    onEffort = { level ->
+                        scope.launch {
+                            bridge.setThinking(level).fold(
+                                onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") },
+                                onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }
+                            )
+                        }
                     }
-                }
+                )
                 Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), onBack = { panel = Panel.Chat }) { level ->
                     scope.launch {
                         bridge.setThinking(level).fold(
@@ -638,13 +732,60 @@ private fun TerminalHeader(
 }
 
 @Composable
-private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState) {
+private fun ChatPanel(
+    lines: List<ChatLine>,
+    listState: LazyListState,
+    cwd: String,
+    model: String,
+    status: String,
+    connected: Boolean,
+    onConnect: () -> Unit,
+    onSettings: () -> Unit
+) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-        contentPadding = PaddingValues(vertical = 14.dp),
+        contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        item(key = "session-meta") {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                    Text(
+                        cwd.substringAfterLast('/').ifBlank { "home" },
+                        color = Blue,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("$", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (connected) "⋮" else if (status == "Disconnected" || status.endsWith("failed")) "Connect" else "Connecting…",
+                        color = if (connected) TextMuted else Accent,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        modifier = Modifier.clickable { if (connected) onSettings() else onConnect() }.padding(8.dp)
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Model: ${model.ifBlank { "—" }}",
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        status,
+                        color = if (status == "Ready") Accent else if (status == "Working") Blue else TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
         if (lines.isEmpty()) {
             item {
                 Text(
@@ -719,8 +860,9 @@ private fun CommandPalette(
         remote.filter { it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach {
             add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true)
         }
-    }.take(12)
+    }.take(64)
     if (choices.isEmpty()) return
+    val paletteState = rememberLazyListState()
     Column(
         modifier
             .padding(10.dp)
@@ -729,14 +871,28 @@ private fun CommandPalette(
             .border(1.dp, Border, RoundedCornerShape(12.dp))
             .padding(vertical = 4.dp)
     ) {
-        Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(12.dp, 8.dp))
-        choices.forEach { (cmd, remote) ->
-            Row(
-                Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(104.dp))
-                Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text("上下滑动选择", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+        }
+        LazyColumn(
+            state = paletteState,
+            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+            contentPadding = PaddingValues(bottom = 4.dp)
+        ) {
+            items(choices) { choice ->
+                val cmd = choice.first
+                val remote = choice.second
+                Row(
+                    Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(104.dp))
+                    Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                }
             }
         }
     }
@@ -749,6 +905,14 @@ private fun Composer(
     onValue: (String) -> Unit,
     onPrimary: () -> Unit
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val submitAndDismissKeyboard = {
+        onPrimary()
+        keyboardController?.hide()
+        focusManager.clearFocus(force = true)
+    }
+
     Row(
         Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C)).padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -761,10 +925,19 @@ private fun Composer(
             placeholder = { Text(if (busy) "Pi 正在工作，可点右侧停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onPrimary() })
+            keyboardActions = KeyboardActions(onSend = { submitAndDismissKeyboard() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color.Transparent,
+                unfocusedBorderColor = Color.Transparent,
+                disabledBorderColor = Color.Transparent,
+                errorBorderColor = Color.Transparent,
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                disabledContainerColor = Color.Transparent
+            )
         )
         Button(
-            onClick = onPrimary,
+            onClick = submitAndDismissKeyboard,
             modifier = Modifier.height(48.dp),
             enabled = busy || value.isNotBlank(),
             colors = if (busy) ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030)) else ButtonDefaults.buttonColors()
@@ -797,10 +970,48 @@ private fun PanelHeader(title: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun ModelsPanel(models: List<PiModel>, state: PiState?, onBack: () -> Unit, onPick: (PiModel) -> Unit) {
+private fun ModelsPanel(
+    models: List<PiModel>,
+    state: PiState?,
+    onBack: () -> Unit,
+    onPick: (PiModel) -> Unit,
+    onEffort: (String) -> Unit
+) {
+    val effortLevels = listOf("low", "medium", "high", "xhigh", "max")
     Column(Modifier.fillMaxSize()) {
         PanelHeader("/model", onBack)
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        LazyColumn(
+            Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+            contentPadding = PaddingValues(bottom = 14.dp)
+        ) {
+            item {
+                Column(
+                    Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)
+                ) {
+                    Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Pi thinking level → provider reasoning_effort",
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 3.dp, bottom = 6.dp)
+                    )
+                    effortLevels.forEach { level ->
+                        val selected = state?.thinkingLevel == level
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(level, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+            item {
+                Text("Models", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+            }
             items(models) { model ->
                 val selected = state?.provider == model.provider && state.modelId == model.id
                 Row(

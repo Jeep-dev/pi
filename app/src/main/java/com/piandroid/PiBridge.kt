@@ -1,6 +1,5 @@
 package com.piandroid
 
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.util.Base64
@@ -12,12 +11,15 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.SecureRandom
 
-class PiBridge(private val context: Context) {
+class PiBridge(context: Context) {
+    private val context = context.applicationContext
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
-    private val port = 17643
-    private val expectedBridgeVersion = "2026-09-09.3"
+    private val port = 17649
+    private val expectedBridgeVersion = "2026-09-09.11"
+    private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
     fun termuxAvailable(): Boolean = runCatching {
@@ -38,10 +40,9 @@ class PiBridge(private val context: Context) {
                 printf '%s' '$bridge' | base64 -d > ~/.pi/android/bridge.mjs &&
                 printf '%s' '$extension' | base64 -d > ~/.pi/android/pi-android-mobile.ts &&
                 chmod 700 ~/.pi/android/bridge.mjs &&
-                if [ -f ~/.pi/android/bridge.pid ]; then kill "\$(cat ~/.pi/android/bridge.pid)" 2>/dev/null || true; fi &&
-                sleep 0.35 &&
-                PI_ANDROID_PORT=$port nohup node ~/.pi/android/bridge.mjs > ~/.pi/android/bridge.log 2>&1 &
-                echo \$! > ~/.pi/android/bridge.pid
+                if [ -f ~/.pi/android/bridge.pid ]; then kill "\$(cat ~/.pi/android/bridge.pid)" 2>/dev/null || true; sleep 0.7; fi &&
+                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port &&
+                exec /data/data/com.termux/files/usr/bin/node ~/.pi/android/bridge.mjs >> ~/.pi/android/bridge.log 2>&1
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
         }
@@ -52,9 +53,12 @@ class PiBridge(private val context: Context) {
         var lastSeenVersion = ""
         repeat(attempts) {
             request("/health", null, 1200).onSuccess { raw ->
-                val version = runCatching { JSONObject(raw).optString("bridgeVersion") }.getOrDefault("")
+                val root = runCatching { JSONObject(raw) }.getOrNull()
+                val version = root?.optString("bridgeVersion").orEmpty()
                 lastSeenVersion = version
-                if (version == expectedBridgeVersion) return Result.success(Unit)
+                if (version == expectedBridgeVersion) {
+                    return Result.success(Unit)
+                }
             }
             delay(250)
         }
@@ -313,18 +317,10 @@ class PiBridge(private val context: Context) {
 
     private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val callback = Intent(context, MainActivity::class.java)
-            val pending = PendingIntent.getActivity(
-                context,
-                nextId++,
-                callback,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-            )
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
                 .putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
                 .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
                 .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-                .putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", pending)
             context.startService(intent)
             Result.success(Unit)
         } catch (_: SecurityException) {
@@ -334,13 +330,14 @@ class PiBridge(private val context: Context) {
         }
     }
 
-    private suspend fun request(path: String, body: String?, timeoutMs: Int = 5_000): Result<String> = withContext(Dispatchers.IO) {
+    internal suspend fun request(path: String, body: String?, timeoutMs: Int = 5_000): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = (URL("http://127.0.0.1:$port$path").openConnection() as HttpURLConnection).apply {
                 requestMethod = if (body == null) "GET" else "POST"
                 connectTimeout = timeoutMs.coerceAtMost(5_000)
                 readTimeout = timeoutMs
                 useCaches = false
+                setRequestProperty("Authorization", "Bearer $authToken")
                 if (body != null) {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json")
@@ -356,6 +353,15 @@ class PiBridge(private val context: Context) {
             }
             text
         }
+    }
+
+    private fun loadOrCreateAuthToken(): String {
+        val preferences = context.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
+        preferences.getString("auth_token", null)?.takeIf { it.length >= 32 }?.let { return it }
+        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val token = Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)
+        check(preferences.edit().putString("auth_token", token).commit()) { "无法保存 Bridge 认证信息" }
+        return token
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())

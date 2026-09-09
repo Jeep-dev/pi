@@ -34,9 +34,22 @@ allow-external-apps=true
 termux-setup-storage
 ```
 
-## GitHub Actions 构建
+## 安全模型
 
-将本目录上传为 GitHub 仓库后，打开 `Actions → Build Pi Android → Run workflow`。工作流会自动准备 JDK 21、Android SDK，并上传 `app-debug.apk`。
+App 首次运行时生成 256 位随机 Bridge Token，并保存在 Android 私有配置中。所有本机 HTTP RPC 请求都必须携带该 Token；Bridge 缺少 Token 时会拒绝启动。文件接口会解析真实路径，拒绝通过符号链接越出当前项目。
+
+Termux 的 `RUN_COMMAND` 能力仍具有当前 Termux 用户的完整权限，请只安装可信 APK。
+
+## 构建
+
+本地构建：
+
+```bash
+node tools/test_bridge_auth.mjs
+./gradlew :app:assembleDebug
+```
+
+GitHub Actions 会直接从已提交源码构建，不再动态套用补丁，并上传 debug 和未签名 release APK。
 
 ## 项目目录
 

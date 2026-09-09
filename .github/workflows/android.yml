@@ -2,52 +2,44 @@ name: Build Pi Android
 on:
   workflow_dispatch:
   push:
-    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "tools/build_patch_v46.py", "tools/build_patch_v47.py", "tools/build_patch_v48.py", "tools/build_patch_v49.py", "tools/build_patch_v50.py", "tools/build_patch_v51.py", "tools/build_patch_v52.py", "tools/build_patch_v53.py", "tools/build_patch_v54.py", "tools/build_patch_v55.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
+    paths:
+      - "app/**"
+      - "tools/test_bridge_auth.mjs"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "tools/test_bridge_auth.mjs"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android.yml"
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Apply PiTouch v4.4 startup isolation patch
-        run: python3 tools/build_patch_v44.py
-      - name: Apply PiTouch v4.5 direct resume patch
-        run: python3 tools/build_patch_v45.py
-      - name: Apply PiTouch v4.6 command scroll and reasoning effort patch
-        run: python3 tools/build_patch_v46.py
-      - name: Apply PiTouch v4.7 stale bridge race fix
-        run: python3 tools/build_patch_v47.py
-      - name: Apply PiTouch v4.8 immersive scroll-away header patch
-        run: python3 tools/build_patch_v48.py
-      - name: Apply PiTouch v4.9 bridge instance handshake
-        run: python3 tools/build_patch_v49.py
-      - name: Apply PiTouch v5.0 Termux callback relaunch fix
-        run: python3 tools/build_patch_v50.py
-      - name: Apply PiTouch v5.1 deterministic bridge lifecycle fix
-        run: python3 tools/build_patch_v51.py
-      - name: Apply PiTouch v5.2 connection resilience patch
-        run: python3 tools/build_patch_v52.py
-      - name: Apply PiTouch v5.3 fresh-port stale-bridge bypass
-        run: python3 tools/build_patch_v53.py
-      - name: Apply PiTouch v5.4 robust Termux launcher
-        run: python3 tools/build_patch_v54.py
-      - name: Apply PiTouch v5.5 composer polish
-        run: python3 tools/build_patch_v55.py
-      - name: Validate launcher unchanged from v5.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate and test authenticated bridge
         run: |
-          grep -q 'private val port = 17648' app/src/main/java/com/piandroid/PiBridge.kt
-          grep -q 'exec /data/data/com.termux/files/usr/bin/node' app/src/main/java/com/piandroid/PiBridge.kt
-          ! grep -q "pgrep -f '\[b\]ridge" app/src/main/java/com/piandroid/PiBridge.kt
-      - name: Validate composer behavior
-        run: |
-          grep -q 'focusedBorderColor = Color.Transparent' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'keyboardController?.hide()' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'focusManager.clearFocus(force = true)' app/src/main/java/com/piandroid/MainActivity.kt
-      - name: Validate Pi bridge JavaScript
-        run: node --check app/src/main/assets/pi-android-bridge.mjs
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_bridge_auth.mjs
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21", cache: gradle }
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Build debug and release APKs
+        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
-        with: { name: pi-android-v5.5-debug, path: app/build/outputs/apk/debug/*.apk }
+        with:
+          name: pi-android-v5.6-apks
+          path: app/build/outputs/apk/**/*.apk
