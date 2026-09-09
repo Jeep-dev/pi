@@ -18,7 +18,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.2"
+    private val expectedBridgeVersion = "2026-09-10.3"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -101,9 +101,18 @@ class PiBridge(context: Context) {
         )
     }
 
-    suspend fun prompt(message: String, streamingBehavior: String? = null): Result<Unit> {
+    suspend fun prompt(
+        message: String,
+        streamingBehavior: String? = null,
+        images: List<PiImage> = emptyList()
+    ): Result<Unit> {
         val body = JSONObject().put("message", message).apply {
             if (!streamingBehavior.isNullOrBlank()) put("streamingBehavior", streamingBehavior)
+            if (images.isNotEmpty()) put("images", JSONArray().apply {
+                images.forEach { image ->
+                    put(JSONObject().put("type", "image").put("data", image.data).put("mimeType", image.mimeType))
+                }
+            })
         }
         return request("/prompt", body.toString()).map { Unit }
     }
@@ -529,6 +538,7 @@ data class PiStats(
     val contextPercent: Double
 )
 data class PiModel(val provider: String, val id: String, val name: String, val reasoning: Boolean, val contextWindow: Long)
+data class PiImage(val name: String, val mimeType: String, val data: String, val byteCount: Int)
 data class PiCommand(val name: String, val description: String, val source: String)
 data class PiBashResult(val output: String, val exitCode: Int, val cancelled: Boolean, val truncated: Boolean)
 data class PiUiRequest(

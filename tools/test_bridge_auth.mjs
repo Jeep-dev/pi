@@ -28,7 +28,9 @@ process.stdin.on("data", chunk => {
     const data = command.type === "get_state"
       ? { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 0 }
       : {};
-    process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: true, data }) + "\\n");
+    const imageValid = command.type !== "prompt" || command.message !== "__image_test__" ||
+      (command.images?.[0]?.type === "image" && command.images[0].mimeType === "image/png" && command.images[0].data === "aGVsbG8=");
+    process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: imageValid, data, ...(!imageValid ? { error: "image payload missing" } : {}) }) + "\\n");
   }
 });
 `);
@@ -61,7 +63,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-10.2");
+  assert.equal(health.bridgeVersion, "2026-09-10.3");
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -111,6 +113,16 @@ try {
     assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
   }
   await new Promise(resolve => setTimeout(resolve, 250));
+  const imagePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({
+      message: "__image_test__",
+      images: [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }],
+    }),
+  });
+  assert.equal(imagePrompt.status, 200, "image content must be forwarded to Pi RPC");
+
   const afterRestart = await fetch(`http://127.0.0.1:${port}/state`, {
     headers: { Authorization: `Bearer ${token}` },
   });

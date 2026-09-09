@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.2";
+const bridgeVersion = "2026-09-10.3";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -533,9 +533,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/prompt") {
       const input = JSON.parse(await readBody(req));
+      const images = Array.isArray(input.images)
+        ? input.images
+            .filter(image => image && typeof image.data === "string" && typeof image.mimeType === "string")
+            .map(image => ({ type: "image", data: image.data, mimeType: image.mimeType }))
+        : [];
       return rpcResponse(res, {
         type: "prompt",
         message: String(input.message || ""),
+        ...(images.length ? { images } : {}),
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
       });
     }

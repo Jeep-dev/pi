@@ -28,6 +28,9 @@ private fun visibleText(content: Any?, assistant: Boolean): String = when (conte
             val type = part.optString("type")
             if (type == "text" || (!assistant && type.isBlank())) {
                 part.optString("text").takeIf(String::isNotBlank)?.let(::append)
+            } else if (!assistant && type == "image") {
+                if (isNotEmpty()) append('\n')
+                append("[图片附件]")
             }
         }
     }

@@ -7,6 +7,10 @@ import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -66,6 +70,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -76,9 +81,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
@@ -260,6 +267,7 @@ private fun PiScreen(bridge: PiBridge) {
     val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
     val toolDraftRefreshAt = remember { mutableMapOf<Int, Long>() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
     var showScrollControls by remember { mutableStateOf(false) }
@@ -279,6 +287,42 @@ private fun PiScreen(bridge: PiBridge) {
     var resumeFilter by remember { mutableStateOf("") }
     var modelInitialSearch by remember { mutableStateOf("") }
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
+    val pendingImages = remember { mutableStateListOf<PiImage>() }
+    var attachmentNotice by remember { mutableStateOf("") }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val loaded = mutableListOf<PiImage>()
+                    var totalBytes = 0
+                    for (uri in uris.take(4)) {
+                        val mime = context.contentResolver.getType(uri).orEmpty()
+                        if (!mime.startsWith("image/")) continue
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(2_500_001) }
+                            ?: continue
+                        if (bytes.size > 2_500_000 || totalBytes + bytes.size > 2_500_000) {
+                            throw IllegalArgumentException("图片总大小不能超过 2.5 MB")
+                        }
+                        var name = uri.lastPathSegment ?: "image"
+                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) name = cursor.getString(0) ?: name
+                        }
+                        loaded += PiImage(name, mime, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes.size)
+                        totalBytes += bytes.size
+                    }
+                    loaded
+                }
+            }
+            result.fold(
+                onSuccess = { loaded ->
+                    pendingImages.clear()
+                    pendingImages.addAll(loaded)
+                    attachmentNotice = if (loaded.isEmpty()) "没有读取到支持的图片" else ""
+                },
+                onFailure = { attachmentNotice = "图片读取失败：${it.message}" }
+            )
+        }
+    }
 
     val localCommands = remember {
         listOf(
@@ -496,11 +540,24 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    fun executeInput(raw: String) {
+    fun executeInput(raw: String, images: List<PiImage> = emptyList()) {
         val text = raw.trim()
-        if (text.isBlank()) return
+        if (text.isBlank() && images.isEmpty()) return
         if (!connected && !text.startsWith("/settings")) {
             addSystem("还没有连接 Pi。点顶部 Connect 或输入 /settings。")
+            return
+        }
+        if (images.isNotEmpty()) {
+            followOutput = true
+            val imageSummary = images.joinToString(", ") { "[图片: ${it.name}]" }
+            lines.add(ChatLine("user", listOf(text, imageSummary).filter { it.isNotBlank() }.joinToString("\n")))
+            scope.launch {
+                val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
+                bridge.prompt(text, behavior, images).fold(
+                    onSuccess = { status = "Working" },
+                    onFailure = { addSystem("发送图片失败：${it.message}") }
+                )
+            }
             return
         }
         if (text.startsWith("!")) {
@@ -616,12 +673,13 @@ private fun PiScreen(bridge: PiBridge) {
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.12
+                """Pi Android v5.13
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 完整分支导航、搜索、摘要和编辑器恢复
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义
+                |• 支持选择最多 4 张图片作为多模态输入
                 |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
             )
             "/run" -> {
@@ -1096,7 +1154,14 @@ private fun PiScreen(bridge: PiBridge) {
             Composer(
                 value = input,
                 busy = busy,
+                attachments = pendingImages,
+                attachmentNotice = attachmentNotice,
                 onValue = { input = it },
+                onAttach = {
+                    attachmentNotice = ""
+                    imagePicker.launch("image/*")
+                },
+                onRemoveAttachment = { image -> pendingImages.remove(image) },
                 onPrimary = {
                     if (busy) {
                         status = "Stopping"
@@ -1105,8 +1170,11 @@ private fun PiScreen(bridge: PiBridge) {
                         }
                     } else {
                         val value = input
+                        val images = pendingImages.toList()
                         input = ""
-                        executeInput(value)
+                        pendingImages.clear()
+                        attachmentNotice = ""
+                        executeInput(value, images)
                     }
                 }
             )
@@ -1386,14 +1454,49 @@ private fun CommandPalette(
 private fun Composer(
     value: String,
     busy: Boolean,
+    attachments: List<PiImage>,
+    attachmentNotice: String,
     onValue: (String) -> Unit,
+    onAttach: () -> Unit,
+    onRemoveAttachment: (PiImage) -> Unit,
     onPrimary: () -> Unit
 ) {
-    Row(
-        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C)).padding(horizontal = 5.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    Column(
+        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C))
     ) {
+        if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                attachments.forEach { image ->
+                    Text(
+                        "${image.name} · ${compactCount(image.byteCount.toLong())}B  ×",
+                        color = Blue,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        modifier = Modifier.background(CardBg, RoundedCornerShape(5.dp))
+                            .clickable { onRemoveAttachment(image) }
+                            .padding(horizontal = 7.dp, vertical = 5.dp)
+                    )
+                }
+                if (attachmentNotice.isNotBlank()) Text(attachmentNotice, color = Danger, fontSize = 10.sp)
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 5.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+        Button(
+            onClick = onAttach,
+            modifier = Modifier.width(44.dp).height(52.dp),
+            contentPadding = PaddingValues(0.dp),
+            enabled = !busy,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF26313A))
+        ) {
+            Text("＋", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
+        }
         OutlinedTextField(
             value = value,
             onValueChange = onValue,
@@ -1424,10 +1527,11 @@ private fun Composer(
             onClick = onPrimary,
             modifier = Modifier.width(56.dp).height(52.dp),
             contentPadding = PaddingValues(0.dp),
-            enabled = busy || value.isNotBlank(),
+            enabled = busy || value.isNotBlank() || attachments.isNotEmpty(),
             colors = if (busy) ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030)) else ButtonDefaults.buttonColors()
         ) {
             Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 18.sp)
+        }
         }
     }
 }
