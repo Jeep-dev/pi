@@ -453,12 +453,21 @@ private fun PiScreen(bridge: PiBridge) {
                     currentState = attached
                     status = "Ready"
                 } else {
+                    status = "Checkpointing session"
+                    bridge.state().onSuccess { previous ->
+                        currentState = previous
+                        if (!previous.streaming && !previous.compacting) {
+                            val canCheckpoint = bridge.commands().getOrDefault(emptyList()).any { it.name == "__android_checkpoint" }
+                            if (canCheckpoint) bridge.prompt("/__android_checkpoint")
+                        }
+                    }
                     status = "Installing bridge"
                     bridge.installAndStartBridge().getOrThrow()
                     status = "Waiting for bridge"
                     bridge.waitForBridge().getOrThrow()
                     status = "Starting Pi"
-                    currentState = bridge.start(cwd.trim(), launchCommand.trim()).getOrThrow()
+                    val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
+                    currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
                     val availableModels = bridge.models().getOrDefault(emptyList())
                     models = availableModels
                     bridge.applyDefaultModel(availableModels).onSuccess { selected ->
@@ -1332,7 +1341,7 @@ private fun CommandPalette(
     val localNames = local.map { it.name }.toSet()
     val choices = buildList<Pair<LocalCommand, Boolean>> {
         local.filter { it.name.contains(needle) }.forEach { add(it to false) }
-        remote.filter { it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach {
+        remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach {
             add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true)
         }
     }.take(64)

@@ -161,6 +161,16 @@ class PiBridge(context: Context) {
         return request("/model", body).map { Unit }
     }
 
+    private fun runtimePreferences() = context.getSharedPreferences("pi_runtime", Context.MODE_PRIVATE)
+
+    fun recoveryLaunchCommand(baseCommand: String): String {
+        if (Regex("(^|\\s)--session(?:=|\\s)").containsMatchIn(baseCommand)) return baseCommand
+        val sessionFile = runtimePreferences().getString("last_session_file", "").orEmpty()
+        if (sessionFile.isBlank()) return baseCommand
+        val quoted = "'${sessionFile.replace("'", "'\\''")}'"
+        return "$baseCommand --session $quoted"
+    }
+
     fun defaultModelKey(): String = context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
         .getString("default_model", "").orEmpty()
 
@@ -289,7 +299,7 @@ class PiBridge(context: Context) {
 
     private fun parseState(data: JSONObject): PiState {
         val model = data.optJSONObject("model")
-        return PiState(
+        val state = PiState(
             provider = model?.optString("provider").orEmpty(),
             modelId = model?.optString("id").orEmpty(),
             modelName = model?.optString("name").orEmpty(),
@@ -302,6 +312,10 @@ class PiBridge(context: Context) {
             messageCount = data.optInt("messageCount"),
             autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
         )
+        if (state.sessionFile.isNotBlank()) {
+            runtimePreferences().edit().putString("last_session_file", state.sessionFile).apply()
+        }
+        return state
     }
 
     private fun messageText(message: JSONObject): String {

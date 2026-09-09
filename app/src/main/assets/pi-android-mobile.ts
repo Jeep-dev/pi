@@ -412,6 +412,24 @@ export default function (pi: any) {
     },
   });
 
+  pi.registerCommand("__android_checkpoint", {
+    description: "Persist the active branch before an Android bridge upgrade",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const leafId = ctx.sessionManager.getLeafId();
+      if (!leafId) return;
+      let currentLabel: string | undefined;
+      const visit = (nodes: any[]) => {
+        for (const node of nodes || []) {
+          if (String(node.entry?.id) === String(leafId)) currentLabel = node.label;
+          visit(node.children || []);
+        }
+      };
+      visit(ctx.sessionManager.getTree());
+      ctx.sessionManager.appendLabelChange(String(leafId), currentLabel);
+    },
+  });
+
   pi.registerCommand("quit", {
     description: "Gracefully stop the current Pi RPC process",
     handler: async (_args: string, ctx: any) => {
