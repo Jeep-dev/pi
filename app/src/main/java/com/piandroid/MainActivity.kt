@@ -64,8 +64,6 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -645,7 +643,7 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput) {
+    LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput, input.length) {
         if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
     }
 
@@ -1202,27 +1200,27 @@ private fun Composer(
     onValue: (String) -> Unit,
     onPrimary: () -> Unit
 ) {
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-    val submitAndDismissKeyboard = {
-        onPrimary()
-        keyboardController?.hide()
-        focusManager.clearFocus(force = true)
-    }
-
     Row(
-        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C)).padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C)).padding(horizontal = 5.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         OutlinedTextField(
             value = value,
             onValueChange = onValue,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 132.dp),
+            textStyle = TextStyle(
+                color = TextMain,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                lineHeight = 20.sp
+            ),
             placeholder = { Text(if (busy) "Pi 正在工作，可点右侧停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
-            singleLine = true,
+            singleLine = false,
+            minLines = 1,
+            maxLines = 5,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { submitAndDismissKeyboard() }),
+            keyboardActions = KeyboardActions(onSend = { onPrimary() }),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Color.Transparent,
                 unfocusedBorderColor = Color.Transparent,
@@ -1234,8 +1232,9 @@ private fun Composer(
             )
         )
         Button(
-            onClick = submitAndDismissKeyboard,
-            modifier = Modifier.height(48.dp),
+            onClick = onPrimary,
+            modifier = Modifier.width(56.dp).height(52.dp),
+            contentPadding = PaddingValues(0.dp),
             enabled = busy || value.isNotBlank(),
             colors = if (busy) ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030)) else ButtonDefaults.buttonColors()
         ) {
