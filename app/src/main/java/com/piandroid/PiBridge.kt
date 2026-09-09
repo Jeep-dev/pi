@@ -306,10 +306,14 @@ class PiBridge(context: Context) {
                 val message = value.optJSONObject("message") ?: JSONObject()
                 PiEvent(seq, type, message.optString("role"), messageText(message))
             }
-            "tool_execution_start" -> PiEvent(
-                seq, type, "", "执行工具：${value.optString("toolName")}",
-                toolCallId = value.optString("toolCallId")
-            )
+            "tool_execution_start" -> {
+                val args = value.optJSONObject("args")
+                val text = buildString {
+                    append("执行工具：${value.optString("toolName")}")
+                    if (args != null && args.length() > 0) append("\n\n参数：\n${args.toString(2)}")
+                }
+                PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
+            }
             "tool_execution_update" -> {
                 val text = value.optJSONObject("partialResult")
                     ?.optJSONArray("content")
@@ -318,10 +322,24 @@ class PiBridge(context: Context) {
                     .orEmpty()
                 PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }
-            "tool_execution_end" -> PiEvent(
-                seq, type, "", if (value.optBoolean("isError")) "工具执行失败" else "工具完成：${value.optString("toolName")}",
-                toolCallId = value.optString("toolCallId")
-            )
+            "tool_execution_end" -> {
+                val content = value.optJSONObject("result")?.optJSONArray("content") ?: JSONArray()
+                val output = buildString {
+                    for (i in 0 until content.length()) {
+                        val part = content.optJSONObject(i) ?: continue
+                        val text = part.optString("text")
+                        if (text.isNotBlank()) {
+                            if (isNotEmpty()) append('\n')
+                            append(text)
+                        }
+                    }
+                }
+                val status = if (value.optBoolean("isError")) "工具执行失败" else "工具完成：${value.optString("toolName")}"
+                PiEvent(
+                    seq, type, "", status + if (output.isBlank()) "" else "\n\n$output",
+                    toolCallId = value.optString("toolCallId")
+                )
+            }
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))

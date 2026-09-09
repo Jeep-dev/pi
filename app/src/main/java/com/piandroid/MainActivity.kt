@@ -105,7 +105,8 @@ private data class ChatLine(
     val role: String,
     val text: String,
     val streaming: Boolean = false,
-    val toolCallId: String = ""
+    val toolCallId: String = "",
+    val collapsed: Boolean = false
 )
 private data class LocalCommand(val name: String, val description: String)
 
@@ -269,8 +270,8 @@ private fun PiScreen(bridge: PiBridge) {
         }
         if (index >= 0) {
             val line = lines[index]
-            val title = line.text.substringBefore("\n\n")
-            lines[index] = line.copy(text = "$title\n\n${text.trimEnd()}")
+            val header = line.text.substringBefore("\n\n工具输出：")
+            lines[index] = line.copy(text = "$header\n\n工具输出：\n${text.trimEnd()}")
         } else {
             lines.add(ChatLine("tool", text.trimEnd(), streaming = true, toolCallId = toolCallId))
         }
@@ -282,8 +283,9 @@ private fun PiScreen(bridge: PiBridge) {
         }
         if (index >= 0) {
             val line = lines[index]
+            val header = line.text.substringBefore("\n\n工具输出：").trimEnd()
             val suffix = if (text.isBlank()) "" else "\n\n${text.trim()}"
-            lines[index] = line.copy(text = line.text.trimEnd() + suffix, streaming = false)
+            lines[index] = line.copy(text = header + suffix, streaming = false, collapsed = true)
         } else if (text.isNotBlank()) {
             lines.add(ChatLine("tool", text.trim(), toolCallId = toolCallId))
         }
@@ -294,6 +296,11 @@ private fun PiScreen(bridge: PiBridge) {
         val index = lines.indexOfLast { it.role == "assistant" && it.streaming }
         if (index >= 0) lines[index] = lines[index].copy(text = text, streaming = false)
         else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
+    }
+
+    fun toggleTool(toolCallId: String) {
+        val index = lines.indexOfLast { it.role == "tool" && it.toolCallId == toolCallId }
+        if (index >= 0) lines[index] = lines[index].copy(collapsed = !lines[index].collapsed)
     }
 
     fun settleStreams() {
@@ -638,7 +645,8 @@ private fun PiScreen(bridge: PiBridge) {
                     connected = connected,
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
-                    onUserScroll = { followOutput = false }
+                    onUserScroll = { followOutput = false },
+                    onToggleTool = ::toggleTool
                 )
                 Panel.Models -> ModelsPanel(
                     models = models,
@@ -841,7 +849,8 @@ private fun ChatPanel(
     connected: Boolean,
     onConnect: () -> Unit,
     onSettings: () -> Unit,
-    onUserScroll: () -> Unit
+    onUserScroll: () -> Unit,
+    onToggleTool: (String) -> Unit
 ) {
     LazyColumn(
         state = listState,
@@ -904,7 +913,12 @@ private fun ChatPanel(
             }
         }
         items(lines) { line ->
-            val visibleText = line.text.trimEnd()
+            val fullText = line.text.trimEnd()
+            val visibleText = if (line.role == "tool" && line.collapsed && fullText.length > 700) {
+                fullText.take(700).trimEnd() + "\n\n… 点击展开完整工具结果"
+            } else {
+                fullText
+            }
             SelectionContainer {
                 when (line.role) {
                 "user" -> Text(
@@ -933,12 +947,16 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
                 )
                 "tool" -> Text(
-                    visibleText,
+                    visibleText + if (!line.collapsed && fullText.length > 700) "\n\n… 点击收起" else "",
                     color = TextMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
-                    modifier = Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(12.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(ToolBg, RoundedCornerShape(3.dp))
+                        .clickable(enabled = fullText.length > 700) { onToggleTool(line.toolCallId) }
+                        .padding(12.dp)
                 )
                     else -> Text(
                         visibleText,
