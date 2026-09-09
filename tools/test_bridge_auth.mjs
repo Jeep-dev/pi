@@ -62,6 +62,17 @@ try {
   const noTokenExit = await waitForExit(noToken);
   assert.notEqual(noTokenExit.code, 0, "bridge must refuse to start without authentication");
 
+  const shutdown = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(shutdown.status, 200);
+  const stopped = await Promise.race([
+    waitForExit(child),
+    new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+  ]);
+  assert.ok(stopped, "authenticated shutdown must stop the bridge");
+
   console.log("Bridge authentication tests passed");
 } finally {
   child.kill("SIGTERM");

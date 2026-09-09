@@ -29,6 +29,8 @@ class PiBridge(context: Context) {
     suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
         if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
         runCatching {
+            request("/shutdown", "{}", 2_000)
+            delay(750)
             val bridge = context.assets.open("pi-android-bridge.mjs").use {
                 Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
             }
@@ -40,7 +42,8 @@ class PiBridge(context: Context) {
                 printf '%s' '$bridge' | base64 -d > ~/.pi/android/bridge.mjs &&
                 printf '%s' '$extension' | base64 -d > ~/.pi/android/pi-android-mobile.ts &&
                 chmod 700 ~/.pi/android/bridge.mjs &&
-                if [ -f ~/.pi/android/bridge.pid ]; then kill "\$(cat ~/.pi/android/bridge.pid)" 2>/dev/null || true; sleep 0.7; fi &&
+                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="\$(cat ~/.pi/android/bridge.pid)"; kill "\$old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "\$old_pid" 2>/dev/null || true; fi &&
+                rm -f ~/.pi/android/bridge.pid &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port &&
                 exec /data/data/com.termux/files/usr/bin/node ~/.pi/android/bridge.mjs >> ~/.pi/android/bridge.log 2>&1
             """.trimIndent().replace("\n", " ")

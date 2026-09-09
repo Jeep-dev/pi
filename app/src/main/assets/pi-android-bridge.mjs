@@ -495,6 +495,12 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (req.method === "POST" && url.pathname === "/shutdown") {
+      send(res, 200, { ok: true });
+      setImmediate(shutdownBridge);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/start") {
       const input = JSON.parse(await readBody(req) || "{}");
       await startPi(String(input.cwd || cwd), String(input.launchCommand || launchCommand));
