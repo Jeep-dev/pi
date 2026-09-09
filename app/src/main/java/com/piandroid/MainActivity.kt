@@ -9,7 +9,6 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,7 +57,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -169,15 +171,13 @@ private fun toolDraftPreview(raw: String, count: Int): String {
     val path = partialJsonString(raw, "path")
     val content = partialJsonString(raw, "content")
     val preview = when {
-        content != null -> content.takeLast(1_600).lineSequence().toList().takeLast(18).joinToString("\n")
-        raw.isNotBlank() -> raw.takeLast(800)
+        content != null -> content
+        raw.isNotBlank() -> raw
         else -> "等待参数数据…"
     }
     return buildString {
         if (!path.isNullOrBlank()) append("目标：$path\n")
-        append("实时预览")
-        if (content != null && content.length > preview.length) append("（末尾）")
-        append(":\n")
+        append("实时生成内容：\n")
         append(preview)
         append("\n\n已生成 ${compactCount(count.toLong())} 字符 · 正常运行")
     }
@@ -254,6 +254,7 @@ private fun PiScreen(bridge: PiBridge) {
     val lines = remember { mutableStateListOf<ChatLine>() }
     val toolDraftChars = remember { mutableMapOf<Int, Int>() }
     val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
+    val toolDraftRefreshAt = remember { mutableMapOf<Int, Long>() }
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
@@ -330,7 +331,8 @@ private fun PiScreen(bridge: PiBridge) {
                 text = "$text\n\n正在生成调用参数…",
                 streaming = true,
                 toolCallId = toolCallId,
-                contentIndex = contentIndex
+                contentIndex = contentIndex,
+                collapsed = true
             )
         )
     }
@@ -341,7 +343,10 @@ private fun PiScreen(bridge: PiBridge) {
         val current = previous + delta.length
         toolDraftChars[contentIndex] = current
         val buffer = toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
-        if (current / 512 == previous / 512) return
+        val now = android.os.SystemClock.uptimeMillis()
+        val lastRefresh = toolDraftRefreshAt[contentIndex] ?: 0L
+        if (now - lastRefresh < 50) return
+        toolDraftRefreshAt[contentIndex] = now
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
@@ -352,6 +357,7 @@ private fun PiScreen(bridge: PiBridge) {
     fun finishToolDraft(contentIndex: Int, text: String) {
         val count = toolDraftChars.remove(contentIndex) ?: 0
         val raw = toolDraftBuffers.remove(contentIndex)?.toString().orEmpty()
+        toolDraftRefreshAt.remove(contentIndex)
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
@@ -362,9 +368,10 @@ private fun PiScreen(bridge: PiBridge) {
     fun startTool(toolCallId: String, text: String) {
         val draftIndex = lines.indexOfLast { it.role == "tool-draft" && it.toolCallId == toolCallId }
         if (draftIndex >= 0) {
-            lines[draftIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId)
+            val draft = lines[draftIndex]
+            lines[draftIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = draft.collapsed)
         } else {
-            lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId))
+            lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = true))
         }
     }
 
@@ -404,7 +411,7 @@ private fun PiScreen(bridge: PiBridge) {
     }
 
     fun toggleTool(toolCallId: String) {
-        val index = lines.indexOfLast { it.role == "tool" && it.toolCallId == toolCallId }
+        val index = lines.indexOfLast { it.role.startsWith("tool") && it.toolCallId == toolCallId }
         if (index >= 0) lines[index] = lines[index].copy(collapsed = !lines[index].collapsed)
     }
 
@@ -543,7 +550,6 @@ private fun PiScreen(bridge: PiBridge) {
             }
             "/settings" -> panel = Panel.Settings
             else -> {
-                followOutput = true
                 lines.add(ChatLine("user", text))
                 scope.launch {
                     val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
@@ -590,6 +596,7 @@ private fun PiScreen(bridge: PiBridge) {
                                 }
                                 toolDraftChars.clear()
                                 toolDraftBuffers.clear()
+                                toolDraftRefreshAt.clear()
                             }
                         }
                         "tool_execution_start" -> startTool(event.toolCallId, event.text)
@@ -966,14 +973,20 @@ private fun ChatPanel(
     onUserScroll: () -> Unit,
     onToggleTool: (String) -> Unit
 ) {
+    val userScrollLock = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput) onUserScroll()
+                return Offset.Zero
+            }
+        }
+    }
     LazyColumn(
         state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 12.dp)
-            .pointerInput(Unit) {
-                detectVerticalDragGestures { _, _ -> onUserScroll() }
-            },
+            .nestedScroll(userScrollLock),
         contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -1028,8 +1041,15 @@ private fun ChatPanel(
         }
         items(lines) { line ->
             val fullText = line.text.trimEnd()
-            val visibleText = if (line.role == "tool" && line.collapsed && fullText.length > 700) {
-                fullText.take(700).trimEnd() + "\n\n… 点击展开完整工具结果"
+            val fullLines = fullText.lines()
+            val isTool = line.role.startsWith("tool")
+            val hasHiddenToolLines = isTool && fullLines.size > 10
+            val visibleText = if (hasHiddenToolLines && line.collapsed) {
+                if (line.role == "tool-draft") {
+                    (fullLines.take(2) + "… ${fullLines.size - 9} 行生成中 …" + fullLines.takeLast(7)).joinToString("\n")
+                } else {
+                    fullLines.take(10).joinToString("\n")
+                }
             } else {
                 fullText
             }
@@ -1056,18 +1076,31 @@ private fun ChatPanel(
                     lineHeight = 20.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
                 )
-                "tool", "tool-draft" -> Text(
-                    visibleText + if (!line.collapsed && fullText.length > 700) "\n\n… 点击收起" else "",
-                    color = TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(ToolBg, RoundedCornerShape(3.dp))
-                        .clickable(enabled = fullText.length > 700) { onToggleTool(line.toolCallId) }
-                        .padding(12.dp)
-                )
+                "tool", "tool-draft" -> Column(
+                    Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(10.dp)
+                ) {
+                    Text(
+                        visibleText,
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                    if (hasHiddenToolLines) {
+                        TextButton(
+                            onClick = { onToggleTool(line.toolCallId) },
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                if (line.collapsed) "展开全部 ↓" else "收起 ↑",
+                                color = Blue,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
                     else -> Text(
                         visibleText,
                         color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
