@@ -306,14 +306,22 @@ class PiBridge(context: Context) {
                 val subtype = delta.optString("type")
                 val text = when (subtype) {
                     "text_delta", "thinking_delta", "toolcall_delta" -> delta.optString("delta")
-                    "toolcall_start" -> "调用工具：${delta.optString("toolName")}"
+                    "toolcall_start" -> "正在准备工具：${delta.optString("toolName")}"
+                    "toolcall_end" -> "工具参数准备完成：${delta.optJSONObject("toolCall")?.optString("name").orEmpty()}"
                     else -> ""
                 }
-                PiEvent(seq, type, subtype, text)
+                PiEvent(
+                    seq, type, subtype, text,
+                    toolCallId = delta.optString("id"),
+                    contentIndex = delta.optInt("contentIndex", -1)
+                )
             }
             "message_end" -> {
                 val message = value.optJSONObject("message") ?: JSONObject()
-                PiEvent(seq, type, message.optString("role"), messageText(message))
+                PiEvent(
+                    seq, type, message.optString("role"), messageText(message),
+                    stopReason = message.optString("stopReason")
+                )
             }
             "tool_execution_start" -> {
                 val args = value.optJSONObject("args")
@@ -486,7 +494,9 @@ data class PiEvent(
     val subtype: String,
     val text: String,
     val uiRequest: PiUiRequest? = null,
-    val toolCallId: String = ""
+    val toolCallId: String = "",
+    val contentIndex: Int = -1,
+    val stopReason: String = ""
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)

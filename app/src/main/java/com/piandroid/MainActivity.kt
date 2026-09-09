@@ -111,6 +111,7 @@ private data class ChatLine(
     val text: String,
     val streaming: Boolean = false,
     val toolCallId: String = "",
+    val contentIndex: Int = -1,
     val collapsed: Boolean = false
 )
 private data class LocalCommand(val name: String, val description: String)
@@ -198,6 +199,7 @@ private fun PiScreen(bridge: PiBridge) {
     var cursor by remember { mutableLongStateOf(0L) }
     var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
+    val toolDraftChars = remember { mutableMapOf<Int, Int>() }
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
@@ -264,8 +266,49 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
+    fun startToolDraft(contentIndex: Int, toolCallId: String, text: String) {
+        if (contentIndex < 0) return
+        toolDraftChars[contentIndex] = 0
+        lines.add(
+            ChatLine(
+                role = "tool-draft",
+                text = "$text\n\n正在生成调用参数…",
+                streaming = true,
+                toolCallId = toolCallId,
+                contentIndex = contentIndex
+            )
+        )
+    }
+
+    fun updateToolDraft(contentIndex: Int, delta: String) {
+        if (contentIndex < 0) return
+        val previous = toolDraftChars[contentIndex] ?: 0
+        val current = previous + delta.length
+        toolDraftChars[contentIndex] = current
+        if (current / 1024 == previous / 1024) return
+        val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
+        if (index >= 0) {
+            val line = lines[index]
+            lines[index] = line.copy(text = line.text.substringBefore("\n\n") + "\n\n正在生成调用参数… ${compactCount(current.toLong())} 字符")
+        }
+    }
+
+    fun finishToolDraft(contentIndex: Int, text: String) {
+        val count = toolDraftChars.remove(contentIndex) ?: 0
+        val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
+        if (index >= 0) {
+            val line = lines[index]
+            lines[index] = line.copy(text = "$text\n\n已生成 ${compactCount(count.toLong())} 字符，等待执行…")
+        }
+    }
+
     fun startTool(toolCallId: String, text: String) {
-        lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId))
+        val draftIndex = lines.indexOfLast { it.role == "tool-draft" && it.toolCallId == toolCallId }
+        if (draftIndex >= 0) {
+            lines[draftIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId)
+        } else {
+            lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId))
+        }
     }
 
     fun updateTool(toolCallId: String, text: String) {
@@ -475,9 +518,22 @@ private fun PiScreen(bridge: PiBridge) {
                         "message_update" -> when (event.subtype) {
                             "text_delta" -> appendStream("assistant", event.text)
                             "thinking_delta" -> appendStream("thinking", event.text)
+                            "toolcall_start" -> startToolDraft(event.contentIndex, event.toolCallId, event.text)
+                            "toolcall_delta" -> updateToolDraft(event.contentIndex, event.text)
+                            "toolcall_end" -> finishToolDraft(event.contentIndex, event.text)
                             else -> Unit
                         }
-                        "message_end" -> if (event.subtype == "assistant") finalizeAssistant(event.text)
+                        "message_end" -> if (event.subtype == "assistant") {
+                            finalizeAssistant(event.text)
+                            if (event.stopReason == "aborted" || event.stopReason == "error") {
+                                for (i in lines.indices) {
+                                    if (lines[i].role == "tool-draft" && lines[i].streaming) {
+                                        lines[i] = lines[i].copy(text = lines[i].text.substringBefore("\n\n") + "\n\n已取消，工具未执行", streaming = false)
+                                    }
+                                }
+                                toolDraftChars.clear()
+                            }
+                        }
                         "tool_execution_start" -> startTool(event.toolCallId, event.text)
                         "tool_execution_update" -> updateTool(event.toolCallId, event.text)
                         "tool_execution_end" -> finishTool(event.toolCallId, event.text)
@@ -946,7 +1002,7 @@ private fun ChatPanel(
                     lineHeight = 20.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
                 )
-                "tool" -> Text(
+                "tool", "tool-draft" -> Text(
                     visibleText + if (!line.collapsed && fullText.length > 700) "\n\n… 点击收起" else "",
                     color = TextMuted,
                     fontFamily = FontFamily.Monospace,
