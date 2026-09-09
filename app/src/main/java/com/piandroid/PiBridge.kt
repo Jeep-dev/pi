@@ -298,6 +298,26 @@ class PiBridge(context: Context) {
         }
     }
 
+    private fun toolArgsText(toolName: String, args: JSONObject?): String {
+        if (args == null || args.length() == 0) return ""
+        return when (toolName) {
+            "write" -> {
+                val content = args.optString("content")
+                buildString {
+                    append("目标：${args.optString("path")}\n")
+                    append("内容：${content.length} 字符")
+                    if (content.isNotBlank()) {
+                        val preview = content.takeLast(1_600).lineSequence().toList().takeLast(18).joinToString("\n")
+                        append("\n\n写入预览${if (content.length > preview.length) "（末尾）" else ""}：\n$preview")
+                    }
+                }
+            }
+            "edit" -> "目标：${args.optString("path")}\n修改块：${args.optJSONArray("edits")?.length() ?: 0}"
+            "bash" -> "命令：${args.optString("command")}"
+            else -> args.toString(2).let { if (it.length > 2_000) it.take(2_000) + "\n… 参数已截断" else it }
+        }
+    }
+
     private fun parseEvent(seq: Long, value: JSONObject): PiEvent {
         val type = value.optString("type")
         return when (type) {
@@ -325,9 +345,11 @@ class PiBridge(context: Context) {
             }
             "tool_execution_start" -> {
                 val args = value.optJSONObject("args")
+                val toolName = value.optString("toolName")
+                val details = toolArgsText(toolName, args)
                 val text = buildString {
-                    append("执行工具：${value.optString("toolName")}")
-                    if (args != null && args.length() > 0) append("\n\n参数：\n${args.toString(2)}")
+                    append("执行工具：$toolName")
+                    if (details.isNotBlank()) append("\n\n$details")
                 }
                 PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }

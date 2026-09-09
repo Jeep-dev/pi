@@ -130,6 +130,59 @@ private val TextMuted = Color(0xFF858C96)
 private val ThinkingText = Color(0xFF9A9A9A)
 private val Danger = Color(0xFFFF8D8D)
 
+private fun partialJsonString(raw: String, key: String): String? {
+    val marker = "\"$key\""
+    val keyIndex = raw.indexOf(marker)
+    if (keyIndex < 0) return null
+    val colon = raw.indexOf(':', keyIndex + marker.length)
+    val quote = if (colon >= 0) raw.indexOf('"', colon + 1) else -1
+    if (quote < 0) return null
+    return buildString {
+        var index = quote + 1
+        while (index < raw.length) {
+            val char = raw[index++]
+            if (char == '"') break
+            if (char != '\\' || index >= raw.length) {
+                append(char)
+                continue
+            }
+            when (val escaped = raw[index++]) {
+                'n' -> append('\n')
+                'r' -> append('\r')
+                't' -> append('\t')
+                'b' -> append('\b')
+                'f' -> append('\u000C')
+                '"', '\\', '/' -> append(escaped)
+                'u' -> {
+                    if (index + 4 <= raw.length) {
+                        raw.substring(index, index + 4).toIntOrNull(16)?.let { append(it.toChar()) }
+                        index += 4
+                    }
+                }
+                else -> append(escaped)
+            }
+        }
+    }
+}
+
+private fun toolDraftPreview(raw: String, count: Int): String {
+    val path = partialJsonString(raw, "path")
+    val content = partialJsonString(raw, "content")
+    val preview = when {
+        content != null -> content.takeLast(1_600).lineSequence().toList().takeLast(18).joinToString("\n")
+        raw.isNotBlank() -> raw.takeLast(800)
+        else -> "等待参数数据…"
+    }
+    return buildString {
+        if (!path.isNullOrBlank()) append("目标：$path\n")
+        append("实时预览")
+        if (content != null && content.length > preview.length) append("（末尾）")
+        append(":\n")
+        append(preview)
+        append("\n\n已生成 ${compactCount(count.toLong())} 字符 · 正常运行")
+    }
+}
+
 private fun markdownText(source: String) = buildAnnotatedString {
     val text = source
         .replace(Regex("(?m)^#{1,6}\\s+"), "")
@@ -200,6 +253,7 @@ private fun PiScreen(bridge: PiBridge) {
     var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
     val toolDraftChars = remember { mutableMapOf<Int, Int>() }
+    val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
@@ -269,6 +323,7 @@ private fun PiScreen(bridge: PiBridge) {
     fun startToolDraft(contentIndex: Int, toolCallId: String, text: String) {
         if (contentIndex < 0) return
         toolDraftChars[contentIndex] = 0
+        toolDraftBuffers[contentIndex] = StringBuilder()
         lines.add(
             ChatLine(
                 role = "tool-draft",
@@ -285,20 +340,22 @@ private fun PiScreen(bridge: PiBridge) {
         val previous = toolDraftChars[contentIndex] ?: 0
         val current = previous + delta.length
         toolDraftChars[contentIndex] = current
-        if (current / 1024 == previous / 1024) return
+        val buffer = toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
+        if (current / 512 == previous / 512) return
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
-            lines[index] = line.copy(text = line.text.substringBefore("\n\n") + "\n\n正在生成调用参数… ${compactCount(current.toLong())} 字符")
+            lines[index] = line.copy(text = line.text.substringBefore("\n\n") + "\n\n" + toolDraftPreview(buffer.toString(), current))
         }
     }
 
     fun finishToolDraft(contentIndex: Int, text: String) {
         val count = toolDraftChars.remove(contentIndex) ?: 0
+        val raw = toolDraftBuffers.remove(contentIndex)?.toString().orEmpty()
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
-            lines[index] = line.copy(text = "$text\n\n已生成 ${compactCount(count.toLong())} 字符，等待执行…")
+            lines[index] = line.copy(text = "$text\n\n${toolDraftPreview(raw, count)}\n\n参数完整，等待执行…")
         }
     }
 
@@ -532,6 +589,7 @@ private fun PiScreen(bridge: PiBridge) {
                                     }
                                 }
                                 toolDraftChars.clear()
+                                toolDraftBuffers.clear()
                             }
                         }
                         "tool_execution_start" -> startTool(event.toolCallId, event.text)
