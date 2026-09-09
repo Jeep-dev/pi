@@ -4,9 +4,47 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-android { namespace = "com.piandroid"; compileSdk = 35
-    defaultConfig { applicationId = "com.piandroid"; minSdk = 26; targetSdk = 35; versionCode = 56; versionName = "5.6.0" }
-    buildTypes { release { isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
+val signingPath = System.getenv("ANDROID_KEYSTORE_PATH")
+val signingStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
+
+android {
+    namespace = "com.piandroid"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.piandroid"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 57
+        versionName = "5.6.1"
+    }
+
+    signingConfigs {
+        if (hasCiSigning) {
+            create("ci") {
+                storeFile = file(signingPath!!)
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            if (hasCiSigning) signingConfig = signingConfigs.getByName("ci")
+        }
+        getByName("release") {
+            if (hasCiSigning) signingConfig = signingConfigs.getByName("ci")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21

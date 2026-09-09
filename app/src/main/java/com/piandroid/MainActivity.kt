@@ -746,7 +746,7 @@ private fun ChatPanel(
         state = listState,
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
         contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item(key = "session-meta") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)) {
@@ -798,9 +798,10 @@ private fun ChatPanel(
             }
         }
         items(lines) { line ->
+            val visibleText = line.text.trimEnd()
             when (line.role) {
                 "user" -> Text(
-                    line.text,
+                    visibleText,
                     color = TextMain,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 15.sp,
@@ -808,7 +809,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(14.dp)
                 )
                 "assistant" -> Text(
-                    line.text,
+                    visibleText,
                     color = TextMain,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 15.sp,
@@ -816,7 +817,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
                 )
                 "thinking" -> Text(
-                    line.text,
+                    visibleText,
                     color = ThinkingText,
                     fontFamily = FontFamily.Monospace,
                     fontStyle = FontStyle.Italic,
@@ -825,7 +826,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp)
                 )
                 "tool" -> Text(
-                    line.text,
+                    visibleText,
                     color = TextMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
@@ -833,7 +834,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(12.dp)
                 )
                 else -> Text(
-                    line.text,
+                    visibleText,
                     color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,

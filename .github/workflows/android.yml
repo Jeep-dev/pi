@@ -23,6 +23,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pi-android.jks"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -37,9 +41,14 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Build debug and release APKs
+      - name: Build signed debug and release APKs
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/pi-android.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.6-apks
+          name: pi-android-v5.6.1-apks
           path: app/build/outputs/apk/**/*.apk

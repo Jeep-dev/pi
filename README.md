@@ -49,7 +49,7 @@ node tools/test_bridge_auth.mjs
 ./gradlew :app:assembleDebug
 ```
 
-GitHub Actions 会直接从已提交源码构建，不再动态套用补丁，并上传 debug 和未签名 release APK。
+GitHub Actions 会直接从已提交源码构建，不再动态套用补丁。配置仓库签名 Secrets 后，会上传使用同一密钥签名的 debug 和 release APK，后续版本可以直接覆盖安装。
 
 ## 项目目录
 
