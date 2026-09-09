@@ -55,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -74,6 +75,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -550,6 +552,7 @@ private fun PiScreen(bridge: PiBridge) {
             }
             "/settings" -> panel = Panel.Settings
             else -> {
+                followOutput = true
                 lines.add(ChatLine("user", text))
                 scope.launch {
                     val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
@@ -766,7 +769,7 @@ private fun PiScreen(bridge: PiBridge) {
                     connected = connected,
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
-                    onUserScroll = { followOutput = false },
+                    onFollowChange = { followOutput = it },
                     onToggleTool = ::toggleTool
                 )
                 Panel.Models -> ModelsPanel(
@@ -970,16 +973,35 @@ private fun ChatPanel(
     connected: Boolean,
     onConnect: () -> Unit,
     onSettings: () -> Unit,
-    onUserScroll: () -> Unit,
+    onFollowChange: (Boolean) -> Unit,
     onToggleTool: (String) -> Unit
 ) {
-    val userScrollLock = remember {
+    fun isAtBottom(): Boolean {
+        val layout = listState.layoutInfo
+        if (layout.totalItemsCount == 0) return true
+        val last = layout.visibleItemsInfo.lastOrNull() ?: return false
+        return last.index == layout.totalItemsCount - 1 &&
+            last.offset + last.size <= layout.viewportEndOffset + 2
+    }
+
+    val userScrollLock = remember(listState) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput) onUserScroll()
+                if (source == NestedScrollSource.UserInput) onFollowChange(false)
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && isAtBottom()) onFollowChange(true)
                 return Offset.Zero
             }
         }
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { isAtBottom() }
+            .distinctUntilChanged()
+            .collect { atBottom -> if (atBottom) onFollowChange(true) }
     }
     LazyColumn(
         state = listState,
