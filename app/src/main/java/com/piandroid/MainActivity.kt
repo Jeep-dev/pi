@@ -1575,25 +1575,50 @@ private fun ExtensionDialog(
     onDismiss: () -> Unit
 ) {
     when (request.method) {
-        "select" -> AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text(request.title.ifBlank { "选择" }) },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 460.dp)) {
-                    items(request.options) { option ->
-                        Text(
-                            option,
-                            color = TextMain,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            modifier = Modifier.fillMaxWidth().clickable { onSelect(option) }.padding(vertical = 11.dp)
-                        )
+        "select" -> {
+            val isSessionTree = request.title == "Session Tree"
+            var filter by remember(request.id) { mutableStateOf("") }
+            val tokens = filter.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+            val visibleOptions = if (tokens.isEmpty()) request.options else request.options.filter { option ->
+                val searchable = option.lowercase()
+                tokens.all { it in searchable }
+            }
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text(request.title.ifBlank { "选择" }) },
+                text = {
+                    Column(Modifier.fillMaxWidth()) {
+                        if (isSessionTree) {
+                            OutlinedTextField(
+                                value = filter,
+                                onValueChange = { filter = it },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                placeholder = { Text("搜索消息、标签或节点 ID") },
+                                singleLine = true,
+                                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                            )
+                        }
+                        LazyColumn(Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)) {
+                            items(visibleOptions) { option ->
+                                Text(
+                                    option,
+                                    color = if (isSessionTree && "●" in option) Accent else TextMain,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    modifier = Modifier.fillMaxWidth().clickable { onSelect(option) }.padding(vertical = 9.dp)
+                                )
+                            }
+                        }
+                        if (visibleOptions.isEmpty()) {
+                            Text("没有匹配的节点", color = TextMuted, modifier = Modifier.padding(vertical = 12.dp))
+                        }
                     }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-        )
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+            )
+        }
         "confirm" -> AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(request.title.ifBlank { "确认" }) },

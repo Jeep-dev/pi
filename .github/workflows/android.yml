@@ -5,6 +5,7 @@ on:
     paths:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
+      - "tools/test_mobile_tree.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle/**"
@@ -13,6 +14,7 @@ on:
     paths:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
+      - "tools/test_mobile_tree.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle/**"
@@ -50,5 +52,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.10.4-apks
+          name: pi-android-v5.11.0-apks
           path: app/build/outputs/apk/**/*.apk
