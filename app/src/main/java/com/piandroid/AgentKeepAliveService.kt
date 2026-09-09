@@ -22,6 +22,7 @@ class AgentKeepAliveService : Service() {
     companion object {
         private const val CHANNEL_ID = "pi_agent_long_tasks"
         private const val NOTIFICATION_ID = 17649
+        private const val ACTION_STOP = "com.piandroid.STOP_LONG_TASK_KEEPALIVE"
         private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
 
         fun start(bridgeContext: Context) {
@@ -45,6 +46,7 @@ class AgentKeepAliveService : Service() {
             val bridge = PiBridge(applicationContext)
             var failures = 0
             while (isActive) {
+                wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 bridge.health().fold(
                     onSuccess = { health ->
                         failures = 0
@@ -61,7 +63,14 @@ class AgentKeepAliveService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -90,6 +99,12 @@ class AgentKeepAliveService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val stopKeepAlive = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, AgentKeepAliveService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Pi Android 长程任务")
@@ -98,6 +113,7 @@ class AgentKeepAliveService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .addAction(0, "停止保活", stopKeepAlive)
             .build()
     }
 
