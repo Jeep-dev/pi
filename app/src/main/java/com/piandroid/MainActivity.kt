@@ -259,6 +259,7 @@ private fun PiScreen(bridge: PiBridge) {
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
+    var showScrollControls by remember { mutableStateOf(false) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
     var bashOutput by remember { mutableStateOf("") }
@@ -647,6 +648,13 @@ private fun PiScreen(bridge: PiBridge) {
         if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
     }
 
+    LaunchedEffect(showScrollControls, chatListState.isScrollInProgress) {
+        if (showScrollControls && !chatListState.isScrollInProgress) {
+            delay(1_200)
+            showScrollControls = false
+        }
+    }
+
     LaunchedEffect(connected) {
         if (!connected) return@LaunchedEffect
         var knownSession = currentState?.sessionId.orEmpty()
@@ -769,6 +777,7 @@ private fun PiScreen(bridge: PiBridge) {
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
                     onFollowChange = { followOutput = it },
+                    onUserScrollActivity = { showScrollControls = true },
                     onToggleTool = ::toggleTool
                 )
                 Panel.Models -> ModelsPanel(
@@ -871,24 +880,39 @@ private fun PiScreen(bridge: PiBridge) {
                 )
             }
 
-            if (panel == Panel.Chat && !followOutput) {
-                Text(
-                    "↓",
-                    color = Bg,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
+            if (panel == Panel.Chat && showScrollControls) {
+                Column(
+                    Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(18.dp)
-                        .background(Accent, RoundedCornerShape(24.dp))
-                        .clickable {
+                        .padding(end = 2.dp, bottom = 88.dp)
+                        .width(38.dp)
+                        .background(Color(0xDD41464C), RoundedCornerShape(7.dp))
+                        .border(1.dp, Color(0xFF626970), RoundedCornerShape(7.dp))
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth().height(36.dp).clickable {
+                            followOutput = false
+                            showScrollControls = false
+                            scope.launch { chatListState.scrollToItem(0) }
+                        },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("↑", color = Color(0xFFD2D5D8), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF686E74)))
+                    Box(
+                        Modifier.fillMaxWidth().height(36.dp).clickable {
                             followOutput = true
+                            showScrollControls = false
                             scope.launch {
                                 if (lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
                             }
-                        }
-                        .padding(horizontal = 17.dp, vertical = 10.dp)
-                )
+                        },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("↓", color = Color(0xFFD2D5D8), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
 
             if (panel == Panel.Chat && input.startsWith("/")) {
@@ -983,6 +1007,7 @@ private fun ChatPanel(
     onConnect: () -> Unit,
     onSettings: () -> Unit,
     onFollowChange: (Boolean) -> Unit,
+    onUserScrollActivity: () -> Unit,
     onToggleTool: (String) -> Unit
 ) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
@@ -990,7 +1015,10 @@ private fun ChatPanel(
     val userScrollLock = remember(listState) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput) onFollowChange(false)
+                if (source == NestedScrollSource.UserInput) {
+                    onFollowChange(false)
+                    onUserScrollActivity()
+                }
                 return Offset.Zero
             }
 

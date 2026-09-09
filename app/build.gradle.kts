@@ -18,8 +18,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 70
-        versionName = "5.10.3"
+        versionCode = 71
+        versionName = "5.10.4"
     }
 
     signingConfigs {
