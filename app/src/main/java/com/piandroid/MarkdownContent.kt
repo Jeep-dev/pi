@@ -31,7 +31,7 @@ private val MdCyan = Color(0xFF63D1D1)
 private val MdBorder = Color(0xFF77738E)
 private val MdCodeBg = Color(0xFF171620)
 
-a sealed interface MarkdownBlock {
+private sealed interface MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock
     data class Heading(val level: Int, val text: String) : MarkdownBlock
     data class Code(val language: String, val text: String) : MarkdownBlock
@@ -168,7 +168,7 @@ fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
                         Text(inlineMarkdown(item), color = MdText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 20.sp)
                     } }
                 }
-                is MarkdownBlock.Quote -> Box(Modifier.fillMaxWidth().border(width = 0.dp).background(Color(0xFF1C1B27)).padding(start = 10.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)) {
+                is MarkdownBlock.Quote -> Box(Modifier.fillMaxWidth().background(Color(0xFF1C1B27)).padding(start = 10.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)) {
                     Text(inlineMarkdown(block.text), color = MdMuted, fontFamily = FontFamily.Monospace, fontSize = 13.5.sp, lineHeight = 20.sp)
                 }
                 MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).background(MdBorder).padding(top = 1.dp))
