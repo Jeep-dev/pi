@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-09.13";
+const bridgeVersion = "2026-09-10.1";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -209,23 +209,27 @@ async function startPi(nextCwd, nextLaunchCommand) {
   lastStdoutTail = "";
   lastExit = null;
 
+  let startedChild;
   try {
-    child = spawnPi(launchCommand, cwd);
+    startedChild = spawnPi(launchCommand, cwd);
+    child = startedChild;
   } catch (error) {
     throw new Error(`Pi launcher failed: ${String(error?.message || error)}`);
   }
 
-  attachJsonl(child.stdout);
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", text => {
+  attachJsonl(startedChild.stdout);
+  startedChild.stderr.setEncoding("utf8");
+  startedChild.stderr.on("data", text => {
     lastStderr = (lastStderr + text).slice(-8000);
     addEvent({ type: "stderr", text });
   });
-  child.on("error", error => {
+  startedChild.on("error", error => {
+    if (child !== startedChild) return;
     lastStderr = (lastStderr + `\n${error.message}`).slice(-8000);
     addEvent({ type: "stderr", text: error.message });
   });
-  child.on("exit", (code, signal) => {
+  startedChild.on("exit", (code, signal) => {
+    if (child !== startedChild) return;
     lastExit = { code, signal };
     addEvent({ type: "process_exit", code, signal, stderr: lastStderr, stdout: lastStdoutTail });
     for (const [, item] of pending) {
@@ -236,7 +240,7 @@ async function startPi(nextCwd, nextLaunchCommand) {
     child = null;
   });
   await new Promise(resolve => setTimeout(resolve, 450));
-  if (!child || child.exitCode != null) {
+  if (child !== startedChild || startedChild.exitCode != null) {
     const exitText = lastExit ? `exit=${lastExit.code ?? "?"} signal=${lastExit.signal ?? "-"}` : "exit=unknown";
     const details = [lastStderr.trim(), lastStdoutTail.trim()].filter(Boolean).join("\n--- stdout ---\n");
     throw new Error(`Pi failed to start (${exitText})${details ? `\n${details}` : ""}`);

@@ -18,7 +18,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-09.13"
+    private val expectedBridgeVersion = "2026-09-10.1"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -10,13 +10,36 @@ const home = await mkdtemp(path.join(tmpdir(), "pi-android-test-"));
 const port = 20_000 + (process.pid % 20_000);
 const token = randomBytes(32).toString("base64url");
 await mkdir(path.join(home, ".pi", "android"), { recursive: true });
+const prefix = path.join(home, "prefix");
+await mkdir(path.join(prefix, "bin"), { recursive: true });
+const fakePi = path.join(prefix, "bin", "pi");
+await writeFile(fakePi, `
+process.on("SIGTERM", () => setTimeout(() => process.exit(0), 150));
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const newline = buffer.indexOf("\\n");
+    const raw = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!raw) continue;
+    const command = JSON.parse(raw);
+    const data = command.type === "get_state"
+      ? { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 0 }
+      : {};
+    process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: true, data }) + "\\n");
+  }
+});
+`);
+await chmod(fakePi, 0o700);
 
 function waitForExit(child) {
   return new Promise(resolve => child.once("exit", (code, signal) => resolve({ code, signal })));
 }
 
 const child = spawn(process.execPath, [bridgePath], {
-  env: { ...process.env, HOME: home, PI_ANDROID_PORT: String(port), PI_ANDROID_TOKEN: token },
+  env: { ...process.env, HOME: home, PREFIX: prefix, PI_ANDROID_PORT: String(port), PI_ANDROID_TOKEN: token },
   stdio: ["ignore", "pipe", "pipe"],
 });
 let diagnostics = "";
@@ -38,7 +61,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-09.13");
+  assert.equal(health.bridgeVersion, "2026-09-10.1");
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -63,11 +86,29 @@ try {
   assert.match((await escaped.json()).error, /outside project/);
 
   const noToken = spawn(process.execPath, [bridgePath], {
-    env: { ...process.env, HOME: home, PI_ANDROID_PORT: String(port + 1), PI_ANDROID_TOKEN: "" },
+    env: { ...process.env, HOME: home, PREFIX: prefix, PI_ANDROID_PORT: String(port + 1), PI_ANDROID_TOKEN: "" },
     stdio: "ignore",
   });
   const noTokenExit = await waitForExit(noToken);
   assert.notEqual(noTokenExit.code, 0, "bridge must refuse to start without authentication");
+
+  const startHeaders = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const started = await fetch(`http://127.0.0.1:${port}/start`, {
+      method: "POST",
+      headers: startHeaders,
+      body: JSON.stringify({ cwd: home, launchCommand: "pi --mode rpc" }),
+    });
+    assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
+  }
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const afterRestart = await fetch(`http://127.0.0.1:${port}/state`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(afterRestart.status, 200, "late exit from old Pi process must not detach the replacement process");
 
   const shutdown = await fetch(`http://127.0.0.1:${port}/shutdown`, {
     method: "POST",
