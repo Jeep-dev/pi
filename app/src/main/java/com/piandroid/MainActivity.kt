@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -56,10 +58,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -96,7 +101,12 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings }
-private data class ChatLine(val role: String, val text: String, val streaming: Boolean = false)
+private data class ChatLine(
+    val role: String,
+    val text: String,
+    val streaming: Boolean = false,
+    val toolCallId: String = ""
+)
 private data class LocalCommand(val name: String, val description: String)
 
 private val Bg = Color(0xFF000000)
@@ -112,6 +122,45 @@ private val TextMain = Color(0xFFE8EAF0)
 private val TextMuted = Color(0xFF858C96)
 private val ThinkingText = Color(0xFF9A9A9A)
 private val Danger = Color(0xFFFF8D8D)
+
+private fun markdownText(source: String) = buildAnnotatedString {
+    val text = source
+        .replace(Regex("(?m)^#{1,6}\\s+"), "")
+        .replace(Regex("(?m)^```[^\\n]*$"), "")
+    var index = 0
+    while (index < text.length) {
+        when {
+            text.startsWith("**", index) -> {
+                val end = text.indexOf("**", index + 2)
+                if (end > index + 2) {
+                    pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
+                    append(text.substring(index + 2, end))
+                    pop()
+                    index = end + 2
+                } else {
+                    append("**")
+                    index += 2
+                }
+            }
+            text[index] == '`' -> {
+                val end = text.indexOf('`', index + 1)
+                if (end > index + 1) {
+                    pushStyle(SpanStyle(color = Blue, fontFamily = FontFamily.Monospace))
+                    append(text.substring(index + 1, end))
+                    pop()
+                    index = end + 1
+                } else {
+                    append('`')
+                    index++
+                }
+            }
+            else -> {
+                append(text[index])
+                index++
+            }
+        }
+    }
+}
 
 @Composable
 private fun PiTouchApp(bridge: PiBridge) {
@@ -130,7 +179,7 @@ private fun PiTouchApp(bridge: PiBridge) {
 @Composable
 private fun PiScreen(bridge: PiBridge) {
     var cwd by rememberSaveable { mutableStateOf("/data/data/com.termux/files/home") }
-    var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc") }
+    var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts") }
     var input by rememberSaveable { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(false) }
@@ -145,6 +194,7 @@ private fun PiScreen(bridge: PiBridge) {
     val lines = remember { mutableStateListOf<ChatLine>() }
     val scope = rememberCoroutineScope()
     val chatListState = rememberLazyListState()
+    var followOutput by remember { mutableStateOf(true) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
     var bashOutput by remember { mutableStateOf("") }
@@ -158,6 +208,7 @@ private fun PiScreen(bridge: PiBridge) {
     var dialogInput by remember { mutableStateOf("") }
     var resumeSessions by remember { mutableStateOf<List<PiSession>>(emptyList()) }
     var resumeOpen by remember { mutableStateOf(false) }
+    var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
 
     val localCommands = remember {
         listOf(
@@ -207,29 +258,42 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    fun startTool(text: String) {
-        lines.add(ChatLine("tool", text, streaming = true))
+    fun startTool(toolCallId: String, text: String) {
+        lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId))
     }
 
-    fun updateTool(text: String) {
+    fun updateTool(toolCallId: String, text: String) {
         if (text.isBlank()) return
-        val last = lines.lastOrNull()
-        if (last?.role == "tool" && last.streaming) {
-            val title = last.text.substringBefore("\n\n")
-            lines[lines.lastIndex] = last.copy(text = "$title\n\n$text")
+        val index = lines.indexOfLast {
+            it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
+        }
+        if (index >= 0) {
+            val line = lines[index]
+            val title = line.text.substringBefore("\n\n")
+            lines[index] = line.copy(text = "$title\n\n${text.trimEnd()}")
         } else {
-            lines.add(ChatLine("tool", text, streaming = true))
+            lines.add(ChatLine("tool", text.trimEnd(), streaming = true, toolCallId = toolCallId))
         }
     }
 
-    fun finishTool(text: String) {
-        val last = lines.lastOrNull()
-        if (last?.role == "tool" && last.streaming) {
-            val suffix = if (text.isBlank()) "" else "\n\n$text"
-            lines[lines.lastIndex] = last.copy(text = last.text + suffix, streaming = false)
-        } else if (text.isNotBlank()) {
-            lines.add(ChatLine("tool", text))
+    fun finishTool(toolCallId: String, text: String) {
+        val index = lines.indexOfLast {
+            it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
         }
+        if (index >= 0) {
+            val line = lines[index]
+            val suffix = if (text.isBlank()) "" else "\n\n${text.trim()}"
+            lines[index] = line.copy(text = line.text.trimEnd() + suffix, streaming = false)
+        } else if (text.isNotBlank()) {
+            lines.add(ChatLine("tool", text.trim(), toolCallId = toolCallId))
+        }
+    }
+
+    fun finalizeAssistant(text: String) {
+        if (text.isBlank()) return
+        val index = lines.indexOfLast { it.role == "assistant" && it.streaming }
+        if (index >= 0) lines[index] = lines[index].copy(text = text, streaming = false)
+        else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
     }
 
     fun settleStreams() {
@@ -253,6 +317,11 @@ private fun PiScreen(bridge: PiBridge) {
                             bridge.start(cwd.trim(), launchCommand.trim()).fold(
                                 onSuccess = {
                                     currentState = it
+                                    val availableModels = bridge.models().getOrDefault(emptyList())
+                                    models = availableModels
+                                    bridge.applyDefaultModel(availableModels).onSuccess { selected ->
+                                        if (selected != null) bridge.state().onSuccess { state -> currentState = state }
+                                    }.onFailure { addSystem(it.message.orEmpty()) }
                                     connected = true
                                     status = "Ready"
                                     panel = Panel.Chat
@@ -305,7 +374,7 @@ private fun PiScreen(bridge: PiBridge) {
                     onFailure = { addSystem("/resume 失败：${it.message}") }
                 )
             }
-            "/tree", "/fork", "/name" -> addSystem("$command 尚未接入当前无扩展 RPC 版本，避免把命令误发给模型。")
+            "/tree", "/fork", "/name" -> sendExtensionCommand(text)
             "/model" -> panel = Panel.Models
             "/thinking" -> panel = Panel.Thinking
             "/session" -> {
@@ -339,7 +408,8 @@ private fun PiScreen(bridge: PiBridge) {
                 bridge.newSession().fold(
                     onSuccess = {
                         lines.clear()
-                        addSystem("已创建新的 Pi session")
+                        bridge.applyDefaultModel(models).onFailure { addSystem(it.message.orEmpty()) }
+                        addSystem("已使用默认模型创建新的 Pi session")
                         refreshMeta()
                     },
                     onFailure = { addSystem("/new 失败：${it.message}") }
@@ -368,6 +438,7 @@ private fun PiScreen(bridge: PiBridge) {
             }
             "/settings" -> panel = Panel.Settings
             else -> {
+                followOutput = true
                 lines.add(ChatLine("user", text))
                 scope.launch {
                     val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
@@ -400,9 +471,10 @@ private fun PiScreen(bridge: PiBridge) {
                             "thinking_delta" -> appendStream("thinking", event.text)
                             else -> Unit
                         }
-                        "tool_execution_start" -> startTool(event.text)
-                        "tool_execution_update" -> updateTool(event.text)
-                        "tool_execution_end" -> finishTool(event.text)
+                        "message_end" -> if (event.subtype == "assistant") finalizeAssistant(event.text)
+                        "tool_execution_start" -> startTool(event.toolCallId, event.text)
+                        "tool_execution_update" -> updateTool(event.toolCallId, event.text)
+                        "tool_execution_end" -> finishTool(event.toolCallId, event.text)
                         "stderr", "process_exit", "extension_error" -> addSystem(event.text)
                         "compaction_start" -> status = "Compacting"
                         "compaction_end" -> status = "Ready"
@@ -441,8 +513,8 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length) {
-        if (lines.isNotEmpty()) chatListState.animateScrollToItem(lines.lastIndex)
+    LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput) {
+        if (followOutput && lines.isNotEmpty()) chatListState.scrollToItem(lines.lastIndex)
     }
 
     LaunchedEffect(connected) {
@@ -565,12 +637,19 @@ private fun PiScreen(bridge: PiBridge) {
                     status = status,
                     connected = connected,
                     onConnect = connect,
-                    onSettings = { panel = Panel.Settings }
+                    onSettings = { panel = Panel.Settings },
+                    onUserScroll = { followOutput = false }
                 )
                 Panel.Models -> ModelsPanel(
                     models = models,
                     state = currentState,
+                    defaultModelKey = defaultModelKey,
                     onBack = { panel = Panel.Chat },
+                    onSetDefault = { model ->
+                        bridge.saveDefaultModel(model)
+                        defaultModelKey = "${model.provider}/${model.id}"
+                        addSystem("新对话默认模型：$defaultModelKey")
+                    },
                     onPick = { model ->
                         scope.launch {
                             bridge.setModel(model).fold(
@@ -661,6 +740,26 @@ private fun PiScreen(bridge: PiBridge) {
                 )
             }
 
+            if (panel == Panel.Chat && !followOutput) {
+                Text(
+                    "↓",
+                    color = Bg,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(18.dp)
+                        .background(Accent, RoundedCornerShape(24.dp))
+                        .clickable {
+                            followOutput = true
+                            scope.launch {
+                                if (lines.isNotEmpty()) chatListState.animateScrollToItem(lines.lastIndex)
+                            }
+                        }
+                        .padding(horizontal = 17.dp, vertical = 10.dp)
+                )
+            }
+
             if (panel == Panel.Chat && input.startsWith("/")) {
                 CommandPalette(
                     query = input,
@@ -741,11 +840,17 @@ private fun ChatPanel(
     status: String,
     connected: Boolean,
     onConnect: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    onUserScroll: () -> Unit
 ) {
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 12.dp)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures { _, _ -> onUserScroll() }
+            },
         contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -800,7 +905,8 @@ private fun ChatPanel(
         }
         items(lines) { line ->
             val visibleText = line.text.trimEnd()
-            when (line.role) {
+            SelectionContainer {
+                when (line.role) {
                 "user" -> Text(
                     visibleText,
                     color = TextMain,
@@ -810,7 +916,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(14.dp)
                 )
                 "assistant" -> Text(
-                    visibleText,
+                    markdownText(visibleText),
                     color = TextMain,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 15.sp,
@@ -818,7 +924,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
                 )
                 "thinking" -> Text(
-                    visibleText,
+                    markdownText(visibleText),
                     color = ThinkingText,
                     fontFamily = FontFamily.Monospace,
                     fontStyle = FontStyle.Italic,
@@ -834,14 +940,15 @@ private fun ChatPanel(
                     lineHeight = 18.sp,
                     modifier = Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(12.dp)
                 )
-                else -> Text(
-                    visibleText,
-                    color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
-                )
+                    else -> Text(
+                        visibleText,
+                        color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+                    )
+                }
             }
         }
     }
@@ -959,22 +1066,28 @@ private fun compactCount(value: Long): String = when {
 @Composable
 private fun Footer(state: PiState?, stats: PiStats?) {
     val parts = if (stats == null) {
-        listOf("↑—", "↓—", "R—", "\$—", "—/—")
+        listOf("—/—")
     } else {
         buildList {
-            add("↑${compactCount(stats.inputTokens)}")
-            add("↓${compactCount(stats.outputTokens)}")
-            add("R${compactCount(stats.cacheRead)}")
+            if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}")
+            if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}")
+            if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}")
             if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}")
-            add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}")
-            if (state?.provider == "openai-codex" || state?.provider?.contains("copilot", ignoreCase = true) == true) add("(sub)")
+            if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) {
+                add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%")
+            }
+            val subscription = state?.provider == "openai-codex" ||
+                state?.provider == "kimi-coding" ||
+                state?.provider?.contains("copilot", ignoreCase = true) == true
+            if (stats.cost > 0 || subscription) {
+                add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}")
+            }
             val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) {
                 "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}"
             } else {
                 "—/—"
             }
-            add(context)
-            if (state?.autoCompactionEnabled == true) add("(auto)")
+            add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "")
         }
     }
     val scroll = rememberScrollState()
@@ -1005,7 +1118,9 @@ private fun PanelHeader(title: String, onBack: () -> Unit) {
 private fun ModelsPanel(
     models: List<PiModel>,
     state: PiState?,
+    defaultModelKey: String,
     onBack: () -> Unit,
+    onSetDefault: (PiModel) -> Unit,
     onPick: (PiModel) -> Unit,
     onEffort: (String) -> Unit
 ) {
@@ -1046,6 +1161,7 @@ private fun ModelsPanel(
             }
             items(models) { model ->
                 val selected = state?.provider == model.provider && state.modelId == model.id
+                val isDefault = defaultModelKey == "${model.provider}/${model.id}"
                 Row(
                     Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).clickable { onPick(model) }.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1054,7 +1170,12 @@ private fun ModelsPanel(
                         Text(model.name.ifBlank { model.id }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
                         Text("${model.provider}/${model.id}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                     }
-                    Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                        TextButton(onClick = { onSetDefault(model) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+                            Text(if (isDefault) "★ 新对话默认" else "设为默认", color = if (isDefault) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        }
+                    }
                 }
             }
         }

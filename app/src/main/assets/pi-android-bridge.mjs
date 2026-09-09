@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-09.11";
+const bridgeVersion = "2026-09-09.12";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -21,7 +21,7 @@ const nodeExecutable = process.execPath || path.join(termuxBin, "node");
 const pidFile = path.join(termuxHome, ".pi", "android", "bridge.pid");
 let child = null;
 let cwd = termuxHome;
-let launchCommand = "pi --mode rpc";
+let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
 let sequence = 0;
 let lastStderr = "";
 let lastStdoutTail = "";
@@ -435,6 +435,22 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+async function sessionStats() {
+  const stats = await rpc({ type: "get_session_stats" });
+  const messages = await rpc({ type: "get_messages" });
+  const list = Array.isArray(messages?.data?.messages) ? messages.data.messages : [];
+  const latest = [...list].reverse().find(message => message?.role === "assistant" && message?.usage);
+  const usage = latest?.usage;
+  const promptTokens = usage ? Number(usage.input || 0) + Number(usage.cacheRead || 0) + Number(usage.cacheWrite || 0) : 0;
+  return {
+    ...stats,
+    data: {
+      ...(stats.data || {}),
+      latestCacheHitRate: promptTokens > 0 ? (Number(usage.cacheRead || 0) / promptTokens) * 100 : null,
+    },
+  };
+}
+
 let shuttingDown = false;
 
 function shutdownBridge() {
@@ -504,7 +520,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/clone") return rpcResponse(res, { type: "clone" });
 
     if (req.method === "GET" && url.pathname === "/state") return rpcResponse(res, { type: "get_state" });
-    if (req.method === "GET" && url.pathname === "/stats") return rpcResponse(res, { type: "get_session_stats" });
+    if (req.method === "GET" && url.pathname === "/stats") return send(res, 200, await sessionStats());
     if (req.method === "GET" && url.pathname === "/models") return rpcResponse(res, { type: "get_available_models" });
     if (req.method === "GET" && url.pathname === "/commands") return rpcResponse(res, { type: "get_commands" });
     if (req.method === "GET" && url.pathname === "/messages") return rpcResponse(res, { type: "get_messages" });

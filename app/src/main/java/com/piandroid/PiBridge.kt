@@ -18,7 +18,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-09.11"
+    private val expectedBridgeVersion = "2026-09-09.12"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -118,6 +118,7 @@ class PiBridge(context: Context) {
             outputTokens = tokens.optLong("output"),
             cacheRead = tokens.optLong("cacheRead"),
             cacheWrite = tokens.optLong("cacheWrite"),
+            latestCacheHitRate = if (data.isNull("latestCacheHitRate")) -1.0 else data.optDouble("latestCacheHitRate", -1.0),
             cost = data.optDouble("cost", 0.0),
             contextTokens = usage?.optLong("tokens", -1L) ?: -1L,
             contextWindow = usage?.optLong("contextWindow", -1L) ?: -1L,
@@ -146,6 +147,22 @@ class PiBridge(context: Context) {
     suspend fun setModel(model: PiModel): Result<Unit> {
         val body = JSONObject().put("provider", model.provider).put("modelId", model.id).toString()
         return request("/model", body).map { Unit }
+    }
+
+    fun defaultModelKey(): String = context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
+        .getString("default_model", "").orEmpty()
+
+    fun saveDefaultModel(model: PiModel) {
+        context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
+            .edit().putString("default_model", "${model.provider}/${model.id}").apply()
+    }
+
+    suspend fun applyDefaultModel(models: List<PiModel>): Result<PiModel?> {
+        val key = defaultModelKey()
+        if (key.isBlank()) return Result.success(null)
+        val model = models.firstOrNull { "${it.provider}/${it.id}" == key }
+            ?: return Result.failure(IllegalStateException("默认模型已不可用：$key"))
+        return setModel(model).map { model }
     }
 
     suspend fun setThinking(level: String): Result<Unit> {
@@ -257,6 +274,18 @@ class PiBridge(context: Context) {
         )
     }
 
+    private fun messageText(message: JSONObject): String {
+        val content = message.opt("content")
+        if (content is String) return content
+        if (content !is JSONArray) return ""
+        return buildString {
+            for (i in 0 until content.length()) {
+                val part = content.optJSONObject(i) ?: continue
+                if (part.optString("type") == "text") append(part.optString("text"))
+            }
+        }
+    }
+
     private fun parseEvent(seq: Long, value: JSONObject): PiEvent {
         val type = value.optString("type")
         return when (type) {
@@ -270,16 +299,26 @@ class PiBridge(context: Context) {
                 }
                 PiEvent(seq, type, subtype, text)
             }
-            "tool_execution_start" -> PiEvent(seq, type, "", "执行工具：${value.optString("toolName")}")
+            "message_end" -> {
+                val message = value.optJSONObject("message") ?: JSONObject()
+                PiEvent(seq, type, message.optString("role"), messageText(message))
+            }
+            "tool_execution_start" -> PiEvent(
+                seq, type, "", "执行工具：${value.optString("toolName")}",
+                toolCallId = value.optString("toolCallId")
+            )
             "tool_execution_update" -> {
                 val text = value.optJSONObject("partialResult")
                     ?.optJSONArray("content")
                     ?.optJSONObject(0)
                     ?.optString("text")
                     .orEmpty()
-                PiEvent(seq, type, "", text)
+                PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }
-            "tool_execution_end" -> PiEvent(seq, type, "", if (value.optBoolean("isError")) "工具执行失败" else "工具完成：${value.optString("toolName")}")
+            "tool_execution_end" -> PiEvent(
+                seq, type, "", if (value.optBoolean("isError")) "工具执行失败" else "工具完成：${value.optString("toolName")}",
+                toolCallId = value.optString("toolCallId")
+            )
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
@@ -391,6 +430,7 @@ data class PiStats(
     val outputTokens: Long,
     val cacheRead: Long,
     val cacheWrite: Long,
+    val latestCacheHitRate: Double,
     val cost: Double,
     val contextTokens: Long,
     val contextWindow: Long,
@@ -410,6 +450,13 @@ data class PiUiRequest(
     val notifyType: String,
     val statusText: String
 )
-data class PiEvent(val seq: Long, val type: String, val subtype: String, val text: String, val uiRequest: PiUiRequest? = null)
+data class PiEvent(
+    val seq: Long,
+    val type: String,
+    val subtype: String,
+    val text: String,
+    val uiRequest: PiUiRequest? = null,
+    val toolCallId: String = ""
+)
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long)
 data class PiFile(val name: String, val type: String, val path: String)

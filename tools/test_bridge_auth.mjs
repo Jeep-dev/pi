@@ -38,7 +38,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-09.11");
+  assert.equal(health.bridgeVersion, "2026-09-09.12");
 
   const missing = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(missing.status, 401);
