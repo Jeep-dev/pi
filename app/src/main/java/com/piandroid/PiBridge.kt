@@ -117,6 +117,7 @@ class PiBridge(context: Context) {
             inputTokens = tokens.optLong("input"),
             outputTokens = tokens.optLong("output"),
             cacheRead = tokens.optLong("cacheRead"),
+            cacheWrite = tokens.optLong("cacheWrite"),
             cost = data.optDouble("cost", 0.0),
             contextTokens = usage?.optLong("tokens", -1L) ?: -1L,
             contextWindow = usage?.optLong("contextWindow", -1L) ?: -1L,
@@ -251,7 +252,8 @@ class PiBridge(context: Context) {
             sessionFile = data.optString("sessionFile"),
             sessionId = data.optString("sessionId"),
             sessionName = data.optString("sessionName"),
-            messageCount = data.optInt("messageCount")
+            messageCount = data.optInt("messageCount"),
+            autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
         )
     }
 
@@ -378,7 +380,8 @@ data class PiState(
     val sessionFile: String,
     val sessionId: String,
     val sessionName: String,
-    val messageCount: Int
+    val messageCount: Int,
+    val autoCompactionEnabled: Boolean
 )
 data class PiStats(
     val sessionFile: String,
@@ -387,6 +390,7 @@ data class PiStats(
     val inputTokens: Long,
     val outputTokens: Long,
     val cacheRead: Long,
+    val cacheWrite: Long,
     val cost: Double,
     val contextTokens: Long,
     val contextWindow: Long,

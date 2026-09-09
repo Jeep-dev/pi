@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -674,7 +675,7 @@ private fun PiScreen(bridge: PiBridge) {
             }
         }
 
-        Footer(currentState, currentStats, status)
+        Footer(currentState, currentStats)
 
         if (panel == Panel.Chat) {
             Composer(
@@ -948,17 +949,47 @@ private fun Composer(
     }
 }
 
+private fun compactCount(value: Long): String = when {
+    value >= 1_000_000_000 -> "${(value / 1_000_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}B"
+    value >= 1_000_000 -> "${(value / 1_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}M"
+    value >= 1_000 -> "${(value / 1_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}k"
+    else -> value.toString()
+}
+
 @Composable
-private fun Footer(state: PiState?, stats: PiStats?, status: String) {
-    val context = if (stats != null && stats.contextPercent >= 0) "${"%.1f".format(stats.contextPercent)}%" else "—"
-    Row(
-        Modifier.fillMaxWidth().background(Bg).border(1.dp, Color(0xFF23384B)).padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+private fun Footer(state: PiState?, stats: PiStats?) {
+    val parts = if (stats == null) {
+        listOf("↑—", "↓—", "R—", "\$—", "—/—")
+    } else {
+        buildList {
+            add("↑${compactCount(stats.inputTokens)}")
+            add("↓${compactCount(stats.outputTokens)}")
+            add("R${compactCount(stats.cacheRead)}")
+            if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}")
+            add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}")
+            if (state?.provider == "openai-codex" || state?.provider?.contains("copilot", ignoreCase = true) == true) add("(sub)")
+            val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) {
+                "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}"
+            } else {
+                "—/—"
+            }
+            add(context)
+            if (state?.autoCompactionEnabled == true) add("(auto)")
+        }
+    }
+    val scroll = rememberScrollState()
+    Box(
+        Modifier.fillMaxWidth().background(Bg).border(1.dp, Color(0xFF23384B)).padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
-        Text("ctx $context", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-        Text("msg ${state?.messageCount ?: 0}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-        Spacer(Modifier.weight(1f))
-        Text(status, color = if (status == "Ready") Accent else if (status == "Working") Blue else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(
+            parts.joinToString(" "),
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.horizontalScroll(scroll)
+        )
     }
 }
 
