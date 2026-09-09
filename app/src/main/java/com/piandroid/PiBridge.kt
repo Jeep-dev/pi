@@ -42,7 +42,7 @@ class PiBridge(context: Context) {
                 printf '%s' '$bridge' | base64 -d > ~/.pi/android/bridge.mjs &&
                 printf '%s' '$extension' | base64 -d > ~/.pi/android/pi-android-mobile.ts &&
                 chmod 700 ~/.pi/android/bridge.mjs &&
-                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="\$(cat ~/.pi/android/bridge.pid)"; kill "\$old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "\$old_pid" 2>/dev/null || true; fi &&
+                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="${'$'}(cat ~/.pi/android/bridge.pid)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
                 rm -f ~/.pi/android/bridge.pid &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port &&
                 exec /data/data/com.termux/files/usr/bin/node ~/.pi/android/bridge.mjs >> ~/.pi/android/bridge.log 2>&1
