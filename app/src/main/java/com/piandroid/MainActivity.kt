@@ -985,12 +985,8 @@ private fun ChatPanel(
                     lineHeight = 22.sp,
                     modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(14.dp)
                 )
-                "assistant" -> Text(
-                    markdownText(visibleText),
-                    color = TextMain,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 15.sp,
-                    lineHeight = 23.sp,
+                "assistant" -> PiMarkdown(
+                    visibleText,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)
                 )
                 "thinking" -> Text(
