@@ -93,10 +93,15 @@ class MainActivity : ComponentActivity() {
 
     private fun requestTermuxPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val requested = mutableListOf<String>()
         val installed = runCatching { packageManager.getPackageInfo("com.termux", 0) }.isSuccess
-        if (installed && checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(permission), permissionRequestCode)
+        if (installed && checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) requested += permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requested += android.Manifest.permission.POST_NOTIFICATIONS
         }
+        if (requested.isNotEmpty()) requestPermissions(requested.toTypedArray(), permissionRequestCode)
     }
 }
 
@@ -313,46 +318,39 @@ private fun PiScreen(bridge: PiBridge) {
         if (connecting) return@connect
         connecting = true
         scope.launch {
-            status = "Installing bridge"
-            connected = false
-            bridge.installAndStartBridge().fold(
-                onSuccess = {
+            try {
+                connected = false
+                status = "Checking running agent"
+                val attached = bridge.attachToRunningBridge().getOrNull()
+                if (attached != null) {
+                    currentState = attached
+                    status = "Ready"
+                } else {
+                    status = "Installing bridge"
+                    bridge.installAndStartBridge().getOrThrow()
                     status = "Waiting for bridge"
-                    bridge.waitForBridge().fold(
-                        onSuccess = {
-                            status = "Starting Pi"
-                            bridge.start(cwd.trim(), launchCommand.trim()).fold(
-                                onSuccess = {
-                                    currentState = it
-                                    val availableModels = bridge.models().getOrDefault(emptyList())
-                                    models = availableModels
-                                    bridge.applyDefaultModel(availableModels).onSuccess { selected ->
-                                        if (selected != null) bridge.state().onSuccess { state -> currentState = state }
-                                    }.onFailure { addSystem(it.message.orEmpty()) }
-                                    connected = true
-                                    status = "Ready"
-                                    panel = Panel.Chat
-                                    loadHistory()
-                                    refreshMeta()
-                                },
-                                onFailure = {
-                                    status = "Pi failed"
-                                    addSystem("启动失败：${it.message}")
-                                }
-                            )
-                        },
-                        onFailure = {
-                            status = "Bridge failed"
-                            addSystem(it.message ?: "Bridge 启动失败")
-                        }
-                    )
-                },
-                onFailure = {
-                    status = "Bridge failed"
-                    addSystem(it.message ?: "Bridge 安装失败")
+                    bridge.waitForBridge().getOrThrow()
+                    status = "Starting Pi"
+                    currentState = bridge.start(cwd.trim(), launchCommand.trim()).getOrThrow()
+                    val availableModels = bridge.models().getOrDefault(emptyList())
+                    models = availableModels
+                    bridge.applyDefaultModel(availableModels).onSuccess { selected ->
+                        if (selected != null) bridge.state().onSuccess { state -> currentState = state }
+                    }.onFailure { addSystem(it.message.orEmpty()) }
                 }
-            )
-            connecting = false
+                cursor = 0L
+                connected = true
+                status = "Ready"
+                panel = Panel.Chat
+                loadHistory()
+                refreshMeta()
+                AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
+            } catch (error: Exception) {
+                status = "Connection failed"
+                addSystem("连接失败：${error.message}")
+            } finally {
+                connecting = false
+            }
         }
     }
 
@@ -463,6 +461,7 @@ private fun PiScreen(bridge: PiBridge) {
         while (connected) {
             bridge.events(cursor).onSuccess { batch ->
                 eventFailures = 0
+                if (batch.gap) loadHistory()
                 cursor = batch.latest
                 batch.events.forEach { event ->
                     when (event.type) {
@@ -514,9 +513,10 @@ private fun PiScreen(bridge: PiBridge) {
                     status = "Disconnected"
                     connected = false
                     addSystem("Bridge 连接中断（连续 $eventFailures 次）：${error.message}")
+                } else {
+                    delay(1_000)
                 }
             }
-            delay(400)
         }
     }
 
@@ -528,7 +528,7 @@ private fun PiScreen(bridge: PiBridge) {
         if (!connected) return@LaunchedEffect
         var knownSession = currentState?.sessionId.orEmpty()
         while (connected) {
-            delay(1500)
+            delay(10_000)
             bridge.state().onSuccess { state ->
                 if (knownSession.isNotBlank() && state.sessionId.isNotBlank() && state.sessionId != knownSession) {
                     loadHistory()

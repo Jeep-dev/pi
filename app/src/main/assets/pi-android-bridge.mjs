@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-09.12";
+const bridgeVersion = "2026-09-09.13";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -27,13 +27,32 @@ let lastStderr = "";
 let lastStdoutTail = "";
 let lastExit = null;
 const events = [];
-const maxEvents = 1000;
+const maxEvents = 5000;
 const pending = new Map();
+const eventWaiters = new Set();
 
 function addEvent(value) {
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
   events.push(event);
   if (events.length > maxEvents) events.shift();
+  for (const wake of eventWaiters) wake();
+  eventWaiters.clear();
+}
+
+function waitForEvent(after, timeoutMs) {
+  if (sequence > after) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      eventWaiters.delete(wake);
+      resolve();
+    }, timeoutMs);
+    timer.unref?.();
+    const wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    eventWaiters.add(wake);
+  });
 }
 
 function settlePending(id, value) {
@@ -561,7 +580,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/bash") {
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "bash", command: String(input.command || "") }, 10 * 60 * 1000);
+      return rpcResponse(res, { type: "bash", command: String(input.command || "") }, 4 * 60 * 60 * 1000);
     }
 
     if (req.method === "POST" && url.pathname === "/abort-bash") return rpcResponse(res, { type: "abort_bash" });
@@ -574,7 +593,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/events") {
       const after = Number(url.searchParams.get("after") || 0);
-      return send(res, 200, { events: events.filter(item => item.seq > after), latest: sequence });
+      const waitMs = Math.min(25_000, Math.max(0, Number(url.searchParams.get("wait") || 0)));
+      await waitForEvent(after, waitMs);
+      const earliest = events[0]?.seq ?? sequence;
+      return send(res, 200, {
+        events: events.filter(item => item.seq > after),
+        latest: sequence,
+        earliest,
+        gap: after > 0 && after < earliest - 1,
+      });
     }
 
     if (req.method === "GET" && url.pathname === "/files") {

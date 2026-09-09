@@ -1,0 +1,108 @@
+package com.piandroid
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.os.IBinder
+import android.os.PowerManager
+import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+class AgentKeepAliveService : Service() {
+    companion object {
+        private const val CHANNEL_ID = "pi_agent_long_tasks"
+        private const val NOTIFICATION_ID = 17649
+        private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
+
+        fun start(bridgeContext: Context) {
+            val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
+            bridgeContext.startForegroundService(intent)
+        }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var monitorJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, notification("正在连接本机 Pi Agent…"))
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
+            .apply { acquire(MAX_WAKE_TIME_MS) }
+        monitorJob = scope.launch {
+            val bridge = PiBridge(applicationContext)
+            var failures = 0
+            while (isActive) {
+                bridge.health().fold(
+                    onSuccess = { health ->
+                        failures = 0
+                        val state = if (health.piRunning) "Agent 正在运行" else "Bridge 在线，Agent 已停止"
+                        updateNotification("$state · ${health.cwd.substringAfterLast('/').ifBlank { "home" }}")
+                    },
+                    onFailure = {
+                        failures++
+                        updateNotification("连接中断，等待 App 恢复 · $failures")
+                    }
+                )
+                delay(15_000)
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        monitorJob?.cancel()
+        scope.coroutineContext[Job]?.cancel()
+        wakeLock?.takeIf { it.isHeld }?.release()
+        wakeLock = null
+        super.onDestroy()
+    }
+
+    private fun createNotificationChannel() {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "Pi 长程任务", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "保持 Pi Agent 在锁屏和后台运行"
+                setShowBadge(false)
+            }
+        )
+    }
+
+    private fun notification(text: String): Notification {
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("Pi Android 长程任务")
+            .setContentText(text)
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIFICATION_ID, notification(text))
+    }
+}

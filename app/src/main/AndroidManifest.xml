@@ -1,8 +1,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
     <queries><package android:name="com.termux" /></queries>
     <application android:theme="@style/AppTheme" android:label="Pi Android" android:allowBackup="false" android:usesCleartextTraffic="true">
+        <service
+            android:name=".AgentKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains a user-started local coding agent during long tasks" />
+        </service>
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:alwaysRetainTaskState="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -18,9 +18,11 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-09.12"
+    private val expectedBridgeVersion = "2026-09-09.13"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
+
+    fun applicationContext(): Context = context
 
     fun termuxAvailable(): Boolean = runCatching {
         context.packageManager.getPackageInfo(termux, 0)
@@ -71,6 +73,13 @@ class PiBridge(context: Context) {
             "检测到旧 bridge：$lastSeenVersion，期望：$expectedBridgeVersion"
         }
         return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 ~/.pi/android/bridge.log"))
+    }
+
+    suspend fun attachToRunningBridge(): Result<PiState> = runCatching {
+        waitForBridge(1_500).getOrThrow()
+        val health = health().getOrThrow()
+        check(health.piRunning) { "Pi is not running" }
+        state().getOrThrow()
     }
 
     suspend fun start(cwd: String, launchCommand: String): Result<PiState> {
@@ -190,7 +199,7 @@ class PiBridge(context: Context) {
 
     suspend fun bash(command: String): Result<PiBashResult> {
         val body = JSONObject().put("command", command).toString()
-        return request("/bash", body, 10 * 60 * 1000).mapCatching { raw ->
+        return request("/bash", body, 4 * 60 * 60 * 1000).mapCatching { raw ->
             val data = JSONObject(raw).optJSONObject("data") ?: JSONObject()
             PiBashResult(
                 output = data.optString("output"),
@@ -217,7 +226,7 @@ class PiBridge(context: Context) {
         return request("/extension-ui", body.toString()).map { Unit }
     }
 
-    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after", null).mapCatching { raw ->
+    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 25_000).mapCatching { raw ->
         val root = JSONObject(raw)
         val array = root.optJSONArray("events") ?: JSONArray()
         val parsed = buildList {
@@ -227,7 +236,7 @@ class PiBridge(context: Context) {
                 add(parseEvent(item.optLong("seq"), value))
             }
         }
-        PiEventBatch(parsed, root.optLong("latest", after))
+        PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
     }
 
     suspend fun files(path: String = ""): Result<List<PiFile>> = request("/files?path=${encode(path)}", null).mapCatching { raw ->
@@ -479,5 +488,5 @@ data class PiEvent(
     val uiRequest: PiUiRequest? = null,
     val toolCallId: String = ""
 )
-data class PiEventBatch(val events: List<PiEvent>, val latest: Long)
+data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)
