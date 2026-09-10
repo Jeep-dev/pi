@@ -19,7 +19,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.9"
+    private val expectedBridgeVersion = "2026-09-10.10"
     private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
@@ -543,14 +543,18 @@ class PiBridge(context: Context) {
                     outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                 }
             }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) {
-                val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
-                throw IllegalStateException(message.ifBlank { "HTTP $code: $text" })
+            try {
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) {
+                    val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                    throw IllegalStateException(message.ifBlank { "HTTP $code: $text" })
+                }
+                text
+            } finally {
+                connection.disconnect()
             }
-            text
         }
     }
 

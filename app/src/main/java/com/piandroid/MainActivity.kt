@@ -580,7 +580,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
-            lines[index] = line.copy(text = "$text\n\n${toolDraftPreview(raw, count)}\n\n参数完整，等待执行…")
+            lines[index] = line.copy(
+                text = "$text\n\n${toolDraftPreview(raw, count)}\n\n参数完整，等待执行…",
+                streaming = false
+            )
         }
     }
 
@@ -960,7 +963,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.5
+                """Pi Android v5.16.6
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1008,10 +1011,16 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "/compact" -> scope.launch {
                 status = "Compacting"
                 bridge.compact(args).fold(
-                    onSuccess = { addSystem("上下文压缩完成"); refreshMeta() },
-                    onFailure = { addSystem("/compact 失败：${it.message}") }
+                    onSuccess = {
+                        addSystem("上下文压缩完成")
+                        refreshMeta()
+                        status = if (currentState?.streaming == true) "Working" else "Ready"
+                    },
+                    onFailure = {
+                        status = if (currentState?.streaming == true) "Working" else "Ready"
+                        addSystem("/compact 失败：${it.message}")
+                    }
                 )
-                status = "Ready"
             }
             "/clone" -> scope.launch {
                 bridge.cloneSession().fold(
