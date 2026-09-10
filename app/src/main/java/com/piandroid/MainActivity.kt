@@ -529,9 +529,12 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     fun appendStream(role: String, delta: String) {
         if (delta.isEmpty()) return
-        val last = lines.lastOrNull()
-        if (last?.role == role && last.streaming) {
-            lines[lines.lastIndex] = last.copy(text = last.text + delta)
+        // A steering card may be appended while the assistant is streaming.
+        // Find the active stream by role instead of assuming it is the last row.
+        val index = lines.indexOfLast { it.role == role && it.streaming }
+        if (index >= 0) {
+            val line = lines[index]
+            lines[index] = line.copy(text = line.text + delta)
         } else {
             lines.add(ChatLine(role, delta, streaming = true))
         }
@@ -637,6 +640,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         for (i in lines.indices) {
             if (lines[i].streaming) lines[i] = lines[i].copy(streaming = false)
         }
+    }
+
+    fun markSteeringFailed(text: String) {
+        val index = lines.indexOfLast { it.role == "user" && it.delivery == "steering_queued" && it.text == text }
+        if (index >= 0) lines[index] = lines[index].copy(delivery = "steering_failed")
     }
 
     fun reconcileSteeringQueue(count: Int) {
@@ -828,7 +836,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 bridge.prompt(text, behavior, attachments).fold(
                     onSuccess = { status = "Working" },
                     onFailure = {
-                        if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                        if (steering) {
+                            steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                            markSteeringFailed(listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"))
+                        }
                         addSystem("发送附件失败：${it.message}")
                     }
                 )
@@ -949,7 +960,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.2
+                """Pi Android v5.16.5
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1040,7 +1051,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     bridge.prompt(text, behavior).fold(
                         onSuccess = { status = "Working" },
                         onFailure = {
-                            if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                            if (steering) {
+                                steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                                markSteeringFailed(text)
+                            }
                             addSystem("发送失败：${it.message}")
                         }
                     )
@@ -1666,12 +1680,16 @@ private fun ChatPanel(
             }
             SelectionContainer {
                 when (line.role) {
-                "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent") {
+                "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent" || line.delivery == "steering_failed") {
                     Column(
                         Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)
                     ) {
                         Text(
-                            if (line.delivery == "steering_sent") "↳ STEERING · 已送达" else "↳ STEERING · 排队中",
+                            when (line.delivery) {
+                                "steering_sent" -> "↳ STEERING · 已送达"
+                                "steering_failed" -> "↳ STEERING · 发送失败"
+                                else -> "↳ STEERING · 排队中"
+                            },
                             color = Blue,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
