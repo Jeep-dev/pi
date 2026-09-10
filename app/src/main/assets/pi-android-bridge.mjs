@@ -9,7 +9,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.8";
+const bridgeVersion = "2026-09-10.9";
 const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -685,7 +685,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/start") {
       const input = JSON.parse(await readBody(req) || "{}");
       await startPi(String(input.cwd || cwd), String(input.launchCommand || launchCommand));
-      const state = await rpc({ type: "get_state" }, 10000);
+      const state = await rpc({ type: "get_state" }, 60000);
       return send(res, 200, { ok: true, cwd, launchCommand, state: state.data || null });
     }
 
@@ -759,7 +759,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (!existsSync(target)) throw new Error("session file not found");
       const result = await rpc({ type: "switch_session", sessionPath: target }, 30000);
-      const state = await rpc({ type: "get_state" }, 10000);
+      const state = await rpc({ type: "get_state" }, 60000);
       return send(res, 200, { ok: true, result: result.data || null, state: state.data || null });
     }
 
@@ -812,7 +812,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/events") {
       const after = Number(url.searchParams.get("after") || 0);
-      const waitMs = Math.min(25_000, Math.max(0, Number(url.searchParams.get("wait") || 0)));
+      const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("wait") || 0)));
       await waitForEvent(after, waitMs);
       const earliest = events[0]?.seq ?? sequence;
       return send(res, 200, {

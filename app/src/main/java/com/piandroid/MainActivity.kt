@@ -101,6 +101,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -150,7 +152,8 @@ private data class ChatLine(
     val streaming: Boolean = false,
     val toolCallId: String = "",
     val contentIndex: Int = -1,
-    val collapsed: Boolean = false
+    val collapsed: Boolean = false,
+    val delivery: String = "normal"
 )
 private data class LocalCommand(val name: String, val description: String)
 
@@ -375,6 +378,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
     var showScrollControls by remember { mutableStateOf(false) }
+    var steeringQueueSize by remember { mutableStateOf(0) }
+    var followUpQueueSize by remember { mutableStateOf(0) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
     var bashOutput by remember { mutableStateOf("") }
@@ -506,11 +511,15 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         bridge.history().onSuccess(::restoreHistory)
     }
 
-    suspend fun refreshMeta() {
-        bridge.state().onSuccess { currentState = it }
-        bridge.stats().onSuccess { currentStats = it }
-        bridge.models().onSuccess { models = it }
-        bridge.commands().onSuccess { remoteCommands = it }
+    suspend fun refreshMeta() = coroutineScope {
+        val state = async { bridge.state().getOrNull() }
+        val stats = async { bridge.stats().getOrNull() }
+        val availableModels = async { bridge.models().getOrNull() }
+        val availableCommands = async { bridge.commands().getOrNull() }
+        state.await()?.let { currentState = it }
+        stats.await()?.let { currentStats = it }
+        availableModels.await()?.let { models = it }
+        availableCommands.await()?.let { remoteCommands = it }
     }
 
     fun addSystem(text: String) {
@@ -633,8 +642,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         when (event.type) {
             "agent_start" -> status = "Working"
             "agent_end" -> Unit
+            "queue_update" -> {
+                steeringQueueSize = event.steeringCount
+                followUpQueueSize = event.followUpCount
+            }
             "agent_settled" -> {
                 settleStreams()
+                steeringQueueSize = 0
+                followUpQueueSize = 0
                 status = "Ready"
                 refreshMeta()
             }
@@ -669,9 +684,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "process_exit" -> {
                 settleStreams()
                 addSystem(event.text)
-                status = "Disconnected"
-                connected = false
-                AgentKeepAliveService.stop(bridge.applicationContext())
+                status = "RECONNECTING"
             }
             "compaction_start" -> status = "Compacting"
             "compaction_end" -> status = "Ready"
@@ -712,7 +725,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     status = "Ready"
                 } else {
                     status = "Checkpointing session"
-                    bridge.state().onSuccess { previous ->
+                    bridge.state(1_500).onSuccess { previous ->
                         currentState = previous
                         if (!previous.streaming && !previous.compacting) {
                             val canCheckpoint = bridge.commands().getOrDefault(emptyList()).any { it.name == "__android_checkpoint" }
@@ -722,7 +735,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     status = "Installing bridge"
                     bridge.installAndStartBridge().getOrThrow()
                     status = "Waiting for bridge"
-                    bridge.waitForBridge().getOrThrow()
+                    bridge.waitForBridge(30_000).getOrThrow()
                     status = "Starting Pi"
                     val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
                     currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
@@ -780,13 +793,24 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
         if (attachments.isNotEmpty()) {
             followOutput = true
+            val steering = currentState?.streaming == true || status == "Working"
+            if (steering) steeringQueueSize += 1
             val attachmentSummary = attachments.joinToString(", ") { "[附件: ${it.name}]" }
-            lines.add(ChatLine("user", listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n")))
+            lines.add(
+                ChatLine(
+                    "user",
+                    listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"),
+                    delivery = if (steering) "steering" else "normal"
+                )
+            )
             scope.launch {
-                val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
+                val behavior = if (steering) "steer" else null
                 bridge.prompt(text, behavior, attachments).fold(
                     onSuccess = { status = "Working" },
-                    onFailure = { addSystem("发送附件失败：${it.message}") }
+                    onFailure = {
+                        if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                        addSystem("发送附件失败：${it.message}")
+                    }
                 )
             }
             return
@@ -988,15 +1012,46 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "/settings" -> panel = Panel.Settings
             else -> {
                 followOutput = true
-                lines.add(ChatLine("user", text))
+                val steering = currentState?.streaming == true || status == "Working"
+                if (steering) steeringQueueSize += 1
+                lines.add(ChatLine("user", text, delivery = if (steering) "steering" else "normal"))
                 scope.launch {
-                    val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
+                    val behavior = if (steering) "steer" else null
                     bridge.prompt(text, behavior).fold(
                         onSuccess = { status = "Working" },
-                        onFailure = { addSystem("发送失败：${it.message}") }
+                        onFailure = {
+                            if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                            addSystem("发送失败：${it.message}")
+                        }
                     )
                 }
             }
+        }
+    }
+
+    suspend fun recoverBridge(): Boolean {
+        status = "RECONNECTING"
+        val attached = bridge.attachToRunningBridge().getOrNull()
+        if (attached != null) {
+            currentState = attached
+            return true
+        }
+        return runCatching {
+            bridge.installAndStartBridge().getOrThrow()
+            bridge.waitForBridge(30_000).getOrThrow()
+            val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
+            currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
+            true
+        }.getOrElse { false }
+    }
+
+    suspend fun restoreAfterReconnect() {
+        bridge.recoverySnapshot().onSuccess { snapshot ->
+            restoreHistory(snapshot.history)
+            cursor = snapshot.latest
+            snapshot.events.forEach { event -> applyEvent(event) }
+            snapshot.pendingUi.lastOrNull()?.let { pendingUi = it }
+            snapshot.editorText?.let { input = it }
         }
     }
 
@@ -1005,6 +1060,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         while (connected) {
             bridge.events(cursor).onSuccess { batch ->
                 eventFailures = 0
+                val processExited = batch.events.any { it.type == "process_exit" }
                 if (batch.gap) {
                     bridge.recoverySnapshot().fold(
                         onSuccess = { snapshot ->
@@ -1023,14 +1079,20 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     cursor = batch.latest
                     batch.events.forEach { event -> applyEvent(event) }
                 }
+                if (processExited && recoverBridge()) {
+                    restoreAfterReconnect()
+                    status = if (currentState?.streaming == true) "Working" else "Ready"
+                }
             }.onFailure { error ->
                 eventFailures += 1
-                if (eventFailures >= 5) {
-                    status = "Disconnected"
-                    connected = false
-                    addSystem("Bridge 连接中断（连续 $eventFailures 次）：${error.message}")
-                } else {
-                    delay(1_000)
+                status = if (currentState?.streaming == true) "RECONNECTING · 工作仍在继续" else "RECONNECTING"
+                delay((500L * (1L shl (eventFailures.coerceAtMost(3) - 1))).coerceAtMost(5_000L))
+                if (eventFailures >= 3 && recoverBridge()) {
+                    restoreAfterReconnect()
+                    eventFailures = 0
+                    status = if (currentState?.streaming == true) "Working" else "Ready"
+                } else if (eventFailures % 3 == 0) {
+                    addSystem("Bridge 暂时不可用，正在后台重试：${error.message}")
                 }
             }
         }
@@ -1167,6 +1229,17 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         status == "Working" || status == "Compacting" || status == "Stopping" ||
             currentState?.streaming == true || currentState?.compacting == true
         )
+    val chatStatus = when {
+        status.startsWith("RECONNECTING") -> status
+        status == "Working" || currentState?.streaming == true -> {
+            val queued = buildList {
+                if (steeringQueueSize > 0) add("steering ${steeringQueueSize} 条")
+                if (followUpQueueSize > 0) add("follow-up ${followUpQueueSize} 条")
+            }
+            if (queued.isEmpty()) "WORKING" else "WORKING · ${queued.joinToString("，")} 已排队"
+        }
+        else -> status
+    }
 
     Column(
         Modifier
@@ -1182,7 +1255,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     listState = chatListState,
                     cwd = cwd,
                     model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
-                    status = status,
+                    status = chatStatus,
                     connected = connected,
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
@@ -1516,7 +1589,11 @@ private fun ChatPanel(
                     )
                     Text(
                         status,
-                        color = if (status == "Ready") Accent else if (status == "Working") Blue else TextMuted,
+                        color = when {
+                            status == "Ready" -> Accent
+                            status.startsWith("WORKING") || status.startsWith("RECONNECTING") -> Blue
+                            else -> TextMuted
+                        },
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp
                     )
@@ -1551,7 +1628,27 @@ private fun ChatPanel(
             }
             SelectionContainer {
                 when (line.role) {
-                "user" -> Text(
+                "user" -> if (line.delivery == "steering") {
+                    Column(
+                        Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "↳ STEERING · 已排队，当前任务继续执行",
+                            color = Blue,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        Text(
+                            visibleText,
+                            color = TextMain,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp
+                        )
+                    }
+                } else Text(
                     visibleText,
                     color = TextMain,
                     fontFamily = FontFamily.Monospace,

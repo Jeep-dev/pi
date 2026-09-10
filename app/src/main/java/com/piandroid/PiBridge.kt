@@ -19,7 +19,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.8"
+    private val expectedBridgeVersion = "2026-09-10.9"
     private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
@@ -85,19 +85,19 @@ class PiBridge(context: Context) {
         waitForBridge(1_500).getOrThrow()
         val health = health().getOrThrow()
         check(health.piRunning) { "Pi is not running" }
-        state().getOrThrow()
+        state(3_000).getOrThrow()
     }
 
     suspend fun start(cwd: String, launchCommand: String): Result<PiState> {
         val body = JSONObject().put("cwd", cwd).put("launchCommand", launchCommand).toString()
-        return request("/start", body, 15_000).mapCatching {
+        return request("/start", body, 65_000).mapCatching {
             val root = JSONObject(it)
             val data = root.optJSONObject("state") ?: JSONObject()
             parseState(data)
         }
     }
 
-    suspend fun health(): Result<PiHealth> = request("/health", null).mapCatching {
+    suspend fun health(timeoutMs: Int = 15_000): Result<PiHealth> = request("/health", null, timeoutMs).mapCatching {
         val root = JSONObject(it)
         PiHealth(
             piRunning = root.optBoolean("piRunning"),
@@ -175,9 +175,9 @@ class PiBridge(context: Context) {
         return request("/compact", body.toString(), 4 * 60 * 60 * 1000).map { Unit }
     }
 
-    suspend fun state(): Result<PiState> = rpcData("/state").mapCatching(::parseState)
+    suspend fun state(timeoutMs: Int = 15_000): Result<PiState> = rpcData("/state", timeoutMs).mapCatching(::parseState)
 
-    suspend fun stats(): Result<PiStats> = rpcData("/stats").mapCatching { data ->
+    suspend fun stats(): Result<PiStats> = rpcData("/stats", 35_000).mapCatching { data ->
         val tokens = data.optJSONObject("tokens") ?: JSONObject()
         val usage = data.optJSONObject("contextUsage")
         PiStats(
@@ -312,7 +312,7 @@ class PiBridge(context: Context) {
         return request("/extension-ui", body.toString()).map { Unit }
     }
 
-    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 25_000).mapCatching { raw ->
+    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 35_000).mapCatching { raw ->
         val root = JSONObject(raw)
         val array = root.optJSONArray("events") ?: JSONArray()
         val parsed = buildList {
@@ -350,7 +350,7 @@ class PiBridge(context: Context) {
         if (diff.isBlank() && root.optString("error").isNotBlank()) root.optString("error") else diff
     }
 
-    private suspend fun rpcData(path: String): Result<JSONObject> = request(path, null).mapCatching { raw ->
+    private suspend fun rpcData(path: String, timeoutMs: Int = 15_000): Result<JSONObject> = request(path, null, timeoutMs).mapCatching { raw ->
         val root = JSONObject(raw)
         root.optJSONObject("data") ?: JSONObject()
     }
@@ -451,6 +451,14 @@ class PiBridge(context: Context) {
                     .orEmpty()
                 PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }
+            "queue_update" -> PiEvent(
+                seq = seq,
+                type = type,
+                subtype = "",
+                text = "",
+                steeringCount = value.optJSONArray("steering")?.length() ?: 0,
+                followUpCount = value.optJSONArray("followUp")?.length() ?: 0
+            )
             "tool_execution_end" -> {
                 val content = value.optJSONObject("result")?.optJSONArray("content") ?: JSONArray()
                 val output = buildString {
@@ -521,11 +529,11 @@ class PiBridge(context: Context) {
         }
     }
 
-    internal suspend fun request(path: String, body: String?, timeoutMs: Int = 5_000): Result<String> = withContext(Dispatchers.IO) {
+    internal suspend fun request(path: String, body: String?, timeoutMs: Int = 15_000): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = (URL("http://127.0.0.1:$port$path").openConnection() as HttpURLConnection).apply {
                 requestMethod = if (body == null) "GET" else "POST"
-                connectTimeout = timeoutMs.coerceAtMost(5_000)
+                connectTimeout = timeoutMs.coerceAtMost(10_000)
                 readTimeout = timeoutMs
                 useCaches = false
                 setRequestProperty("Authorization", "Bearer $authToken")
@@ -609,7 +617,9 @@ data class PiEvent(
     val uiRequest: PiUiRequest? = null,
     val toolCallId: String = "",
     val contentIndex: Int = -1,
-    val stopReason: String = ""
+    val stopReason: String = "",
+    val steeringCount: Int = 0,
+    val followUpCount: Int = 0
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)
