@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
@@ -73,6 +74,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -105,6 +108,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setSoftInputMode(
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+        )
         window.statusBarColor = AndroidColor.BLACK
         window.navigationBarColor = AndroidColor.BLACK
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -304,6 +311,8 @@ private fun PiScreen(bridge: PiBridge) {
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val composerFocusRequester = remember { FocusRequester() }
+    var composerFocusRequest by remember { mutableLongStateOf(0L) }
     val imeBottom = WindowInsets.ime.getBottom(density)
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
@@ -326,6 +335,20 @@ private fun PiScreen(bridge: PiBridge) {
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
     val pendingAttachments = remember { mutableStateListOf<PiAttachment>() }
     var attachmentNotice by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        delay(100)
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+    }
+
+    LaunchedEffect(composerFocusRequest, panel) {
+        if (composerFocusRequest > 0 && panel == Panel.Chat) {
+            delay(50)
+            composerFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         scope.launch {
             if (uris.isEmpty()) return@launch
@@ -1215,6 +1238,7 @@ private fun PiScreen(bridge: PiBridge) {
                 busy = busy,
                 attachments = pendingAttachments,
                 attachmentNotice = attachmentNotice,
+                focusRequester = composerFocusRequester,
                 onValue = { input = it },
                 onAttach = {
                     attachmentNotice = ""
@@ -1243,7 +1267,10 @@ private fun PiScreen(bridge: PiBridge) {
             )
         }
 
-        Footer(currentState, currentStats)
+        Footer(currentState, currentStats) {
+            panel = Panel.Chat
+            composerFocusRequest++
+        }
     }
 }
 
@@ -1526,6 +1553,7 @@ private fun Composer(
     busy: Boolean,
     attachments: List<PiAttachment>,
     attachmentNotice: String,
+    focusRequester: FocusRequester,
     onValue: (String) -> Unit,
     onAttach: () -> Unit,
     onRemoveAttachment: (PiAttachment) -> Unit,
@@ -1568,7 +1596,7 @@ private fun Composer(
         OutlinedTextField(
             value = value,
             onValueChange = onValue,
-            modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 132.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 132.dp).focusRequester(focusRequester),
             textStyle = TextStyle(
                 color = TextMain,
                 fontFamily = FontFamily.Monospace,
@@ -1615,7 +1643,7 @@ private fun compactCount(value: Long): String = when {
 }
 
 @Composable
-private fun Footer(state: PiState?, stats: PiStats?) {
+private fun Footer(state: PiState?, stats: PiStats?, onFocusComposer: () -> Unit) {
     val parts = if (stats == null) {
         listOf("—/—")
     } else {
@@ -1643,7 +1671,8 @@ private fun Footer(state: PiState?, stats: PiStats?) {
     }
     val scroll = rememberScrollState()
     Box(
-        Modifier.fillMaxWidth().background(Bg).navigationBarsPadding().padding(horizontal = 10.dp, vertical = 4.dp)
+        Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer)
+            .navigationBarsPadding().padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text(
             parts.joinToString(" "),
