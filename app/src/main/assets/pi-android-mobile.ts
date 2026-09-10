@@ -81,9 +81,14 @@ export default function (pi: any) {
     }
   }
 
+  function isConversationPrompt(entry: any): boolean {
+    if (entry?.type !== "message" || entry?.message?.role !== "user") return false;
+    return !textOf(entry.message.content).trimStart().startsWith("/");
+  }
+
   function userPoints(ctx: any) {
     return ctx.sessionManager.getEntries()
-      .filter((entry: any) => entry?.type === "message" && entry?.message?.role === "user")
+      .filter(isConversationPrompt)
       .map((entry: any, index: number) => ({
         id: String(entry.id),
         label: `${index + 1}. ${preview(textOf(entry.message.content), 72)} · ${String(entry.id).slice(0, 8)}`,
@@ -122,7 +127,7 @@ export default function (pi: any) {
   // Collapsing those invisible nodes below preserves the real user-message
   // parent/child structure, including branches created after tool runs.
   function isVisibleEntry(entry: any, _isLeaf: boolean): boolean {
-    return entry?.type === "message" && entry?.message?.role === "user";
+    return isConversationPrompt(entry);
   }
 
   function treePoints(ctx: any) {

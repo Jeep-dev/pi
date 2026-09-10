@@ -905,7 +905,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.1
+                """Pi Android v5.16.2
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1309,7 +1309,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .offset(y = (-72).dp)
+                        .offset(y = (-108).dp)
                         .padding(end = 4.dp, bottom = 6.dp)
                         .width(40.dp)
                 ) {
@@ -1725,7 +1725,7 @@ private fun Composer(
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             ),
-            placeholder = { Text(if (busy) "Pi 工作中，输入消息可继续发送；/abort 停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
+            placeholder = { Text("输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1) },
             singleLine = false,
             minLines = 1,
             maxLines = 5,

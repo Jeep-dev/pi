@@ -9,7 +9,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.7";
+const bridgeVersion = "2026-09-10.8";
 const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
