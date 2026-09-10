@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.3";
+const bridgeVersion = "2026-09-10.4";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -550,7 +550,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/new-session") return rpcResponse(res, { type: "new_session" });
     if (req.method === "POST" && url.pathname === "/compact") {
       const input = JSON.parse(await readBody(req) || "{}");
-      return rpcResponse(res, { type: "compact", ...(input.instructions ? { customInstructions: String(input.instructions) } : {}) }, 120000);
+      return rpcResponse(
+        res,
+        { type: "compact", ...(input.instructions ? { customInstructions: String(input.instructions) } : {}) },
+        4 * 60 * 60 * 1000,
+      );
     }
     if (req.method === "POST" && url.pathname === "/clone") return rpcResponse(res, { type: "clone" });
 

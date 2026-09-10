@@ -113,7 +113,7 @@ export default function (pi: any) {
   }
 
   function isVisibleEntry(entry: any, isLeaf: boolean): boolean {
-    if (!entry) return false;
+    if (!entry || entry.type === "label") return false;
     if (isLeaf) return true;
     if (entry.type === "message") {
       if (entry.message?.role !== "assistant") return true;
@@ -174,7 +174,7 @@ export default function (pi: any) {
       const pathMark = active.has(id) ? "● " : "  ";
       const label = node.label ? `[${node.label}] ` : "";
       const line = `${prefix}${connector}${pathMark}${label}${entryText(node.entry)} · ${id.slice(0, 8)}`;
-      points.push({ id, label: line, entry: node.entry });
+      points.push({ id, label: line, entry: node.entry, entryLabel: node.label });
 
       const childPrefix = connector === "├─ " ? `${prefix}│  ` : connector === "└─ " ? `${prefix}   ` : prefix;
       if (item.children.length === 1) {
@@ -226,42 +226,22 @@ export default function (pi: any) {
         return;
       }
 
-      let summarize = false;
-      let customInstructions: string | undefined;
-      while (true) {
-        const choice = await ctx.ui.select("Summarize branch?", [
-          "No summary",
-          "Summarize",
-          "Summarize with custom prompt",
-        ]);
-        if (choice === undefined) {
-          target = await chooseTreePoint(ctx);
-          if (!target) return;
-          if (target.id === ctx.sessionManager.getLeafId()) {
-            ctx.ui.notify("已经位于这个节点", "info");
-            return;
-          }
-          continue;
-        }
-        summarize = choice !== "No summary";
-        if (choice === "Summarize with custom prompt") {
-          const custom = await ctx.ui.editor("Custom summarization instructions", "");
-          if (custom === undefined) continue;
-          customInstructions = String(custom);
-        }
-        break;
-      }
-
       const editableText = target.entry?.type === "message" && target.entry?.message?.role === "user"
         ? textOf(target.entry.message.content)
         : target.entry?.type === "custom_message"
           ? textOf(target.entry.content)
           : undefined;
-      const result = await ctx.navigateTree(target.id, { summarize, customInstructions });
+      const result = await ctx.navigateTree(target.id, { summarize: false });
       if (result.cancelled) {
         ctx.ui.notify("/tree 已取消", "warning");
         return;
       }
+
+      // Persist the selected leaf immediately. Label entries do not enter model context,
+      // but ensure a process restart reopens this exact branch before the next message.
+      const selectedLeaf = ctx.sessionManager.getLeafId();
+      if (selectedLeaf) ctx.sessionManager.appendLabelChange(String(selectedLeaf), target.entryLabel);
+
       if (editableText !== undefined) ctx.ui.setEditorText(editableText);
       ctx.ui.notify("ANDROID_SESSION_SWITCHED", "info");
     },

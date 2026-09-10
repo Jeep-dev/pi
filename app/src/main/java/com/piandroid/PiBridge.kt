@@ -18,7 +18,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.3"
+    private val expectedBridgeVersion = "2026-09-10.4"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -123,7 +123,7 @@ class PiBridge(context: Context) {
 
     suspend fun compact(instructions: String = ""): Result<Unit> {
         val body = JSONObject().apply { if (instructions.isNotBlank()) put("instructions", instructions) }
-        return request("/compact", body.toString(), 130_000).map { Unit }
+        return request("/compact", body.toString(), 4 * 60 * 60 * 1000).map { Unit }
     }
 
     suspend fun state(): Result<PiState> = rpcData("/state").mapCatching(::parseState)

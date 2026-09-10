@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -970,7 +969,6 @@ private fun PiScreen(bridge: PiBridge) {
         Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding()
             .imePadding()
             .background(Bg)
     ) {
@@ -1148,8 +1146,6 @@ private fun PiScreen(bridge: PiBridge) {
             }
         }
 
-        Footer(currentState, currentStats)
-
         if (panel == Panel.Chat) {
             Composer(
                 value = input,
@@ -1179,6 +1175,8 @@ private fun PiScreen(bridge: PiBridge) {
                 }
             )
         }
+
+        Footer(currentState, currentStats)
     }
 }
 
@@ -1572,7 +1570,7 @@ private fun Footer(state: PiState?, stats: PiStats?) {
     }
     val scroll = rememberScrollState()
     Box(
-        Modifier.fillMaxWidth().background(Bg).border(1.dp, Color(0xFF23384B)).padding(horizontal = 10.dp, vertical = 6.dp)
+        Modifier.fillMaxWidth().background(Bg).padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text(
             parts.joinToString(" "),

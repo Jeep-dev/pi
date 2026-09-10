@@ -78,7 +78,7 @@ function handle(value) {
     send({ type: "extension_ui_response", id: value.id, value: target });
   }
   if (value.type === "extension_ui_request" && value.method === "select" && value.title === "Summarize branch?") {
-    send({ type: "extension_ui_response", id: value.id, value: "No summary" });
+    throw new Error("Tree navigation must branch immediately without a second summary dialog");
   }
   if (value.type === "extension_ui_request" && value.method === "set_editor_text") editorText = value.text;
   if (value.type === "extension_ui_request" && value.method === "notify" && value.message === "ANDROID_SESSION_SWITCHED") {
@@ -90,6 +90,24 @@ function handle(value) {
     if (editorText !== "root prompt") throw new Error(`Editor text was not restored: ${editorText}`);
     if (!switched) throw new Error("Session switch notification was not emitted");
     if (!treeWasComplete) throw new Error("Tree selector omitted conversation entries or active-path state");
+    send({ id: "branch", type: "prompt", message: "/tree bbbbbbbb" });
+  }
+  if (value.id === "branch") send({ id: "branch-tree", type: "get_tree" });
+  if (value.id === "branch-tree") {
+    const nodes = [];
+    const visit = (items) => items.forEach((item) => { nodes.push(item); visit(item.children || []); });
+    visit(value.data.tree || []);
+    const leaf = nodes.find((node) => node.entry.id === value.data.leafId)?.entry;
+    if (leaf?.type !== "label" || leaf.parentId !== "bbbbbbbb") {
+      throw new Error("Selected branch was not persisted at the chosen conversation point");
+    }
+    send({ id: "branch-messages", type: "get_messages" });
+  }
+  if (value.id === "branch-messages") {
+    const messages = value.data.messages || [];
+    if (messages.length !== 2 || !JSON.stringify(messages[1]).includes("first answer")) {
+      throw new Error("Messages after the selected tree point leaked into model context");
+    }
     completed = true;
     child.kill();
   }
