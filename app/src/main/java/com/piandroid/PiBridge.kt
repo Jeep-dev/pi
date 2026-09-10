@@ -19,7 +19,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.10"
+    private val expectedBridgeVersion = "2026-09-10.11"
     private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
@@ -154,15 +154,19 @@ class PiBridge(context: Context) {
                     requireNotNull(input) { "无法读取所选文件" }
                     connection.outputStream.use { output -> input.copyTo(output, 256 * 1024) }
                 }
-                val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) {
-                    val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
-                    throw IllegalStateException(message.ifBlank { "附件导入失败：HTTP $code" })
+                try {
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    if (code !in 200..299) {
+                        val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                        throw IllegalStateException(message.ifBlank { "附件导入失败：HTTP $code" })
+                    }
+                    val stored = JSONObject(text)
+                    PiAttachment(name, mimeType, stored.optString("path"), stored.optLong("byteCount", byteCount))
+                } finally {
+                    connection.disconnect()
                 }
-                val stored = JSONObject(text)
-                PiAttachment(name, mimeType, stored.optString("path"), stored.optLong("byteCount", byteCount))
             }
         }
 
@@ -444,11 +448,16 @@ class PiBridge(context: Context) {
                 PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }
             "tool_execution_update" -> {
-                val text = value.optJSONObject("partialResult")
-                    ?.optJSONArray("content")
-                    ?.optJSONObject(0)
-                    ?.optString("text")
-                    .orEmpty()
+                val content = value.optJSONObject("partialResult")?.optJSONArray("content") ?: JSONArray()
+                val text = buildString {
+                    for (i in 0 until content.length()) {
+                        val part = content.optJSONObject(i) ?: continue
+                        if (part.optString("type") == "text") {
+                            if (isNotEmpty()) append('\n')
+                            append(part.optString("text"))
+                        }
+                    }
+                }
                 PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
             }
             "queue_update" -> PiEvent(

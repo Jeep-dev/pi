@@ -436,7 +436,10 @@ export default function (pi: any) {
     description: "Gracefully stop the current Pi RPC process",
     handler: async (_args: string, ctx: any) => {
       const confirmed = await ctx.ui.confirm("Quit Pi", "保存 session 并停止当前 Agent？");
-      if (confirmed) ctx.shutdown();
+      if (confirmed) {
+        ctx.ui.notify("ANDROID_PI_QUIT", "info");
+        ctx.shutdown();
+      }
     },
   });
 }

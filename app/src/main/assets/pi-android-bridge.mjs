@@ -5,11 +5,12 @@ import { StringDecoder } from "node:string_decoder";
 import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.10";
+const bridgeVersion = "2026-09-10.11";
 const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -22,6 +23,7 @@ const termuxPi = path.join(termuxBin, "pi");
 const nodeExecutable = process.execPath || path.join(termuxBin, "node");
 const pidFile = path.join(termuxHome, ".pi", "android", "bridge.pid");
 const maxRequestBytes = 4_000_000;
+const maxUploadBytes = 128 * 1024 * 1024;
 let child = null;
 let cwd = termuxHome;
 let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
@@ -87,6 +89,7 @@ function attachJsonl(stream) {
       buffer = buffer.slice(index + 1);
       if (line.endsWith("\r")) line = line.slice(0, -1);
       if (!line.trim()) continue;
+      lastStdoutTail = (lastStdoutTail + line + "\n").slice(-8000);
       try {
         const value = JSON.parse(line);
         if (value.type === "response" && value.id && settlePending(value.id, value)) continue;
@@ -99,8 +102,12 @@ function attachJsonl(stream) {
   stream.on("end", () => {
     const rest = buffer + decoder.end();
     if (rest.trim()) {
-      try { addEvent(JSON.parse(rest)); }
-      catch { addEvent({ type: "raw", line: rest }); }
+      lastStdoutTail = (lastStdoutTail + rest + "\n").slice(-8000);
+      try {
+        const value = JSON.parse(rest);
+        if (value.type === "response" && value.id && settlePending(value.id, value)) return;
+        addEvent(value);
+      } catch { addEvent({ type: "raw", line: rest }); }
     }
   });
 }
@@ -521,15 +528,23 @@ function safeAttachmentName(value) {
 }
 
 async function streamAttachment(req, originalName) {
-  const uploadRoot = path.join(cwd, ".pi-android-uploads");
-  await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
+  const projectRoot = await realpath(cwd);
+  const uploadCandidate = path.join(projectRoot, ".pi-android-uploads");
+  await mkdir(uploadCandidate, { recursive: true, mode: 0o700 });
+  const uploadRoot = await realpath(uploadCandidate);
+  assertInside(projectRoot, uploadRoot);
   const storedName = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeAttachmentName(originalName)}`;
   const target = path.join(uploadRoot, storedName);
   const temporary = `${target}.part`;
   let byteCount = 0;
-  req.on("data", chunk => { byteCount += chunk.length; });
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      byteCount += chunk.length;
+      callback(byteCount > maxUploadBytes ? new Error("upload too large") : null, chunk);
+    },
+  });
   try {
-    await pipeline(req, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+    await pipeline(req, limiter, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
     await rename(temporary, target);
     return { path: path.relative(cwd, target), byteCount };
   } finally {
@@ -760,11 +775,14 @@ const server = http.createServer(async (req, res) => {
       const input = JSON.parse(await readBody(req) || "{}");
       const target = path.resolve(String(input.path || ""));
       const dir = path.resolve(sessionDirForCwd(cwd));
-      if (!target.endsWith(".jsonl") || (target !== dir && !target.startsWith(`${dir}${path.sep}`))) {
+      const sessionRoot = await realpath(dir);
+      const canonicalTarget = await realpath(target);
+      if (!canonicalTarget.endsWith(".jsonl") ||
+          (canonicalTarget !== sessionRoot && !canonicalTarget.startsWith(`${sessionRoot}${path.sep}`))) {
         throw new Error("session path outside current project");
       }
-      if (!existsSync(target)) throw new Error("session file not found");
-      const result = await rpc({ type: "switch_session", sessionPath: target }, 30000);
+      if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
+      const result = await rpc({ type: "switch_session", sessionPath: canonicalTarget }, 30000);
       const state = await rpc({ type: "get_state" }, 60000);
       return send(res, 200, { ok: true, result: result.data || null, state: state.data || null });
     }

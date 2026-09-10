@@ -357,6 +357,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     var connected by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
+    var intentionalQuit by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf(Panel.Chat) }
     var currentState by remember { mutableStateOf<PiState?>(null) }
     var currentStats by remember { mutableStateOf<PiStats?>(null) }
@@ -494,7 +495,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         )
     }
 
-    fun restoreHistory(history: List<PiHistoryMessage>) {
+    fun restoreHistory(history: List<PiHistoryMessage>, preservePending: Boolean = false) {
+        val pending = if (preservePending) {
+            // queued/failed entries are not durable Pi history yet; sent entries
+            // are expected to be present once Pi acknowledged them.
+            lines.filter { it.role == "user" && it.delivery in setOf("steering_queued", "steering_failed") }
+        } else {
+            emptyList()
+        }
         lines.clear()
         history.forEach { message ->
             lines.add(
@@ -506,10 +514,18 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 )
             )
         }
+        pending.forEach { lines.add(it) }
     }
 
     suspend fun loadHistory() {
-        bridge.history().onSuccess(::restoreHistory)
+        bridge.history().onSuccess { restoreHistory(it) }
+    }
+
+    suspend fun syncAttachedRuntime() {
+        bridge.health().onSuccess { health ->
+            if (health.cwd.isNotBlank()) cwd = health.cwd
+            if (health.launchCommand.isNotBlank()) launchCommand = health.launchCommand
+        }
     }
 
     suspend fun refreshMeta() = coroutineScope {
@@ -668,7 +684,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     suspend fun applyEvent(event: PiEvent) {
         when (event.type) {
-            "agent_start" -> status = "Working"
+            "agent_start" -> {
+                status = "Working"
+                AgentKeepAliveService.start(bridge.applicationContext())
+            }
             "agent_end" -> Unit
             "queue_update" -> {
                 steeringQueueSize = event.steeringCount
@@ -682,6 +701,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 currentState = currentState?.copy(streaming = false, compacting = false)
                 reconcileSteeringQueue(0)
                 status = "Ready"
+                AgentKeepAliveService.stop(bridge.applicationContext())
                 refreshMeta()
             }
             "message_update" -> when (event.subtype) {
@@ -714,11 +734,24 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
                 settleStreams()
+                AgentKeepAliveService.stop(bridge.applicationContext())
                 addSystem(event.text)
-                status = "RECONNECTING"
+                if (intentionalQuit) {
+                    intentionalQuit = false
+                    connected = false
+                    status = "Disconnected"
+                } else {
+                    status = "RECONNECTING"
+                }
             }
-            "compaction_start" -> status = "Compacting"
-            "compaction_end" -> status = "Ready"
+            "compaction_start" -> {
+                status = "Compacting"
+                AgentKeepAliveService.start(bridge.applicationContext())
+            }
+            "compaction_end" -> {
+                status = if (currentState?.streaming == true) "Working" else "Ready"
+                if (currentState?.streaming != true) AgentKeepAliveService.stop(bridge.applicationContext())
+            }
             "extension_ui_request" -> {
                 val req = event.uiRequest
                 when (req?.method) {
@@ -727,6 +760,9 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                             loadHistory()
                             refreshMeta()
                             status = "Ready"
+                        } else if (req.message == "ANDROID_PI_QUIT") {
+                            intentionalQuit = true
+                            status = "Stopping"
                         } else {
                             addSystem(req.message)
                         }
@@ -752,6 +788,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 status = "Checking running agent"
                 val attached = bridge.attachToRunningBridge().getOrNull()
                 if (attached != null) {
+                    syncAttachedRuntime()
                     currentState = attached
                     status = "Ready"
                 } else {
@@ -781,8 +818,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 restoreHistory(snapshot.history)
                 cursor = snapshot.latest
                 snapshot.events.forEach { applyEvent(it) }
+                pendingUi = snapshot.pendingUi.lastOrNull()
                 snapshot.pendingUi.lastOrNull()?.let { request ->
-                    pendingUi = request
                     dialogInput = request.prefill.ifBlank { "" }
                 }
                 snapshot.editorText?.let { input = it }
@@ -794,8 +831,13 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 }
                 panel = Panel.Chat
                 refreshMeta()
-                AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
+                if (currentState?.streaming == true || currentState?.compacting == true) {
+                    AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
+                } else {
+                    AgentKeepAliveService.stop(bridge.applicationContext())
+                }
             } catch (error: Exception) {
+                AgentKeepAliveService.stop(bridge.applicationContext())
                 status = "Connection failed"
                 addSystem("连接失败：${error.message}")
             } finally {
@@ -963,7 +1005,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.6
+                """Pi Android v5.16.7
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1076,6 +1118,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         status = "RECONNECTING"
         val attached = bridge.attachToRunningBridge().getOrNull()
         if (attached != null) {
+            syncAttachedRuntime()
             currentState = attached
             return "attached"
         }
@@ -1090,10 +1133,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     suspend fun restoreAfterReconnect() {
         bridge.recoverySnapshot().onSuccess { snapshot ->
-            restoreHistory(snapshot.history)
+            restoreHistory(snapshot.history, preservePending = true)
             cursor = snapshot.latest
             snapshot.events.forEach { event -> applyEvent(event) }
-            snapshot.pendingUi.lastOrNull()?.let { pendingUi = it }
+            pendingUi = snapshot.pendingUi.lastOrNull()
             snapshot.editorText?.let { input = it }
         }
     }
@@ -1107,10 +1150,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 if (batch.gap) {
                     bridge.recoverySnapshot().fold(
                         onSuccess = { snapshot ->
-                            restoreHistory(snapshot.history)
+                            restoreHistory(snapshot.history, preservePending = true)
                             cursor = snapshot.latest
                             snapshot.events.forEach { applyEvent(it) }
-                            snapshot.pendingUi.lastOrNull()?.let { pendingUi = it }
+                            pendingUi = snapshot.pendingUi.lastOrNull()
                             snapshot.editorText?.let { input = it }
                         },
                         onFailure = {
@@ -1122,7 +1165,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     cursor = batch.latest
                     batch.events.forEach { event -> applyEvent(event) }
                 }
-                if (processExited) {
+                if (processExited && connected) {
                     when (recoverBridge()) {
                         "restarted" -> restoreAfterReconnect()
                         "attached" -> Unit
@@ -1154,7 +1197,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput, input.length) {
+    LaunchedEffect(lines.size, lines.sumOf { it.text.length }, followOutput) {
         if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
     }
 
@@ -1186,26 +1229,23 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     }
 
     pendingUi?.let { request ->
+        fun sendUiResponse(action: suspend () -> Result<Unit>) {
+            pendingUi = null
+            scope.launch {
+                action().onFailure {
+                    pendingUi = request
+                    addSystem("界面请求响应失败：${it.message}")
+                }
+            }
+        }
         ExtensionDialog(
             request = request,
             input = dialogInput,
             onInput = { dialogInput = it },
-            onSelect = { value ->
-                scope.launch { bridge.extensionUiResponse(request.id, value = value) }
-                pendingUi = null
-            },
-            onConfirm = { value ->
-                scope.launch { bridge.extensionUiResponse(request.id, confirmed = value) }
-                pendingUi = null
-            },
-            onSubmit = {
-                scope.launch { bridge.extensionUiResponse(request.id, value = dialogInput) }
-                pendingUi = null
-            },
-            onDismiss = {
-                scope.launch { bridge.extensionUiResponse(request.id, cancelled = true) }
-                pendingUi = null
-            }
+            onSelect = { value -> sendUiResponse { bridge.extensionUiResponse(request.id, value = value) } },
+            onConfirm = { value -> sendUiResponse { bridge.extensionUiResponse(request.id, confirmed = value) } },
+            onSubmit = { sendUiResponse { bridge.extensionUiResponse(request.id, value = dialogInput) } },
+            onDismiss = { sendUiResponse { bridge.extensionUiResponse(request.id, cancelled = true) } }
         )
     }
 

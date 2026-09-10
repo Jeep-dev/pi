@@ -94,11 +94,11 @@ function handle(value) {
   if (value.type === "extension_ui_request" && value.method === "select" && value.title === "Session Tree") {
     treeWasComplete =
       value.options.some((option) => option.includes("root prompt")) &&
-      value.options.some((option) => option.includes("first answer")) &&
       value.options.some((option) => option.includes("second prompt")) &&
-      value.options.some((option) => option.includes("assistant: (tool call)")) &&
-      value.options.some((option) => option.includes("[bash]")) &&
-      value.options.some((option) => option.includes("●"));
+      value.options.some((option) => option.includes("●")) &&
+      !value.options.some((option) => option.includes("first answer")) &&
+      !value.options.some((option) => option.includes("assistant: (tool call)")) &&
+      !value.options.some((option) => option.includes("[bash]"));
     const target = value.options.find((option) => option.includes("aaaaaaaa"));
     send({ type: "extension_ui_response", id: value.id, value: target });
   }
@@ -132,7 +132,7 @@ function handle(value) {
   }
   if (value.id === "root-messages") {
     if ((value.data.messages || []).length !== 0) throw new Error("Selected user message leaked into context before editing");
-    send({ id: "branch", type: "prompt", message: "/tree bbbbbbbb" });
+    send({ id: "branch", type: "prompt", message: "/tree cccccccc" });
   }
   if (value.id === "branch") send({ id: "branch-tree", type: "get_tree" });
   if (value.id === "branch-tree") {
@@ -140,8 +140,8 @@ function handle(value) {
     const visit = (items) => items.forEach((item) => { nodes.push(item); visit(item.children || []); });
     visit(value.data.tree || []);
     const leaf = nodes.find((node) => node.entry.id === value.data.leafId)?.entry;
-    if (leaf?.type !== "label" || leaf.parentId !== "bbbbbbbb") {
-      throw new Error("Selected branch was not persisted at the chosen conversation point");
+    if (leaf?.type !== "custom" || leaf.customType !== "__android_tree_edit__" || leaf.data?.targetId !== "cccccccc") {
+      throw new Error("Selected user branch was not persisted at the chosen conversation point");
     }
     send({ id: "branch-messages", type: "get_messages" });
   }
