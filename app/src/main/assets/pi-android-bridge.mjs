@@ -3,12 +3,12 @@ import { spawn, execFile } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.4";
+const bridgeVersion = "2026-09-10.5";
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -19,6 +19,7 @@ const termuxBash = path.join(termuxBin, "bash");
 const termuxPi = path.join(termuxBin, "pi");
 const nodeExecutable = process.execPath || path.join(termuxBin, "node");
 const pidFile = path.join(termuxHome, ".pi", "android", "bridge.pid");
+const maxRequestBytes = 16_000_000;
 let child = null;
 let cwd = termuxHome;
 let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
@@ -410,7 +411,7 @@ function readBody(req) {
     req.on("data", chunk => {
       if (settled) return;
       body += chunk;
-      if (Buffer.byteLength(body) > 4_000_000) {
+      if (Buffer.byteLength(body) > maxRequestBytes) {
         settled = true;
         reject(new Error("request too large"));
         req.destroy();
@@ -533,14 +534,38 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/prompt") {
       const input = JSON.parse(await readBody(req));
-      const images = Array.isArray(input.images)
-        ? input.images
-            .filter(image => image && typeof image.data === "string" && typeof image.mimeType === "string")
-            .map(image => ({ type: "image", data: image.data, mimeType: image.mimeType }))
-        : [];
+      const incoming = Array.isArray(input.attachments) ? input.attachments.slice(0, 4) : [];
+      const images = [];
+      const uploaded = [];
+      let attachmentBytes = 0;
+
+      if (incoming.length) {
+        const uploadRoot = path.join(cwd, ".pi-android-uploads");
+        await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
+        for (const item of incoming) {
+          if (!item || typeof item.data !== "string") continue;
+          const data = Buffer.from(item.data, "base64");
+          attachmentBytes += data.byteLength;
+          if (!data.byteLength || attachmentBytes > 10_000_000) throw new Error("attachments exceed the 10 MB limit");
+          const mimeType = typeof item.mimeType === "string" && item.mimeType ? item.mimeType : "application/octet-stream";
+          const originalName = path.basename(String(item.name || "attachment"));
+          const safeName = originalName.replace(/[^\p{L}\p{N}._ -]+/gu, "_").slice(0, 120) || "attachment";
+          const storedName = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
+          const target = path.join(uploadRoot, storedName);
+          await writeFile(target, data, { mode: 0o600, flag: "wx" });
+          uploaded.push(path.relative(cwd, target));
+          if (mimeType.startsWith("image/")) images.push({ type: "image", data: item.data, mimeType });
+        }
+      }
+
+      let message = String(input.message || "");
+      if (uploaded.length) {
+        const attachmentText = uploaded.map(file => `- \`${file}\``).join("\n");
+        message = `${message || "请检查这些附件。"}\n\n附件已保存到当前项目，可按需使用 read/bash 工具读取：\n${attachmentText}`;
+      }
       return rpcResponse(res, {
         type: "prompt",
-        message: String(input.message || ""),
+        message,
         ...(images.length ? { images } : {}),
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
       });

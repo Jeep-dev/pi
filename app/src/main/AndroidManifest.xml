@@ -15,7 +15,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains a user-started local coding agent during long tasks" />
         </service>
-        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:alwaysRetainTaskState="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:alwaysRetainTaskState="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -12,6 +12,7 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
+import androidx.core.view.WindowCompat
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,16 +20,21 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.getBottom
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -70,6 +76,9 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -93,6 +102,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = AndroidColor.BLACK
         window.navigationBarColor = AndroidColor.BLACK
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -267,6 +277,10 @@ private fun PiScreen(bridge: PiBridge) {
     val toolDraftRefreshAt = remember { mutableMapOf<Int, Long>() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
     var showScrollControls by remember { mutableStateOf(false) }
@@ -286,27 +300,26 @@ private fun PiScreen(bridge: PiBridge) {
     var resumeFilter by remember { mutableStateOf("") }
     var modelInitialSearch by remember { mutableStateOf("") }
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
-    val pendingImages = remember { mutableStateListOf<PiImage>() }
+    val pendingAttachments = remember { mutableStateListOf<PiAttachment>() }
     var attachmentNotice by remember { mutableStateOf("") }
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val loaded = mutableListOf<PiImage>()
+                    val loaded = mutableListOf<PiAttachment>()
                     var totalBytes = 0
                     for (uri in uris.take(4)) {
-                        val mime = context.contentResolver.getType(uri).orEmpty()
-                        if (!mime.startsWith("image/")) continue
-                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(2_500_001) }
+                        val mime = context.contentResolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(10_000_001) }
                             ?: continue
-                        if (bytes.size > 2_500_000 || totalBytes + bytes.size > 2_500_000) {
-                            throw IllegalArgumentException("图片总大小不能超过 2.5 MB")
+                        if (bytes.size > 10_000_000 || totalBytes + bytes.size > 10_000_000) {
+                            throw IllegalArgumentException("附件总大小不能超过 10 MB")
                         }
                         var name = uri.lastPathSegment ?: "image"
                         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                             if (cursor.moveToFirst()) name = cursor.getString(0) ?: name
                         }
-                        loaded += PiImage(name, mime, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes.size)
+                        loaded += PiAttachment(name, mime, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes.size)
                         totalBytes += bytes.size
                     }
                     loaded
@@ -314,11 +327,11 @@ private fun PiScreen(bridge: PiBridge) {
             }
             result.fold(
                 onSuccess = { loaded ->
-                    pendingImages.clear()
-                    pendingImages.addAll(loaded)
-                    attachmentNotice = if (loaded.isEmpty()) "没有读取到支持的图片" else ""
+                    pendingAttachments.clear()
+                    pendingAttachments.addAll(loaded)
+                    attachmentNotice = if (loaded.isEmpty()) "没有读取到可用文件" else ""
                 },
-                onFailure = { attachmentNotice = "图片读取失败：${it.message}" }
+                onFailure = { attachmentNotice = "附件读取失败：${it.message}" }
             )
         }
     }
@@ -539,22 +552,22 @@ private fun PiScreen(bridge: PiBridge) {
         }
     }
 
-    fun executeInput(raw: String, images: List<PiImage> = emptyList()) {
+    fun executeInput(raw: String, attachments: List<PiAttachment> = emptyList()) {
         val text = raw.trim()
-        if (text.isBlank() && images.isEmpty()) return
+        if (text.isBlank() && attachments.isEmpty()) return
         if (!connected && !text.startsWith("/settings")) {
             addSystem("还没有连接 Pi。点顶部 Connect 或输入 /settings。")
             return
         }
-        if (images.isNotEmpty()) {
+        if (attachments.isNotEmpty()) {
             followOutput = true
-            val imageSummary = images.joinToString(", ") { "[图片: ${it.name}]" }
-            lines.add(ChatLine("user", listOf(text, imageSummary).filter { it.isNotBlank() }.joinToString("\n")))
+            val attachmentSummary = attachments.joinToString(", ") { "[附件: ${it.name}]" }
+            lines.add(ChatLine("user", listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n")))
             scope.launch {
                 val behavior = if (currentState?.streaming == true || status == "Working") "steer" else null
-                bridge.prompt(text, behavior, images).fold(
+                bridge.prompt(text, behavior, attachments).fold(
                     onSuccess = { status = "Working" },
-                    onFailure = { addSystem("发送图片失败：${it.message}") }
+                    onFailure = { addSystem("发送附件失败：${it.message}") }
                 )
             }
             return
@@ -672,13 +685,13 @@ private fun PiScreen(bridge: PiBridge) {
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.13
+                """Pi Android v5.14
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 完整分支导航、搜索、摘要和编辑器恢复
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义
-                |• 支持选择最多 4 张图片作为多模态输入
+                |• 支持最多 4 个通用文件附件；图片同时作为多模态输入
                 |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
             )
             "/run" -> {
@@ -839,6 +852,13 @@ private fun PiScreen(bridge: PiBridge) {
 
     LaunchedEffect(lines.size, lines.lastOrNull()?.text?.length, followOutput, input.length) {
         if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
+    }
+
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
+            delay(80)
+            chatListState.scrollToRealBottom(lines.lastIndex)
+        }
     }
 
     LaunchedEffect(showScrollControls, chatListState.isScrollInProgress) {
@@ -1101,7 +1121,7 @@ private fun PiScreen(bridge: PiBridge) {
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = 2.dp, bottom = 88.dp)
+                        .padding(end = 2.dp, bottom = 6.dp)
                         .width(38.dp)
                         .background(Color(0xDD41464C), RoundedCornerShape(7.dp))
                         .border(1.dp, Color(0xFF626970), RoundedCornerShape(7.dp))
@@ -1140,7 +1160,13 @@ private fun PiScreen(bridge: PiBridge) {
                     modifier = Modifier.align(Alignment.BottomCenter),
                     onPick = { name, remote ->
                         input = ""
-                        if (remote || name == "import") input = "/$name " else executeInput("/$name")
+                        if (remote || name == "import") {
+                            input = "/$name "
+                        } else {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                            executeInput("/$name")
+                        }
                     }
                 )
             }
@@ -1150,14 +1176,14 @@ private fun PiScreen(bridge: PiBridge) {
             Composer(
                 value = input,
                 busy = busy,
-                attachments = pendingImages,
+                attachments = pendingAttachments,
                 attachmentNotice = attachmentNotice,
                 onValue = { input = it },
                 onAttach = {
                     attachmentNotice = ""
-                    imagePicker.launch("image/*")
+                    filePicker.launch(arrayOf("*/*"))
                 },
-                onRemoveAttachment = { image -> pendingImages.remove(image) },
+                onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
                 onPrimary = {
                     if (busy) {
                         status = "Stopping"
@@ -1166,11 +1192,15 @@ private fun PiScreen(bridge: PiBridge) {
                         }
                     } else {
                         val value = input
-                        val images = pendingImages.toList()
+                        if (value.trimStart().startsWith("/")) {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                        }
+                        val attachments = pendingAttachments.toList()
                         input = ""
-                        pendingImages.clear()
+                        pendingAttachments.clear()
                         attachmentNotice = ""
-                        executeInput(value, images)
+                        executeInput(value, attachments)
                     }
                 }
             )
@@ -1413,35 +1443,40 @@ private fun CommandPalette(
     }.take(64)
     if (choices.isEmpty()) return
     val paletteState = rememberLazyListState()
-    Column(
-        modifier
-            .padding(10.dp)
-            .fillMaxWidth()
-            .background(PanelBg, RoundedCornerShape(12.dp))
-            .border(1.dp, Border, RoundedCornerShape(12.dp))
-            .padding(vertical = 4.dp)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp))
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .fillMaxWidth()
+                .heightIn(max = allowedHeight)
+                .background(PanelBg, RoundedCornerShape(10.dp))
+                .border(1.dp, Border, RoundedCornerShape(10.dp))
+                .padding(vertical = 3.dp)
         ) {
-            Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            Text("上下滑动选择", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-        }
-        LazyColumn(
-            state = paletteState,
-            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
-            contentPadding = PaddingValues(bottom = 4.dp)
-        ) {
-            items(choices) { choice ->
-                val cmd = choice.first
-                val remote = choice.second
-                Row(
-                    Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(104.dp))
-                    Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text("${choices.size} · 上下滑动", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+            }
+            LazyColumn(
+                state = paletteState,
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                contentPadding = PaddingValues(bottom = 3.dp)
+            ) {
+                items(choices) { choice ->
+                    val cmd = choice.first
+                    val remote = choice.second
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(112.dp))
+                        Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -1452,29 +1487,27 @@ private fun CommandPalette(
 private fun Composer(
     value: String,
     busy: Boolean,
-    attachments: List<PiImage>,
+    attachments: List<PiAttachment>,
     attachmentNotice: String,
     onValue: (String) -> Unit,
     onAttach: () -> Unit,
-    onRemoveAttachment: (PiImage) -> Unit,
+    onRemoveAttachment: (PiAttachment) -> Unit,
     onPrimary: () -> Unit
 ) {
-    Column(
-        Modifier.fillMaxWidth().background(Color(0xFF050607)).border(1.dp, Color(0xFF19232C))
-    ) {
+    Column(Modifier.fillMaxWidth().background(Color(0xFF050607))) {
         if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 3.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                attachments.forEach { image ->
+                attachments.forEach { attachment ->
                     Text(
-                        "${image.name} · ${compactCount(image.byteCount.toLong())}B  ×",
+                        "${attachment.name} · ${compactCount(attachment.byteCount.toLong())}B  ×",
                         color = Blue,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
                         modifier = Modifier.background(CardBg, RoundedCornerShape(5.dp))
-                            .clickable { onRemoveAttachment(image) }
+                            .clickable { onRemoveAttachment(attachment) }
                             .padding(horizontal = 7.dp, vertical = 5.dp)
                     )
                 }
@@ -1486,14 +1519,14 @@ private fun Composer(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-        Button(
+        TextButton(
             onClick = onAttach,
             modifier = Modifier.width(44.dp).height(52.dp),
             contentPadding = PaddingValues(0.dp),
             enabled = !busy,
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF26313A))
+            colors = ButtonDefaults.textButtonColors(contentColor = Blue, disabledContentColor = TextMuted)
         ) {
-            Text("＋", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
+            Text("＋", fontFamily = FontFamily.Monospace, fontSize = 22.sp)
         }
         OutlinedTextField(
             value = value,
@@ -1521,14 +1554,17 @@ private fun Composer(
                 disabledContainerColor = Color.Transparent
             )
         )
-        Button(
+        TextButton(
             onClick = onPrimary,
-            modifier = Modifier.width(56.dp).height(52.dp),
+            modifier = Modifier.width(52.dp).height(52.dp),
             contentPadding = PaddingValues(0.dp),
             enabled = busy || value.isNotBlank() || attachments.isNotEmpty(),
-            colors = if (busy) ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030)) else ButtonDefaults.buttonColors()
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = if (busy) Danger else Blue,
+                disabledContentColor = Color(0xFF4B535C)
+            )
         ) {
-            Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 18.sp)
+            Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp)
         }
         }
     }
@@ -1570,7 +1606,7 @@ private fun Footer(state: PiState?, stats: PiStats?) {
     }
     val scroll = rememberScrollState()
     Box(
-        Modifier.fillMaxWidth().background(Bg).padding(horizontal = 10.dp, vertical = 4.dp)
+        Modifier.fillMaxWidth().background(Bg).navigationBarsPadding().padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text(
             parts.joinToString(" "),
