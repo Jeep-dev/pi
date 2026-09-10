@@ -38,6 +38,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -895,9 +896,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "/hotkeys" -> addSystem(
                 """移动端操作
                 |• 输入 /：打开可搜索命令面板
-                |• 发送中点击 ■：中止当前 Agent
+                |• 工作中仍可直接发送：按 Pi 规则作为 steering message 排队
+                |• 输入 /abort 才会中止当前 Agent
                 |• 滑动离开底部：暂停跟随；回到底部自动恢复
-                |• 滑动时右侧 ↑/↓：跳到顶部/真实底部
+                |• 右侧 ↑/↓：按屏幕高度翻页
                 |• 长按消息：选择并复制文本
                 |• 工具卡片：默认 10 行，可展开全部实时输出
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
@@ -1045,11 +1047,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    LaunchedEffect(showScrollControls, chatListState.isScrollInProgress) {
-        if (showScrollControls && !chatListState.isScrollInProgress) {
-            delay(1_200)
-            showScrollControls = false
-        }
+    LaunchedEffect(followOutput) {
+        if (followOutput) showScrollControls = false
     }
 
     LaunchedEffect(connected) {
@@ -1310,33 +1309,32 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = 2.dp, bottom = 6.dp)
-                        .width(38.dp)
-                        .background(LocalPiColors.current.scrollBg, RoundedCornerShape(7.dp))
-                        .border(1.dp, LocalPiColors.current.scrollBorder, RoundedCornerShape(7.dp))
+                        .offset(y = (-54).dp)
+                        .padding(end = 4.dp, bottom = 6.dp)
+                        .width(40.dp)
                 ) {
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
                             followOutput = false
-                            showScrollControls = false
-                            scope.launch { chatListState.scrollToItem(0) }
+                            showScrollControls = true
+                            scope.launch { chatListState.scrollBy(-chatListState.pageDistance()) }
                         },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("↑", color = LocalPiColors.current.scrollText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("↑", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(LocalPiColors.current.scrollDivider))
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
-                            followOutput = true
-                            showScrollControls = false
                             scope.launch {
-                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
+                                val distance = chatListState.pageDistance()
+                                chatListState.scrollBy(distance)
+                                followOutput = !chatListState.canScrollForward
+                                showScrollControls = !chatListState.canScrollForward
                             }
                         },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("↓", color = LocalPiColors.current.scrollText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("↓", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1375,23 +1373,19 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 },
                 onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
                 onPrimary = {
-                    if (busy) {
-                        status = "Stopping"
-                        scope.launch {
-                            bridge.abort().onFailure { addSystem("取消失败：${it.message}") }
-                        }
-                    } else {
-                        val value = input
-                        if (value.trimStart().startsWith("/")) {
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
-                        }
-                        val attachments = pendingAttachments.toList()
-                        input = ""
-                        pendingAttachments.clear()
-                        attachmentNotice = ""
-                        executeInput(value, attachments)
+                    // Sending is never abort. During a run executeInput() sends a
+                    // steering message, matching Pi's Enter behavior. Abort is the
+                    // explicit /abort command.
+                    val value = input
+                    if (value.trimStart().startsWith("/")) {
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
                     }
+                    val attachments = pendingAttachments.toList()
+                    input = ""
+                    pendingAttachments.clear()
+                    attachmentNotice = ""
+                    executeInput(value, attachments)
                 }
             )
         }
@@ -1434,6 +1428,11 @@ private fun TerminalHeader(
             Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         }
     }
+}
+
+private fun LazyListState.pageDistance(): Float {
+    val layout = layoutInfo
+    return ((layout.viewportEndOffset - layout.viewportStartOffset) * 0.82f).coerceAtLeast(240f)
 }
 
 private suspend fun LazyListState.scrollToRealBottom(lastIndex: Int) {
@@ -1717,7 +1716,7 @@ private fun Composer(
             onClick = onAttach,
             modifier = Modifier.width(44.dp).height(52.dp),
             contentPadding = PaddingValues(0.dp),
-            enabled = !busy,
+            enabled = true,
             colors = ButtonDefaults.textButtonColors(contentColor = Blue, disabledContentColor = TextMuted)
         ) {
             Text("＋", fontFamily = FontFamily.Monospace, fontSize = 22.sp)
@@ -1732,7 +1731,7 @@ private fun Composer(
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             ),
-            placeholder = { Text(if (busy) "Pi 正在工作，可点右侧停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
+            placeholder = { Text(if (busy) "Pi 工作中，输入消息可继续发送；/abort 停止" else "输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp) },
             singleLine = false,
             minLines = 1,
             maxLines = 5,
@@ -1754,11 +1753,11 @@ private fun Composer(
             contentPadding = PaddingValues(0.dp),
             enabled = busy || value.isNotBlank() || attachments.isNotEmpty(),
             colors = ButtonDefaults.textButtonColors(
-                contentColor = if (busy) Danger else Blue,
+                contentColor = Blue,
                 disabledContentColor = LocalPiColors.current.disabledAction
             )
         ) {
-            Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp)
+            Text("↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp)
         }
         }
     }
