@@ -1049,20 +1049,20 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    suspend fun recoverBridge(): Boolean {
+    suspend fun recoverBridge(): String {
         status = "RECONNECTING"
         val attached = bridge.attachToRunningBridge().getOrNull()
         if (attached != null) {
             currentState = attached
-            return true
+            return "attached"
         }
         return runCatching {
             bridge.installAndStartBridge().getOrThrow()
             bridge.waitForBridge(30_000).getOrThrow()
             val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
             currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
-            true
-        }.getOrElse { false }
+            "restarted"
+        }.getOrElse { "failed" }
     }
 
     suspend fun restoreAfterReconnect() {
@@ -1099,19 +1099,32 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     cursor = batch.latest
                     batch.events.forEach { event -> applyEvent(event) }
                 }
-                if (processExited && recoverBridge()) {
-                    restoreAfterReconnect()
+                if (processExited) {
+                    when (recoverBridge()) {
+                        "restarted" -> restoreAfterReconnect()
+                        "attached" -> Unit
+                    }
                     status = if (currentState?.streaming == true) "Working" else "Ready"
                 }
             }.onFailure { error ->
                 eventFailures += 1
                 status = if (currentState?.streaming == true) "RECONNECTING · 工作仍在继续" else "RECONNECTING"
                 delay((500L * (1L shl (eventFailures.coerceAtMost(3) - 1))).coerceAtMost(5_000L))
-                if (eventFailures >= 3 && recoverBridge()) {
-                    restoreAfterReconnect()
-                    eventFailures = 0
-                    status = if (currentState?.streaming == true) "Working" else "Ready"
-                } else if (eventFailures % 3 == 0) {
+                if (eventFailures >= 3) {
+                    when (recoverBridge()) {
+                        "attached" -> {
+                            eventFailures = 0
+                            status = if (currentState?.streaming == true) "Working" else "Ready"
+                        }
+                        "restarted" -> {
+                            restoreAfterReconnect()
+                            eventFailures = 0
+                            status = if (currentState?.streaming == true) "Working" else "Ready"
+                        }
+                        else -> Unit
+                    }
+                }
+                if (eventFailures > 0 && eventFailures % 3 == 0) {
                     addSystem("Bridge 暂时不可用，正在后台重试：${error.message}")
                 }
             }
