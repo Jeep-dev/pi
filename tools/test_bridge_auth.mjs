@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -28,11 +28,9 @@ process.stdin.on("data", chunk => {
     const data = command.type === "get_state"
       ? { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 0 }
       : {};
-    const isImageTest = command.type === "prompt" && command.message.startsWith("__image_test__");
-    const imageValid = !isImageTest ||
-      (command.message.includes(".pi-android-uploads/") && command.images?.[0]?.type === "image" &&
-        command.images[0].mimeType === "image/png" && command.images[0].data === "aGVsbG8=");
-    process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: imageValid, data, ...(!imageValid ? { error: "image payload missing" } : {}) }) + "\\n");
+    const isAttachmentTest = command.type === "prompt" && command.message.startsWith("__attachment_test__");
+    const attachmentValid = !isAttachmentTest || command.message.includes(".pi-android-uploads/");
+    process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: attachmentValid, data, ...(!attachmentValid ? { error: "file reference missing" } : {}) }) + "\\n");
   }
 });
 `);
@@ -115,15 +113,31 @@ try {
     assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
   }
   await new Promise(resolve => setTimeout(resolve, 250));
-  const imagePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const upload = await fetch(`http://127.0.0.1:${port}/upload?name=huge-reference.bin`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
+    body: Buffer.from("streamed-file"),
+    duplex: "half",
+  });
+  assert.equal(upload.status, 200);
+  const uploaded = await upload.json();
+  assert.equal(await readFile(path.join(home, uploaded.path), "utf8"), "streamed-file");
+
+  const attachmentPrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({
-      message: "__image_test__",
-      attachments: [{ name: "hello.png", mimeType: "image/png", data: "aGVsbG8=" }],
+      message: "__attachment_test__",
+      attachments: [{ name: "huge-reference.bin", path: uploaded.path, mimeType: "application/octet-stream", byteCount: 13 }],
     }),
   });
-  assert.equal(imagePrompt.status, 200, "image content must be forwarded to Pi RPC");
+  assert.equal(attachmentPrompt.status, 200, "Pi RPC must receive the file path instead of embedded file bytes");
+
+  const reference = await fetch(`http://127.0.0.1:${port}/reference?path=${encodeURIComponent(fakePi)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(reference.status, 200, "directly readable files should be referenced without copying");
+  assert.equal((await reference.json()).path, fakePi);
 
   const afterRestart = await fetch(`http://127.0.0.1:${port}/state`, {
     headers: { Authorization: `Bearer ${token}` },

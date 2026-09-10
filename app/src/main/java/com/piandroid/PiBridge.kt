@@ -2,6 +2,7 @@ package com.piandroid
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -113,14 +114,52 @@ class PiBridge(context: Context) {
                     put(
                         JSONObject()
                             .put("name", attachment.name)
-                            .put("data", attachment.data)
+                            .put("path", attachment.path)
                             .put("mimeType", attachment.mimeType)
+                            .put("byteCount", attachment.byteCount)
                     )
                 }
             })
         }
         return request("/prompt", body.toString()).map { Unit }
     }
+
+    suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
+        return request("/reference?path=${encode(path)}", null, 8_000).mapCatching { raw ->
+            val data = JSONObject(raw)
+            PiAttachment(name, mimeType, data.optString("path"), data.optLong("byteCount", byteCount))
+        }
+    }
+
+    suspend fun uploadAttachment(uri: Uri, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val url = URL("http://127.0.0.1:$port/upload?name=${encode(name)}")
+                val connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 5_000
+                    readTimeout = 0
+                    doOutput = true
+                    useCaches = false
+                    setChunkedStreamingMode(256 * 1024)
+                    setRequestProperty("Authorization", "Bearer $authToken")
+                    setRequestProperty("Content-Type", mimeType.ifBlank { "application/octet-stream" })
+                }
+                context.contentResolver.openInputStream(uri).use { input ->
+                    requireNotNull(input) { "无法读取所选文件" }
+                    connection.outputStream.use { output -> input.copyTo(output, 256 * 1024) }
+                }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) {
+                    val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                    throw IllegalStateException(message.ifBlank { "附件导入失败：HTTP $code" })
+                }
+                val stored = JSONObject(text)
+                PiAttachment(name, mimeType, stored.optString("path"), stored.optLong("byteCount", byteCount))
+            }
+        }
 
     suspend fun abort(): Result<Unit> = request("/abort", "{}").map { Unit }
     suspend fun newSession(): Result<Unit> = request("/new-session", "{}").map { Unit }
@@ -543,7 +582,7 @@ data class PiStats(
     val contextPercent: Double
 )
 data class PiModel(val provider: String, val id: String, val name: String, val reasoning: Boolean, val contextWindow: Long)
-data class PiAttachment(val name: String, val mimeType: String, val data: String, val byteCount: Int)
+data class PiAttachment(val name: String, val mimeType: String, val path: String, val byteCount: Long)
 data class PiCommand(val name: String, val description: String, val source: String)
 data class PiBashResult(val output: String, val exitCode: Int, val cancelled: Boolean, val truncated: Boolean)
 data class PiUiRequest(

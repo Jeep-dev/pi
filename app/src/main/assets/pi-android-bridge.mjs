@@ -2,9 +2,10 @@ import http from "node:http";
 import { spawn, execFile } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
@@ -19,7 +20,7 @@ const termuxBash = path.join(termuxBin, "bash");
 const termuxPi = path.join(termuxBin, "pi");
 const nodeExecutable = process.execPath || path.join(termuxBin, "node");
 const pidFile = path.join(termuxHome, ".pi", "android", "bridge.pid");
-const maxRequestBytes = 16_000_000;
+const maxRequestBytes = 4_000_000;
 let child = null;
 let cwd = termuxHome;
 let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
@@ -391,6 +392,28 @@ async function safePath(relativePath = "") {
   }
 }
 
+function safeAttachmentName(value) {
+  const original = path.basename(String(value || "attachment"));
+  return original.replace(/[^\p{L}\p{N}._ -]+/gu, "_").slice(0, 160) || "attachment";
+}
+
+async function streamAttachment(req, originalName) {
+  const uploadRoot = path.join(cwd, ".pi-android-uploads");
+  await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
+  const storedName = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeAttachmentName(originalName)}`;
+  const target = path.join(uploadRoot, storedName);
+  const temporary = `${target}.part`;
+  let byteCount = 0;
+  req.on("data", chunk => { byteCount += chunk.length; });
+  try {
+    await pipeline(req, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+    await rename(temporary, target);
+    return { path: path.relative(cwd, target), byteCount };
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
 async function atomicWrite(target, content) {
   const temporary = path.join(path.dirname(target), `.pi-android-${process.pid}-${randomUUID()}.tmp`);
   let mode = 0o600;
@@ -519,6 +542,22 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (req.method === "GET" && url.pathname === "/reference") {
+      const requested = String(url.searchParams.get("path") || "");
+      if (!path.isAbsolute(requested)) throw new Error("file reference must be an absolute path");
+      const target = await realpath(requested);
+      const info = await stat(target);
+      if (!info.isFile()) throw new Error("file reference is not a regular file");
+      const handle = await open(target, "r");
+      await handle.close();
+      return send(res, 200, { ok: true, path: target, byteCount: info.size });
+    }
+
+    if (req.method === "POST" && url.pathname === "/upload") {
+      const result = await streamAttachment(req, url.searchParams.get("name") || "attachment");
+      return send(res, 200, { ok: true, ...result });
+    }
+
     if (req.method === "POST" && url.pathname === "/shutdown") {
       send(res, 200, { ok: true });
       setImmediate(shutdownBridge);
@@ -534,39 +573,21 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/prompt") {
       const input = JSON.parse(await readBody(req));
-      const incoming = Array.isArray(input.attachments) ? input.attachments.slice(0, 4) : [];
-      const images = [];
-      const uploaded = [];
-      let attachmentBytes = 0;
-
-      if (incoming.length) {
-        const uploadRoot = path.join(cwd, ".pi-android-uploads");
-        await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
-        for (const item of incoming) {
-          if (!item || typeof item.data !== "string") continue;
-          const data = Buffer.from(item.data, "base64");
-          attachmentBytes += data.byteLength;
-          if (!data.byteLength || attachmentBytes > 10_000_000) throw new Error("attachments exceed the 10 MB limit");
-          const mimeType = typeof item.mimeType === "string" && item.mimeType ? item.mimeType : "application/octet-stream";
-          const originalName = path.basename(String(item.name || "attachment"));
-          const safeName = originalName.replace(/[^\p{L}\p{N}._ -]+/gu, "_").slice(0, 120) || "attachment";
-          const storedName = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
-          const target = path.join(uploadRoot, storedName);
-          await writeFile(target, data, { mode: 0o600, flag: "wx" });
-          uploaded.push(path.relative(cwd, target));
-          if (mimeType.startsWith("image/")) images.push({ type: "image", data: item.data, mimeType });
-        }
-      }
-
+      const attachments = Array.isArray(input.attachments)
+        ? input.attachments.filter(item => item && typeof item.path === "string" && item.path.trim())
+        : [];
       let message = String(input.message || "");
-      if (uploaded.length) {
-        const attachmentText = uploaded.map(file => `- \`${file}\``).join("\n");
-        message = `${message || "请检查这些附件。"}\n\n附件已保存到当前项目，可按需使用 read/bash 工具读取：\n${attachmentText}`;
+      if (attachments.length) {
+        const attachmentText = attachments.map(item => {
+          const size = Number(item.byteCount);
+          const sizeText = Number.isFinite(size) && size >= 0 ? ` (${size} bytes)` : "";
+          return `- \`${item.path}\`${sizeText}`;
+        }).join("\n");
+        message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
       return rpcResponse(res, {
         type: "prompt",
         message,
-        ...(images.length ? { images } : {}),
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
       });
     }
@@ -716,6 +737,8 @@ function removeOwnPidFile() {
 }
 
 process.on("exit", removeOwnPidFile);
+server.requestTimeout = 0;
+server.timeout = 0;
 server.listen(port, "127.0.0.1", () => {
   writeFileSync(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
   console.log(`Pi Android bridge ${bridgeVersion} listening on 127.0.0.1:${port}`);

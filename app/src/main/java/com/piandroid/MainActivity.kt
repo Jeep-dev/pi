@@ -5,10 +5,12 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
@@ -93,6 +95,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
@@ -241,6 +244,28 @@ private fun markdownText(source: String) = buildAnnotatedString {
     }
 }
 
+private fun directDocumentPath(context: Context, uri: Uri): String? {
+    if (uri.scheme == "file") return uri.path
+    if (!DocumentsContract.isDocumentUri(context, uri)) return null
+    val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
+    return when (uri.authority) {
+        "com.android.externalstorage.documents" -> {
+            val parts = documentId.split(':', limit = 2)
+            if (parts.size != 2) null
+            else {
+                val root = if (parts[0].equals("primary", ignoreCase = true)) {
+                    Environment.getExternalStorageDirectory()
+                } else {
+                    File("/storage", parts[0])
+                }
+                File(root, parts[1]).absolutePath
+            }
+        }
+        "com.android.providers.downloads.documents" -> documentId.removePrefix("raw:").takeIf { documentId.startsWith("raw:") }
+        else -> null
+    }
+}
+
 @Composable
 private fun PiTouchApp(bridge: PiBridge) {
     val scheme = darkColorScheme(
@@ -303,35 +328,48 @@ private fun PiScreen(bridge: PiBridge) {
     var attachmentNotice by remember { mutableStateOf("") }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val loaded = mutableListOf<PiAttachment>()
-                    var totalBytes = 0
-                    for (uri in uris.take(4)) {
-                        val mime = context.contentResolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
-                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(10_000_001) }
-                            ?: continue
-                        if (bytes.size > 10_000_000 || totalBytes + bytes.size > 10_000_000) {
-                            throw IllegalArgumentException("附件总大小不能超过 10 MB")
+            if (uris.isEmpty()) return@launch
+            attachmentNotice = "正在建立文件引用…"
+            var failures = 0
+            uris.forEachIndexed { index, uri ->
+                attachmentNotice = "正在添加附件 ${index + 1}/${uris.size}…"
+                val descriptor = withContext(Dispatchers.IO) {
+                    var name = uri.lastPathSegment ?: "attachment"
+                    var byteCount = -1L
+                    context.contentResolver.query(
+                        uri,
+                        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: name
+                            if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) byteCount = cursor.getLong(sizeIndex)
                         }
-                        var name = uri.lastPathSegment ?: "image"
-                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                            if (cursor.moveToFirst()) name = cursor.getString(0) ?: name
-                        }
-                        loaded += PiAttachment(name, mime, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes.size)
-                        totalBytes += bytes.size
                     }
-                    loaded
+                    Triple(name, context.contentResolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }, byteCount)
+                }
+                val (name, mimeType, byteCount) = descriptor
+                val directPath = directDocumentPath(context, uri)
+                val attachment = directPath
+                    ?.let { bridge.referenceAttachment(it, name, mimeType, byteCount).getOrNull() }
+                    ?: bridge.uploadAttachment(uri, name, mimeType, byteCount).getOrElse {
+                        failures++
+                        attachmentNotice = "附件 $name 添加失败：${it.message}"
+                        null
+                    }
+                if (attachment != null && pendingAttachments.none { it.path == attachment.path }) {
+                    pendingAttachments.add(attachment)
                 }
             }
-            result.fold(
-                onSuccess = { loaded ->
-                    pendingAttachments.clear()
-                    pendingAttachments.addAll(loaded)
-                    attachmentNotice = if (loaded.isEmpty()) "没有读取到可用文件" else ""
-                },
-                onFailure = { attachmentNotice = "附件读取失败：${it.message}" }
-            )
+            attachmentNotice = when {
+                failures > 0 -> "$failures 个附件添加失败"
+                pendingAttachments.isEmpty() -> "没有读取到可用文件"
+                else -> ""
+            }
         }
     }
 
@@ -690,7 +728,7 @@ private fun PiScreen(bridge: PiBridge) {
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义
-                |• 支持最多 4 个通用文件附件；图片同时作为多模态输入
+                |• 通用文件附件使用路径引用；可访问文件不复制、不内嵌
                 |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
             )
             "/run" -> {
@@ -1501,7 +1539,7 @@ private fun Composer(
             ) {
                 attachments.forEach { attachment ->
                     Text(
-                        "${attachment.name} · ${compactCount(attachment.byteCount.toLong())}B  ×",
+                        "${attachment.name}${if (attachment.byteCount >= 0) " · ${compactCount(attachment.byteCount)}B" else ""}  ×",
                         color = Blue,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
