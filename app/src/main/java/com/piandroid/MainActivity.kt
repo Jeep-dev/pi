@@ -899,7 +899,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• 工作中仍可直接发送：按 Pi 规则作为 steering message 排队
                 |• 输入 /abort 才会中止当前 Agent
                 |• 滑动离开底部：暂停跟随；回到底部自动恢复
-                |• 右侧 ↑/↓：按屏幕高度翻页
+                |• 右侧 ↑/↓：直接跳到消息顶部/底部
                 |• 长按消息：选择并复制文本
                 |• 工具卡片：默认 10 行，可展开全部实时输出
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
@@ -1309,15 +1309,15 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .offset(y = (-54).dp)
+                        .offset(y = (-90).dp)
                         .padding(end = 4.dp, bottom = 6.dp)
                         .width(40.dp)
                 ) {
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
                             followOutput = false
-                            showScrollControls = true
-                            scope.launch { chatListState.scrollBy(-chatListState.pageDistance()) }
+                            showScrollControls = false
+                            scope.launch { chatListState.scrollToItem(0) }
                         },
                         contentAlignment = Alignment.Center
                     ) {
@@ -1325,11 +1325,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     }
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
+                            showScrollControls = false
+                            followOutput = true
                             scope.launch {
-                                val distance = chatListState.pageDistance()
-                                chatListState.scrollBy(distance)
-                                followOutput = !chatListState.canScrollForward
-                                showScrollControls = !chatListState.canScrollForward
+                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
                             }
                         },
                         contentAlignment = Alignment.Center
@@ -1428,11 +1427,6 @@ private fun TerminalHeader(
             Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         }
     }
-}
-
-private fun LazyListState.pageDistance(): Float {
-    val layout = layoutInfo
-    return ((layout.viewportEndOffset - layout.viewportStartOffset) * 0.82f).coerceAtLeast(240f)
 }
 
 private suspend fun LazyListState.scrollToRealBottom(lastIndex: Int) {
