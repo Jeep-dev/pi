@@ -1309,7 +1309,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .offset(y = (-90).dp)
+                        .offset(y = (-72).dp)
                         .padding(end = 4.dp, bottom = 6.dp)
                         .width(40.dp)
                 ) {
