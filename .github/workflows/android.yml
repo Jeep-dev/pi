@@ -6,6 +6,7 @@ on:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
+      - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle/**"
@@ -15,6 +16,7 @@ on:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
+      - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle/**"
@@ -36,6 +38,7 @@ jobs:
         run: |
           node --check app/src/main/assets/pi-android-bridge.mjs
           node tools/test_bridge_auth.mjs
+          node tools/test_themes.mjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -52,5 +55,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.15.1-apks
+          name: pi-android-v5.16.0-apks
           path: app/build/outputs/apk/**/*.apk

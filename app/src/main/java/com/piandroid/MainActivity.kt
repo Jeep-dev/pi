@@ -1,5 +1,6 @@
 package com.piandroid
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -60,7 +61,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -84,6 +89,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -136,7 +142,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings }
+private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes }
 private data class ChatLine(
     val role: String,
     val text: String,
@@ -147,19 +153,32 @@ private data class ChatLine(
 )
 private data class LocalCommand(val name: String, val description: String)
 
-private val Bg = Color(0xFF000000)
-private val HeaderBg = Color(0xFF05080A)
-private val PanelBg = Color(0xFF0D1116)
-private val CardBg = Color(0xFF171B21)
-private val ToolBg = Color(0xFF263229)
-private val UserBg = Color(0xFF30313A)
-private val Border = Color(0xFF284864)
-private val Accent = Color(0xFF70E69A)
-private val Blue = Color(0xFF79C5FF)
-private val TextMain = Color(0xFFE8EAF0)
-private val TextMuted = Color(0xFF858C96)
-private val ThinkingText = Color(0xFF9A9A9A)
-private val Danger = Color(0xFFFF8D8D)
+private val Bg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.bg
+private val HeaderBg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.headerBg
+private val PanelBg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.panelBg
+private val CardBg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.cardBg
+private val ToolBg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.toolBg
+private val UserBg: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.userBg
+private val Border: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.border
+private val Accent: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.accent
+private val Blue: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.blue
+private val TextMain: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.textMain
+private val TextMuted: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.textMuted
+private val ThinkingText: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.thinkingText
+private val Danger: Color
+    @Composable @ReadOnlyComposable get() = LocalPiColors.current.danger
 
 private fun partialJsonString(raw: String, key: String): String? {
     val marker = "\"$key\""
@@ -212,7 +231,7 @@ private fun toolDraftPreview(raw: String, count: Int): String {
     }
 }
 
-private fun markdownText(source: String) = buildAnnotatedString {
+private fun markdownText(source: String, codeColor: Color) = buildAnnotatedString {
     val text = source
         .replace(Regex("(?m)^#{1,6}\\s+"), "")
         .replace(Regex("(?m)^```[^\\n]*$"), "")
@@ -234,7 +253,7 @@ private fun markdownText(source: String) = buildAnnotatedString {
             text[index] == '`' -> {
                 val end = text.indexOf('`', index + 1)
                 if (end > index + 1) {
-                    pushStyle(SpanStyle(color = Blue, fontFamily = FontFamily.Monospace))
+                    pushStyle(SpanStyle(color = codeColor, fontFamily = FontFamily.Monospace))
                     append(text.substring(index + 1, end))
                     pop()
                     index = end + 1
@@ -275,20 +294,58 @@ private fun directDocumentPath(context: Context, uri: Uri): String? {
 
 @Composable
 private fun PiTouchApp(bridge: PiBridge) {
-    val scheme = darkColorScheme(
-        background = Bg,
-        surface = Bg,
-        primary = Blue,
-        onBackground = TextMain,
-        onSurface = TextMain
-    )
-    MaterialTheme(colorScheme = scheme) {
-        Surface(Modifier.fillMaxSize(), color = Bg) { PiScreen(bridge) }
+    val context = LocalContext.current
+    var themeKey by rememberSaveable {
+        mutableStateOf(context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE).getString("theme", "dark") ?: "dark")
+    }
+    val themeMode = PiThemeMode.fromStorage(themeKey)
+    val colors = colorsFor(themeMode)
+    val scheme = if (themeMode == PiThemeMode.Light) {
+        lightColorScheme(
+            background = colors.bg,
+            surface = colors.bg,
+            primary = colors.blue,
+            onBackground = colors.textMain,
+            onSurface = colors.textMain
+        )
+    } else {
+        darkColorScheme(
+            background = colors.bg,
+            surface = colors.bg,
+            primary = colors.blue,
+            onBackground = colors.textMain,
+            onSurface = colors.textMain
+        )
+    }
+    SideEffect {
+        val window = (context as? Activity)?.window ?: return@SideEffect
+        val lightBars = themeMode == PiThemeMode.Light
+        window.statusBarColor = if (themeMode == PiThemeMode.Dark) AndroidColor.BLACK else colors.headerBg.toArgb()
+        window.navigationBarColor = if (themeMode == PiThemeMode.Dark) AndroidColor.BLACK else colors.bg.toArgb()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = lightBars
+            isAppearanceLightNavigationBars = lightBars
+        }
+    }
+    CompositionLocalProvider(LocalPiColors provides colors) {
+        MaterialTheme(colorScheme = scheme) {
+            Surface(Modifier.fillMaxSize(), color = colors.bg) {
+                PiScreen(
+                    bridge = bridge,
+                    themeMode = themeMode,
+                    onTheme = { selected ->
+                        themeKey = selected.storageKey
+                        context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                            .edit().putString("theme", selected.storageKey).apply()
+                    }
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun PiScreen(bridge: PiBridge) {
+private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiThemeMode) -> Unit) {
     var cwd by rememberSaveable { mutableStateOf("/data/data/com.termux/files/home") }
     var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts") }
     var input by rememberSaveable { mutableStateOf("") }
@@ -421,6 +478,7 @@ private fun PiScreen(bridge: PiBridge) {
             LocalCommand("hotkeys", "查看移动端手势与操作"),
             LocalCommand("changelog", "查看此 Android 版本更新内容"),
             LocalCommand("quit", "保存并停止当前 Pi 进程"),
+            LocalCommand("themes", "切换暗色、亮色或灰色主题"),
             LocalCommand("settings", "连接与运行设置"),
             LocalCommand("run", "通过 Pi RPC 执行 bash（也支持 ! / !!）"),
             LocalCommand("files", "浏览及编辑当前项目文件"),
@@ -615,7 +673,8 @@ private fun PiScreen(bridge: PiBridge) {
     fun executeInput(raw: String, attachments: List<PiAttachment> = emptyList()) {
         val text = raw.trim()
         if (text.isBlank() && attachments.isEmpty()) return
-        if (!connected && !text.startsWith("/settings")) {
+        val firstToken = text.substringBefore(' ').lowercase()
+        if (!connected && firstToken !in setOf("/settings", "/themes")) {
             addSystem("还没有连接 Pi。点顶部 Connect 或输入 /settings。")
             return
         }
@@ -651,7 +710,7 @@ private fun PiScreen(bridge: PiBridge) {
             return
         }
 
-        val command = text.substringBefore(' ')
+        val command = text.substringBefore(' ').lowercase()
         val args = text.substringAfter(' ', "").trim()
         when (command) {
             "/help" -> addSystem(
@@ -660,7 +719,7 @@ private fun PiScreen(bridge: PiBridge) {
                 |模型：/model [provider/model] /thinking [level] /scoped-models
                 |数据：/session /copy /export [file] /import <file.jsonl> /share
                 |运行：!command（写入上下文） · !!command（不写入上下文） · /abort
-                |资源：/reload /trust /files /diff /settings
+                |资源：/reload /trust /files /diff /themes /settings
                 |系统：/hotkeys /changelog /login /logout /quit""".trimMargin()
             )
             "/resume" -> scope.launch {
@@ -745,13 +804,14 @@ private fun PiScreen(bridge: PiBridge) {
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.14
+                """Pi Android v5.16
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 完整分支导航、搜索、摘要和编辑器恢复
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义
                 |• 通用文件附件使用路径引用；可访问文件不复制、不内嵌
+                |• /themes 支持完整暗色、亮色与灰色主题并持久化
                 |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
             )
             "/run" -> {
@@ -808,6 +868,20 @@ private fun PiScreen(bridge: PiBridge) {
                     onSuccess = { addSystem("已发送取消") },
                     onFailure = { addSystem("取消失败：${it.message}") }
                 )
+            }
+            "/themes" -> {
+                val requested = when (args.lowercase()) {
+                    "dark", "暗色" -> PiThemeMode.Dark
+                    "light", "亮色" -> PiThemeMode.Light
+                    "gray", "grey", "灰色" -> PiThemeMode.Gray
+                    else -> null
+                }
+                if (args.isBlank()) panel = Panel.Themes
+                else if (requested == null) addSystem("未知主题：$args；可用：dark / light / gray")
+                else {
+                    onTheme(requested)
+                    addSystem("主题已切换为${requested.displayName}")
+                }
             }
             "/settings" -> panel = Panel.Settings
             else -> {
@@ -1157,6 +1231,11 @@ private fun PiScreen(bridge: PiBridge) {
                 )
                 Panel.Diff -> TextPanel("/diff", diffText, onBack = { panel = Panel.Chat })
                 Panel.Stats -> StatsPanel(currentStats, currentState, onBack = { panel = Panel.Chat })
+                Panel.Themes -> ThemesPanel(
+                    selected = themeMode,
+                    onBack = { panel = Panel.Chat },
+                    onSelect = onTheme
+                )
                 Panel.Settings -> SettingsPanel(
                     cwd = cwd,
                     launchCommand = launchCommand,
@@ -1183,8 +1262,8 @@ private fun PiScreen(bridge: PiBridge) {
                         .align(Alignment.BottomEnd)
                         .padding(end = 2.dp, bottom = 6.dp)
                         .width(38.dp)
-                        .background(Color(0xDD41464C), RoundedCornerShape(7.dp))
-                        .border(1.dp, Color(0xFF626970), RoundedCornerShape(7.dp))
+                        .background(LocalPiColors.current.scrollBg, RoundedCornerShape(7.dp))
+                        .border(1.dp, LocalPiColors.current.scrollBorder, RoundedCornerShape(7.dp))
                 ) {
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
@@ -1194,9 +1273,9 @@ private fun PiScreen(bridge: PiBridge) {
                         },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("↑", color = Color(0xFFD2D5D8), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("↑", color = LocalPiColors.current.scrollText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF686E74)))
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(LocalPiColors.current.scrollDivider))
                     Box(
                         Modifier.fillMaxWidth().height(36.dp).clickable {
                             followOutput = true
@@ -1207,7 +1286,7 @@ private fun PiScreen(bridge: PiBridge) {
                         },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("↓", color = Color(0xFFD2D5D8), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("↓", color = LocalPiColors.current.scrollText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1287,7 +1366,7 @@ private fun TerminalHeader(
         Modifier
             .fillMaxWidth()
             .background(HeaderBg)
-            .border(1.dp, Color(0xFF151B21))
+            .border(1.dp, LocalPiColors.current.headerDivider)
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1442,7 +1521,7 @@ private fun ChatPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
                 )
                 "thinking" -> Text(
-                    markdownText(visibleText),
+                    markdownText(visibleText, Blue),
                     color = ThinkingText,
                     fontFamily = FontFamily.Monospace,
                     fontStyle = FontStyle.Italic,
@@ -1559,7 +1638,7 @@ private fun Composer(
     onRemoveAttachment: (PiAttachment) -> Unit,
     onPrimary: () -> Unit
 ) {
-    Column(Modifier.fillMaxWidth().background(Color(0xFF050607))) {
+    Column(Modifier.fillMaxWidth().background(LocalPiColors.current.composerBg)) {
         if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 3.dp),
@@ -1626,7 +1705,7 @@ private fun Composer(
             enabled = busy || value.isNotBlank() || attachments.isNotEmpty(),
             colors = ButtonDefaults.textButtonColors(
                 contentColor = if (busy) Danger else Blue,
-                disabledContentColor = Color(0xFF4B535C)
+                disabledContentColor = LocalPiColors.current.disabledAction
             )
         ) {
             Text(if (busy) "■" else "↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp)
@@ -1822,7 +1901,7 @@ private fun BashPanel(
         )
         Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(value = input, onValueChange = onInput, modifier = Modifier.weight(1f), singleLine = true, label = { Text("$ command") })
-            if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B3030))) { Text("停止") }
+            if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") }
             else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") }
         }
     }
@@ -1907,6 +1986,59 @@ private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 9.dp)) {
                 Text(label, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.width(110.dp))
                 Text(value, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemesPanel(
+    selected: PiThemeMode,
+    onBack: () -> Unit,
+    onSelect: (PiThemeMode) -> Unit
+) {
+    Column(Modifier.fillMaxSize().background(Bg)) {
+        PanelHeader("Themes", onBack)
+        Text(
+            "主题会立即应用并自动保存。暗色主题保持原有配色。",
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            PiThemeMode.entries.forEach { mode ->
+                val preview = colorsFor(mode)
+                Row(
+                    Modifier.fillMaxWidth()
+                        .background(CardBg, RoundedCornerShape(8.dp))
+                        .border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp))
+                        .clickable { onSelect(mode) }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        Modifier.width(58.dp).height(38.dp)
+                            .background(preview.bg, RoundedCornerShape(5.dp))
+                            .border(1.dp, preview.border, RoundedCornerShape(5.dp))
+                            .padding(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp)))
+                        Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp)))
+                        Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp)))
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text(mode.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    }
+                    Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
             }
         }
     }

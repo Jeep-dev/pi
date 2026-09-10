@@ -15,7 +15,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -23,13 +22,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
-private val MdText = Color(0xFFD8D6E3)
-private val MdMuted = Color(0xFF9491A3)
-private val MdAccent = Color(0xFFC5A3FF)
-private val MdCyan = Color(0xFF63D1D1)
-private val MdBorder = Color(0xFF77738E)
-private val MdCodeBg = Color(0xFF171620)
 
 private sealed interface MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock
@@ -116,21 +108,21 @@ private fun parseMarkdownBlocks(source: String): List<MarkdownBlock> {
     return blocks
 }
 
-private fun inlineMarkdown(source: String) = buildAnnotatedString {
+private fun inlineMarkdown(source: String, colors: PiColors) = buildAnnotatedString {
     var index = 0
     while (index < source.length) {
         when {
             source.startsWith("**", index) -> {
                 val end = source.indexOf("**", index + 2)
                 if (end > index + 2) {
-                    pushStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Color(0xFFF0EEF7)))
+                    pushStyle(SpanStyle(fontWeight = FontWeight.Bold, color = colors.markdownStrong))
                     append(source.substring(index + 2, end)); pop(); index = end + 2
                 } else { append("**"); index += 2 }
             }
             source[index] == '`' -> {
                 val end = source.indexOf('`', index + 1)
                 if (end > index + 1) {
-                    pushStyle(SpanStyle(color = MdCyan, background = Color(0xFF252432), fontFamily = FontFamily.Monospace))
+                    pushStyle(SpanStyle(color = colors.markdownCyan, background = colors.markdownInlineCodeBg, fontFamily = FontFamily.Monospace))
                     append(source.substring(index + 1, end)); pop(); index = end + 1
                 } else { append('`'); index++ }
             }
@@ -139,8 +131,8 @@ private fun inlineMarkdown(source: String) = buildAnnotatedString {
                 val openUrl = if (close >= 0 && close + 1 < source.length && source[close + 1] == '(') close + 1 else -1
                 val closeUrl = if (openUrl >= 0) source.indexOf(')', openUrl + 1) else -1
                 if (closeUrl > openUrl) {
-                    pushStyle(SpanStyle(color = MdCyan)); append(source.substring(index + 1, close)); pop()
-                    pushStyle(SpanStyle(color = MdMuted)); append(" (${source.substring(openUrl + 1, closeUrl)})"); pop()
+                    pushStyle(SpanStyle(color = colors.markdownCyan)); append(source.substring(index + 1, close)); pop()
+                    pushStyle(SpanStyle(color = colors.markdownMuted)); append(" (${source.substring(openUrl + 1, closeUrl)})"); pop()
                     index = closeUrl + 1
                 } else { append(source[index]); index++ }
             }
@@ -151,52 +143,53 @@ private fun inlineMarkdown(source: String) = buildAnnotatedString {
 
 @Composable
 fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
+    val colors = LocalPiColors.current
     val blocks = remember(text) { parseMarkdownBlocks(text) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Paragraph -> Text(inlineMarkdown(block.text), color = MdText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 21.sp)
-                is MarkdownBlock.Heading -> Text(inlineMarkdown(block.text), color = MdAccent, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = if (block.level <= 2) 16.sp else 15.sp, lineHeight = 22.sp, modifier = Modifier.padding(top = 3.dp))
-                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().background(MdCodeBg).border(1.dp, MdBorder).padding(9.dp)) {
-                    if (block.language.isNotBlank()) Text(block.language, color = MdAccent, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
-                    Text(block.text, color = Color(0xFFC9E6E2), fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.horizontalScroll(rememberScrollState()))
+                is MarkdownBlock.Paragraph -> Text(inlineMarkdown(block.text, colors), color = colors.markdownText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 21.sp)
+                is MarkdownBlock.Heading -> Text(inlineMarkdown(block.text, colors), color = colors.markdownAccent, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = if (block.level <= 2) 16.sp else 15.sp, lineHeight = 22.sp, modifier = Modifier.padding(top = 3.dp))
+                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().background(colors.markdownCodeBg).border(1.dp, colors.markdownBorder).padding(9.dp)) {
+                    if (block.language.isNotBlank()) Text(block.language, color = colors.markdownAccent, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                    Text(block.text, color = colors.markdownCodeText, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.horizontalScroll(rememberScrollState()))
                 }
-                is MarkdownBlock.Table -> MarkdownTable(block.rows)
+                is MarkdownBlock.Table -> MarkdownTable(block.rows, colors)
                 is MarkdownBlock.ListBlock -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     block.items.forEachIndexed { i, item -> Row {
-                        Text(if (block.ordered) "${i + 1}. " else "• ", color = MdCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        Text(inlineMarkdown(item), color = MdText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 20.sp)
+                        Text(if (block.ordered) "${i + 1}. " else "• ", color = colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                        Text(inlineMarkdown(item, colors), color = colors.markdownText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 20.sp)
                     } }
                 }
-                is MarkdownBlock.Quote -> Box(Modifier.fillMaxWidth().background(Color(0xFF1C1B27)).padding(start = 10.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)) {
-                    Text(inlineMarkdown(block.text), color = MdMuted, fontFamily = FontFamily.Monospace, fontSize = 13.5.sp, lineHeight = 20.sp)
+                is MarkdownBlock.Quote -> Box(Modifier.fillMaxWidth().background(colors.markdownQuoteBg).padding(start = 10.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)) {
+                    Text(inlineMarkdown(block.text, colors), color = colors.markdownMuted, fontFamily = FontFamily.Monospace, fontSize = 13.5.sp, lineHeight = 20.sp)
                 }
-                MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).background(MdBorder).padding(top = 1.dp))
+                MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).background(colors.markdownBorder).padding(top = 1.dp))
             }
         }
     }
 }
 
 @Composable
-private fun MarkdownTable(rows: List<List<String>>) {
+private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
     if (rows.isEmpty()) return
     val columns = rows.maxOf { it.size }
     val widths: List<Dp> = (0 until columns).map { column ->
         val chars = rows.maxOf { it.getOrNull(column)?.length ?: 0 }.coerceIn(8, 32)
         (chars * 7 + 18).dp
     }
-    Column(Modifier.horizontalScroll(rememberScrollState()).border(1.dp, MdBorder)) {
+    Column(Modifier.horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {
         rows.forEachIndexed { rowIndex, row ->
             Row {
                 for (column in 0 until columns) {
                     Text(
-                        inlineMarkdown(row.getOrNull(column).orEmpty()),
-                        color = if (rowIndex == 0) MdAccent else MdText,
+                        inlineMarkdown(row.getOrNull(column).orEmpty(), colors),
+                        color = if (rowIndex == 0) colors.markdownAccent else colors.markdownText,
                         fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
-                        modifier = Modifier.width(widths[column]).border(0.5.dp, MdBorder).padding(horizontal = 8.dp, vertical = 6.dp)
+                        modifier = Modifier.width(widths[column]).border(0.5.dp, colors.markdownBorder).padding(horizontal = 8.dp, vertical = 6.dp)
                     )
                 }
             }
