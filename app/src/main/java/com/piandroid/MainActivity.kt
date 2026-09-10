@@ -463,7 +463,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             LocalCommand("new", "新建 session"),
             LocalCommand("name", "给当前 session 命名"),
             LocalCommand("session", "查看 session / token / cost"),
-            LocalCommand("tree", "导航当前 session 的完整分支树"),
+            LocalCommand("tree", "只显示用户消息的 session 分支树"),
             LocalCommand("fork", "从以前的用户消息创建 fork"),
             LocalCommand("clone", "克隆当前 active branch"),
             LocalCommand("compact", "压缩当前上下文，可带自定义指令"),
@@ -905,7 +905,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "/changelog" -> addSystem(
                 """Pi Android v5.16.1
                 |• 补齐原版 Pi 核心斜杠命令入口
-                |• /tree 显示全部分支节点，用户节点编辑位置可跨重启恢复
+                |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义

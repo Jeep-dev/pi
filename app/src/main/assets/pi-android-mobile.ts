@@ -116,10 +116,13 @@ export default function (pi: any) {
     return `[${String(entry.type || "entry").replace(/_/g, " ")}]`;
   }
 
+  // Pi's tree is a conversation tree, not an execution log.  Assistant tool-call
+  // messages, tool results, bash executions, compaction and internal extension
+  // entries are kept in the session file but are not branch points in /tree.
+  // Collapsing those invisible nodes below preserves the real user-message
+  // parent/child structure, including branches created after tool runs.
   function isVisibleEntry(entry: any, _isLeaf: boolean): boolean {
-    if (!entry || entry.type === "label") return false;
-    if (entry.type === "custom" && String(entry.customType || "").startsWith("__android_")) return false;
-    return true;
+    return entry?.type === "message" && entry?.message?.role === "user";
   }
 
   function treePoints(ctx: any) {
@@ -213,7 +216,7 @@ export default function (pi: any) {
   }
 
   pi.registerCommand("tree", {
-    description: "Navigate the current in-file session tree",
+    description: "Navigate the user-message session tree",
     handler: async (args: string, ctx: any) => {
       await ctx.waitForIdle();
       const requested = String(args || "").trim();
