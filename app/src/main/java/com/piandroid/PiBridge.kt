@@ -19,7 +19,8 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.5"
+    private val expectedBridgeVersion = "2026-09-10.6"
+    private val requiredBridgeCapability = "file-reference-v1"
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -61,8 +62,12 @@ class PiBridge(context: Context) {
             request("/health", null, 1200).onSuccess { raw ->
                 val root = runCatching { JSONObject(raw) }.getOrNull()
                 val version = root?.optString("bridgeVersion").orEmpty()
-                lastSeenVersion = version
-                if (version == expectedBridgeVersion) {
+                val capabilities = root?.optJSONArray("capabilities") ?: JSONArray()
+                val supportsRequired = (0 until capabilities.length()).any {
+                    capabilities.optString(it) == requiredBridgeCapability
+                }
+                lastSeenVersion = if (supportsRequired) version else "$version（缺少 $requiredBridgeCapability）"
+                if (version == expectedBridgeVersion && supportsRequired) {
                     return Result.success(Unit)
                 }
             }
