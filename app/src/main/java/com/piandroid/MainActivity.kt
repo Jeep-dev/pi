@@ -638,6 +638,22 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
+    fun reconcileSteeringQueue(count: Int) {
+        var remaining = count
+        for (i in lines.indices.reversed()) {
+            val line = lines[i]
+            if (line.delivery == "steering" || line.delivery == "steering_queued") {
+                val next = if (remaining > 0) {
+                    remaining--
+                    "steering_queued"
+                } else {
+                    "steering_sent"
+                }
+                if (line.delivery != next) lines[i] = line.copy(delivery = next)
+            }
+        }
+    }
+
     suspend fun applyEvent(event: PiEvent) {
         when (event.type) {
             "agent_start" -> status = "Working"
@@ -645,11 +661,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "queue_update" -> {
                 steeringQueueSize = event.steeringCount
                 followUpQueueSize = event.followUpCount
+                reconcileSteeringQueue(event.steeringCount)
             }
             "agent_settled" -> {
                 settleStreams()
                 steeringQueueSize = 0
                 followUpQueueSize = 0
+                currentState = currentState?.copy(streaming = false, compacting = false)
+                reconcileSteeringQueue(0)
                 status = "Ready"
                 refreshMeta()
             }
@@ -800,7 +819,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 ChatLine(
                     "user",
                     listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"),
-                    delivery = if (steering) "steering" else "normal"
+                    delivery = if (steering) "steering_queued" else "normal"
                 )
             )
             scope.launch {
@@ -1014,7 +1033,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 followOutput = true
                 val steering = currentState?.streaming == true || status == "Working"
                 if (steering) steeringQueueSize += 1
-                lines.add(ChatLine("user", text, delivery = if (steering) "steering" else "normal"))
+                lines.add(ChatLine("user", text, delivery = if (steering) "steering_queued" else "normal"))
                 scope.launch {
                     val behavior = if (steering) "steer" else null
                     bridge.prompt(text, behavior).fold(
@@ -1462,7 +1481,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             )
         }
 
-        Footer(currentState, currentStats) {
+        Footer(currentState, currentStats, chatStatus) {
             panel = Panel.Chat
             composerFocusRequest++
         }
@@ -1628,12 +1647,12 @@ private fun ChatPanel(
             }
             SelectionContainer {
                 when (line.role) {
-                "user" -> if (line.delivery == "steering") {
+                "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent") {
                     Column(
                         Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)
                     ) {
                         Text(
-                            "↳ STEERING · 已排队，当前任务继续执行",
+                            if (line.delivery == "steering_sent") "↳ STEERING · 已送达，当前任务未被中断" else "↳ STEERING · 排队中，当前任务继续执行",
                             color = Blue,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
@@ -1862,11 +1881,15 @@ private fun compactCount(value: Long): String = when {
 }
 
 @Composable
-private fun Footer(state: PiState?, stats: PiStats?, onFocusComposer: () -> Unit) {
+private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
     val parts = if (stats == null) {
-        listOf("—/—")
+        buildList {
+            if (status.startsWith("WORKING") || status.startsWith("RECONNECTING")) add(status)
+            add("—/—")
+        }
     } else {
         buildList {
+            if (status.startsWith("WORKING") || status.startsWith("RECONNECTING")) add(status)
             if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}")
             if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}")
             if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}")
