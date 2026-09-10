@@ -77,6 +77,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -1522,10 +1523,15 @@ private fun TerminalHeader(
 }
 
 private suspend fun LazyListState.scrollToRealBottom(lastIndex: Int) {
-    if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) {
-        scrollToItem(lastIndex)
-    }
-    repeat(8) {
+    repeat(4) {
+        // The streaming item may have grown after the previous layout pass.
+        // Wait for measurement before calculating the final scroll position.
+        withFrameNanos { }
+        val count = layoutInfo.totalItemsCount
+        if (count == 0) return
+        val target = lastIndex.coerceIn(0, count - 1)
+        scrollToItem(target)
+        withFrameNanos { }
         val moved = scrollBy(1_000_000f)
         if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return
     }
@@ -1652,7 +1658,7 @@ private fun ChatPanel(
                         Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)
                     ) {
                         Text(
-                            if (line.delivery == "steering_sent") "↳ STEERING · 已送达，当前任务未被中断" else "↳ STEERING · 排队中，当前任务继续执行",
+                            if (line.delivery == "steering_sent") "↳ STEERING · 已送达" else "↳ STEERING · 排队中",
                             color = Blue,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
