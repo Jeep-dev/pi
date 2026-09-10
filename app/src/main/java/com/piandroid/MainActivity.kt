@@ -487,11 +487,22 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         )
     }
 
-    suspend fun loadHistory() {
-        bridge.history().onSuccess { history ->
-            lines.clear()
-            history.forEach { message -> lines.add(ChatLine(message.role, message.text)) }
+    fun restoreHistory(history: List<PiHistoryMessage>) {
+        lines.clear()
+        history.forEach { message ->
+            lines.add(
+                ChatLine(
+                    role = message.role,
+                    text = message.text,
+                    toolCallId = message.toolCallId,
+                    collapsed = message.collapsed
+                )
+            )
         }
+    }
+
+    suspend fun loadHistory() {
+        bridge.history().onSuccess(::restoreHistory)
     }
 
     suspend fun refreshMeta() {
@@ -560,10 +571,12 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     }
 
     fun startTool(toolCallId: String, text: String) {
-        val draftIndex = lines.indexOfLast { it.role == "tool-draft" && it.toolCallId == toolCallId }
-        if (draftIndex >= 0) {
-            val draft = lines[draftIndex]
-            lines[draftIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = draft.collapsed)
+        val existingIndex = lines.indexOfLast {
+            it.toolCallId == toolCallId && (it.role == "tool-draft" || it.role == "tool")
+        }
+        if (existingIndex >= 0) {
+            val existing = lines[existingIndex]
+            lines[existingIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = existing.collapsed)
         } else {
             lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = true))
         }
@@ -615,6 +628,76 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
+    suspend fun applyEvent(event: PiEvent) {
+        when (event.type) {
+            "agent_start" -> status = "Working"
+            "agent_end" -> Unit
+            "agent_settled" -> {
+                settleStreams()
+                status = "Ready"
+                refreshMeta()
+            }
+            "message_update" -> when (event.subtype) {
+                "text_delta" -> appendStream("assistant", event.text)
+                "thinking_delta" -> appendStream("thinking", event.text)
+                "toolcall_start" -> startToolDraft(event.contentIndex, event.toolCallId, event.text)
+                "toolcall_delta" -> updateToolDraft(event.contentIndex, event.text)
+                "toolcall_end" -> finishToolDraft(event.contentIndex, event.text)
+                else -> Unit
+            }
+            "message_end" -> if (event.subtype == "assistant") {
+                finalizeAssistant(event.text)
+                if (event.stopReason == "aborted" || event.stopReason == "error") {
+                    for (i in lines.indices) {
+                        if (lines[i].role == "tool-draft" && lines[i].streaming) {
+                            lines[i] = lines[i].copy(
+                                text = lines[i].text.substringBefore("\n\n") + "\n\n已取消，工具未执行",
+                                streaming = false
+                            )
+                        }
+                    }
+                    toolDraftChars.clear()
+                    toolDraftBuffers.clear()
+                    toolDraftRefreshAt.clear()
+                }
+            }
+            "tool_execution_start" -> startTool(event.toolCallId, event.text)
+            "tool_execution_update" -> updateTool(event.toolCallId, event.text)
+            "tool_execution_end" -> finishTool(event.toolCallId, event.text)
+            "stderr", "extension_error" -> addSystem(event.text)
+            "process_exit" -> {
+                settleStreams()
+                addSystem(event.text)
+                status = "Disconnected"
+                connected = false
+                AgentKeepAliveService.stop(bridge.applicationContext())
+            }
+            "compaction_start" -> status = "Compacting"
+            "compaction_end" -> status = "Ready"
+            "extension_ui_request" -> {
+                val req = event.uiRequest
+                when (req?.method) {
+                    "notify" -> {
+                        if (req.message == "ANDROID_SESSION_SWITCHED") {
+                            loadHistory()
+                            refreshMeta()
+                            status = "Ready"
+                        } else {
+                            addSystem(req.message)
+                        }
+                    }
+                    "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
+                    "set_editor_text" -> if (req.message.isNotBlank()) input = req.message
+                    "select", "confirm", "input", "editor" -> {
+                        pendingUi = req
+                        dialogInput = req.prefill.ifBlank { "" }
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
     val connect: () -> Unit = connect@{
         if (connecting) return@connect
         connecting = true
@@ -648,11 +731,23 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                         if (selected != null) bridge.state().onSuccess { state -> currentState = state }
                     }.onFailure { addSystem(it.message.orEmpty()) }
                 }
-                cursor = 0L
+                status = "Restoring session"
+                val snapshot = bridge.recoverySnapshot().getOrThrow()
+                restoreHistory(snapshot.history)
+                cursor = snapshot.latest
+                snapshot.events.forEach { applyEvent(it) }
+                snapshot.pendingUi.lastOrNull()?.let { request ->
+                    pendingUi = request
+                    dialogInput = request.prefill.ifBlank { "" }
+                }
+                snapshot.editorText?.let { input = it }
                 connected = true
-                status = "Ready"
+                status = when {
+                    currentState?.compacting == true -> "Compacting"
+                    currentState?.streaming == true -> "Working"
+                    else -> "Ready"
+                }
                 panel = Panel.Chat
-                loadHistory()
                 refreshMeta()
                 AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
             } catch (error: Exception) {
@@ -662,6 +757,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 connecting = false
             }
         }
+    }
+
+    LaunchedEffect(bridge) {
+        connect()
     }
 
     fun sendExtensionCommand(text: String) {
@@ -804,15 +903,16 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16
+                """Pi Android v5.16.1
                 |• 补齐原版 Pi 核心斜杠命令入口
-                |• /tree 完整分支导航、搜索、摘要和编辑器恢复
+                |• /tree 显示全部分支节点，用户节点编辑位置可跨重启恢复
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
                 |• /model 与 /thinking 支持直接参数
                 |• 支持原版 ! / !! bash 语义
                 |• 通用文件附件使用路径引用；可访问文件不复制、不内嵌
                 |• /themes 支持完整暗色、亮色与灰色主题并持久化
-                |• 修复 Pi 快速重启脱离 Bridge、事件游标回退和进程退出状态""".trimMargin()
+                |• 重启后恢复完整思考、工具调用、执行输出和未关闭的 /tree
+                |• 自动重连活动 Session，修复恢复期间的事件竞态""".trimMargin()
             )
             "/run" -> {
                 panel = Panel.Bash
@@ -903,73 +1003,23 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         while (connected) {
             bridge.events(cursor).onSuccess { batch ->
                 eventFailures = 0
-                if (batch.gap) loadHistory()
-                cursor = batch.latest
-                batch.events.forEach { event ->
-                    when (event.type) {
-                        "agent_start" -> status = "Working"
-                        "agent_end" -> Unit
-                        "agent_settled" -> {
-                            settleStreams()
-                            status = "Ready"
-                            refreshMeta()
+                if (batch.gap) {
+                    bridge.recoverySnapshot().fold(
+                        onSuccess = { snapshot ->
+                            restoreHistory(snapshot.history)
+                            cursor = snapshot.latest
+                            snapshot.events.forEach { applyEvent(it) }
+                            snapshot.pendingUi.lastOrNull()?.let { pendingUi = it }
+                            snapshot.editorText?.let { input = it }
+                        },
+                        onFailure = {
+                            loadHistory()
+                            cursor = batch.latest
                         }
-                        "message_update" -> when (event.subtype) {
-                            "text_delta" -> appendStream("assistant", event.text)
-                            "thinking_delta" -> appendStream("thinking", event.text)
-                            "toolcall_start" -> startToolDraft(event.contentIndex, event.toolCallId, event.text)
-                            "toolcall_delta" -> updateToolDraft(event.contentIndex, event.text)
-                            "toolcall_end" -> finishToolDraft(event.contentIndex, event.text)
-                            else -> Unit
-                        }
-                        "message_end" -> if (event.subtype == "assistant") {
-                            finalizeAssistant(event.text)
-                            if (event.stopReason == "aborted" || event.stopReason == "error") {
-                                for (i in lines.indices) {
-                                    if (lines[i].role == "tool-draft" && lines[i].streaming) {
-                                        lines[i] = lines[i].copy(text = lines[i].text.substringBefore("\n\n") + "\n\n已取消，工具未执行", streaming = false)
-                                    }
-                                }
-                                toolDraftChars.clear()
-                                toolDraftBuffers.clear()
-                                toolDraftRefreshAt.clear()
-                            }
-                        }
-                        "tool_execution_start" -> startTool(event.toolCallId, event.text)
-                        "tool_execution_update" -> updateTool(event.toolCallId, event.text)
-                        "tool_execution_end" -> finishTool(event.toolCallId, event.text)
-                        "stderr", "extension_error" -> addSystem(event.text)
-                        "process_exit" -> {
-                            settleStreams()
-                            addSystem(event.text)
-                            status = "Disconnected"
-                            connected = false
-                            AgentKeepAliveService.stop(bridge.applicationContext())
-                        }
-                        "compaction_start" -> status = "Compacting"
-                        "compaction_end" -> status = "Ready"
-                        "extension_ui_request" -> {
-                            val req = event.uiRequest
-                            when (req?.method) {
-                                "notify" -> {
-                                    if (req.message == "ANDROID_SESSION_SWITCHED") {
-                                        loadHistory()
-                                        refreshMeta()
-                                        status = "Ready"
-                                    } else {
-                                        addSystem(req.message)
-                                    }
-                                }
-                                "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
-                                "set_editor_text" -> if (req.message.isNotBlank()) input = req.message
-                                "select", "confirm", "input", "editor" -> {
-                                    pendingUi = req
-                                    dialogInput = req.prefill.ifBlank { "" }
-                                }
-                                else -> Unit
-                            }
-                        }
-                    }
+                    )
+                } else {
+                    cursor = batch.latest
+                    batch.events.forEach { event -> applyEvent(event) }
                 }
             }.onFailure { error ->
                 eventFailures += 1

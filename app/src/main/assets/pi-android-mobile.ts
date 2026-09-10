@@ -109,19 +109,17 @@ export default function (pi: any) {
     if (entry.type === "custom_message") return `[${entry.customType || "custom"}]: ${preview(textOf(entry.content))}`;
     if (entry.type === "compaction") return `[compaction: ${Math.round(Number(entry.tokensBefore || 0) / 1000)}k tokens]`;
     if (entry.type === "branch_summary") return `[branch summary]: ${preview(String(entry.summary || ""))}`;
+    if (entry.type === "model_change") return `[model: ${entry.provider || "?"}/${entry.modelId || "?"}]`;
+    if (entry.type === "thinking_level_change") return `[thinking: ${entry.thinkingLevel || "off"}]`;
+    if (entry.type === "session_info") return `[session: ${entry.name || "unnamed"}]`;
+    if (entry.type === "custom") return `[${entry.customType || "custom state"}]`;
     return `[${String(entry.type || "entry").replace(/_/g, " ")}]`;
   }
 
-  function isVisibleEntry(entry: any, isLeaf: boolean): boolean {
+  function isVisibleEntry(entry: any, _isLeaf: boolean): boolean {
     if (!entry || entry.type === "label") return false;
-    if (isLeaf) return true;
-    if (entry.type === "message") {
-      if (entry.message?.role !== "assistant") return true;
-      const hasText = textOf(entry.message.content).trim().length > 0;
-      const stoppedBadly = entry.message.stopReason && !["stop", "toolUse"].includes(entry.message.stopReason);
-      return hasText || stoppedBadly;
-    }
-    return ["custom_message", "compaction", "branch_summary"].includes(entry.type);
+    if (entry.type === "custom" && String(entry.customType || "").startsWith("__android_")) return false;
+    return true;
   }
 
   function treePoints(ctx: any) {
@@ -142,6 +140,9 @@ export default function (pi: any) {
     while (activeId) {
       active.add(activeId);
       const node = allById.get(activeId);
+      if (node?.entry?.type === "custom" && node.entry.customType === "__android_tree_edit__" && node.entry.data?.targetId) {
+        active.add(String(node.entry.data.targetId));
+      }
       activeId = node?.entry?.parentId == null ? null : String(node.entry.parentId);
     }
 
@@ -221,7 +222,16 @@ export default function (pi: any) {
         : await chooseTreePoint(ctx);
       if (!target) return;
 
-      if (target.id === ctx.sessionManager.getLeafId()) {
+      const physicalLeaf = ctx.sessionManager.getLeafEntry();
+      const logicalLeafId = physicalLeaf?.type === "custom" && physicalLeaf.customType === "__android_tree_edit__"
+        ? String(physicalLeaf.data?.targetId || "")
+        : physicalLeaf?.type === "label"
+          ? String(physicalLeaf.parentId || "")
+          : String(ctx.sessionManager.getLeafId() || "");
+      if (target.id === logicalLeafId) {
+        if (physicalLeaf?.type === "custom" && physicalLeaf.customType === "__android_tree_edit__") {
+          ctx.ui.setEditorText(String(physicalLeaf.data?.editorText ?? ""));
+        }
         ctx.ui.notify("已经位于这个节点", "info");
         return;
       }
@@ -237,10 +247,14 @@ export default function (pi: any) {
         return;
       }
 
-      // Persist the selected leaf immediately. Label entries do not enter model context,
-      // but ensure a process restart reopens this exact branch before the next message.
+      // Persist immediately without entering model context. User selections branch from
+      // the parent and retain their editable text even when Android or Pi is restarted.
       const selectedLeaf = ctx.sessionManager.getLeafId();
-      if (selectedLeaf) ctx.sessionManager.appendLabelChange(String(selectedLeaf), target.entryLabel);
+      if (editableText !== undefined) {
+        ctx.sessionManager.appendCustomEntry("__android_tree_edit__", { targetId: target.id, editorText: editableText });
+      } else if (selectedLeaf) {
+        ctx.sessionManager.appendLabelChange(String(selectedLeaf), target.entryLabel);
+      }
 
       if (editableText !== undefined) ctx.ui.setEditorText(editableText);
       ctx.ui.notify("ANDROID_SESSION_SWITCHED", "info");

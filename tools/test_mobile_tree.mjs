@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,29 @@ writeFileSync(sessionFile, [
   },
   {
     type: "message",
+    id: "dddddddd",
+    parentId: "bbbbbbbb",
+    timestamp,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "tool-call", name: "bash", arguments: { command: "echo branch" } }],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+  },
+  {
+    type: "message",
+    id: "eeeeeeee",
+    parentId: "dddddddd",
+    timestamp,
+    message: { role: "toolResult", toolCallId: "tool-call", toolName: "bash", content: [{ type: "text", text: "branch output" }], isError: false, timestamp: Date.now() },
+  },
+  {
+    type: "message",
     id: "cccccccc",
     parentId: "bbbbbbbb",
     timestamp,
@@ -73,6 +96,8 @@ function handle(value) {
       value.options.some((option) => option.includes("root prompt")) &&
       value.options.some((option) => option.includes("first answer")) &&
       value.options.some((option) => option.includes("second prompt")) &&
+      value.options.some((option) => option.includes("assistant: (tool call)")) &&
+      value.options.some((option) => option.includes("[bash]")) &&
       value.options.some((option) => option.includes("●"));
     const target = value.options.find((option) => option.includes("aaaaaaaa"));
     send({ type: "extension_ui_response", id: value.id, value: target });
@@ -86,10 +111,27 @@ function handle(value) {
   }
   if (value.id === "navigate") send({ id: "tree", type: "get_tree" });
   if (value.id === "tree") {
-    if (value.data.leafId !== null) throw new Error("Selecting the root user message did not reset the leaf");
+    const nodes = [];
+    const visit = (items) => items.forEach((item) => { nodes.push(item); visit(item.children || []); });
+    visit(value.data.tree || []);
+    const leaf = nodes.find((node) => node.entry.id === value.data.leafId)?.entry;
+    if (leaf?.type !== "custom" || leaf.customType !== "__android_tree_edit__" || leaf.parentId !== null) {
+      throw new Error("Selecting the root user message was not durably persisted before that message");
+    }
+    if (leaf.data?.editorText !== "root prompt" || leaf.data?.targetId !== "aaaaaaaa") {
+      throw new Error("The editable root prompt was not persisted for process restart recovery");
+    }
+    const persisted = JSON.parse(readFileSync(sessionFile, "utf8").trim().split("\n").at(-1));
+    if (persisted.customType !== "__android_tree_edit__" || persisted.data?.editorText !== "root prompt") {
+      throw new Error("Tree edit marker was not written to the session file");
+    }
     if (editorText !== "root prompt") throw new Error(`Editor text was not restored: ${editorText}`);
     if (!switched) throw new Error("Session switch notification was not emitted");
     if (!treeWasComplete) throw new Error("Tree selector omitted conversation entries or active-path state");
+    send({ id: "root-messages", type: "get_messages" });
+  }
+  if (value.id === "root-messages") {
+    if ((value.data.messages || []).length !== 0) throw new Error("Selected user message leaked into context before editing");
     send({ id: "branch", type: "prompt", message: "/tree bbbbbbbb" });
   }
   if (value.id === "branch") send({ id: "branch-tree", type: "get_tree" });

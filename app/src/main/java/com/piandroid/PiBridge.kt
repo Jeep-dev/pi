@@ -19,8 +19,8 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.6"
-    private val requiredBridgeCapability = "file-reference-v1"
+    private val expectedBridgeVersion = "2026-09-10.7"
+    private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -63,10 +63,10 @@ class PiBridge(context: Context) {
                 val root = runCatching { JSONObject(raw) }.getOrNull()
                 val version = root?.optString("bridgeVersion").orEmpty()
                 val capabilities = root?.optJSONArray("capabilities") ?: JSONArray()
-                val supportsRequired = (0 until capabilities.length()).any {
-                    capabilities.optString(it) == requiredBridgeCapability
-                }
-                lastSeenVersion = if (supportsRequired) version else "$version（缺少 $requiredBridgeCapability）"
+                val availableCapabilities = (0 until capabilities.length()).map { capabilities.optString(it) }.toSet()
+                val missingCapabilities = requiredBridgeCapabilities - availableCapabilities
+                val supportsRequired = missingCapabilities.isEmpty()
+                lastSeenVersion = if (supportsRequired) version else "$version（缺少 ${missingCapabilities.joinToString()}）"
                 if (version == expectedBridgeVersion && supportsRequired) {
                     return Result.success(Unit)
                 }
@@ -408,7 +408,7 @@ class PiBridge(context: Context) {
         }
     }
 
-    private fun parseEvent(seq: Long, value: JSONObject): PiEvent {
+    internal fun parseEvent(seq: Long, value: JSONObject): PiEvent {
         val type = value.optString("type")
         return when (type) {
             "message_update" -> {

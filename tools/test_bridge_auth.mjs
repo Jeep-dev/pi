@@ -25,9 +25,23 @@ process.stdin.on("data", chunk => {
     buffer = buffer.slice(newline + 1);
     if (!raw) continue;
     const command = JSON.parse(raw);
-    const data = command.type === "get_state"
-      ? { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 0 }
-      : {};
+    let data = {};
+    if (command.type === "get_state") {
+      data = { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 4 };
+    } else if (command.type === "get_entries") {
+      data = {
+        leafId: "final",
+        entries: [
+          { type: "message", id: "user", parentId: null, message: { role: "user", content: [{ type: "text", text: "run checks" }] } },
+          { type: "message", id: "call", parentId: "user", message: { role: "assistant", content: [{ type: "thinking", thinking: "Checking" }, { type: "toolCall", id: "tool-1", name: "bash", arguments: { command: "npm test" } }], stopReason: "toolUse" } },
+          { type: "message", id: "result", parentId: "call", message: { role: "toolResult", toolCallId: "tool-1", toolName: "bash", content: [{ type: "text", text: "all tests passed" }], isError: false } },
+          { type: "message", id: "final", parentId: "result", message: { role: "assistant", content: [{ type: "text", text: "Done" }], stopReason: "stop" } },
+        ],
+      };
+    }
+    if (command.type === "prompt" && command.message === "__tree_test__") {
+      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "tree-dialog", method: "select", title: "Session Tree", options: ["root", "leaf"] }) + "\\n");
+    }
     const isAttachmentTest = command.type === "prompt" && command.message.startsWith("__attachment_test__");
     const attachmentValid = !isAttachmentTest || command.message.includes(".pi-android-uploads/");
     process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: attachmentValid, data, ...(!attachmentValid ? { error: "file reference missing" } : {}) }) + "\\n");
@@ -63,8 +77,10 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-10.6");
+  assert.equal(health.bridgeVersion, "2026-09-10.7");
   assert.ok(health.capabilities.includes("file-reference-v1"));
+  assert.ok(health.capabilities.includes("durable-history-v1"));
+  assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -144,6 +160,29 @@ try {
     headers: { Authorization: `Bearer ${token}` },
   });
   assert.equal(afterRestart.status, 200, "late exit from old Pi process must not detach the replacement process");
+
+  const treePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ message: "__tree_test__" }),
+  });
+  assert.equal(treePrompt.status, 200);
+  const snapshotResponse = await fetch(`http://127.0.0.1:${port}/snapshot`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(snapshotResponse.status, 200);
+  const snapshot = await snapshotResponse.json();
+  assert.deepEqual(snapshot.history.map(item => item.role), ["user", "thinking", "tool", "assistant"]);
+  assert.match(snapshot.history.find(item => item.role === "tool").text, /npm test[\s\S]*all tests passed/,
+    "completed tool calls and output must survive UI process restart");
+  assert.equal(snapshot.pendingUi[0]?.id, "tree-dialog", "an open /tree selector must survive UI process restart");
+
+  const closeTree = await fetch(`http://127.0.0.1:${port}/extension-ui`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ id: "tree-dialog", cancelled: true }),
+  });
+  assert.equal(closeTree.status, 200);
 
   const shutdown = await fetch(`http://127.0.0.1:${port}/shutdown`, {
     method: "POST",

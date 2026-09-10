@@ -9,8 +9,8 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.6";
-const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1"];
+const bridgeVersion = "2026-09-10.7";
+const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -33,11 +33,18 @@ const events = [];
 const maxEvents = 5000;
 const pending = new Map();
 const eventWaiters = new Set();
+const pendingUiRequests = new Map();
+let activeAgentStart = 0;
 
 function addEvent(value) {
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
   events.push(event);
   if (events.length > maxEvents) events.shift();
+  if (value?.type === "agent_start") activeAgentStart = event.seq;
+  if (value?.type === "agent_settled" || value?.type === "process_exit") activeAgentStart = 0;
+  if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
+    pendingUiRequests.set(String(value.id), value);
+  }
   for (const wake of eventWaiters) wake();
   eventWaiters.clear();
 }
@@ -99,6 +106,8 @@ function attachJsonl(stream) {
 }
 
 function stopPi() {
+  activeAgentStart = 0;
+  pendingUiRequests.clear();
   if (child && child.exitCode == null) {
     try { child.kill("SIGTERM"); } catch {}
   }
@@ -284,6 +293,113 @@ function visibleText(content) {
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function contentText(content, imageLabel = "[图片]") {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "text" && part.text) parts.push(String(part.text));
+    else if (part.type === "image") parts.push(imageLabel);
+  }
+  return parts.join("\n");
+}
+
+function toolArgumentsText(name, args) {
+  if (!args || typeof args !== "object") return "";
+  if (name === "write") {
+    const content = String(args.content || "");
+    const preview = content.length > 1600 ? content.slice(-1600) : content;
+    return [`目标：${String(args.path || "")}`, `内容：${content.length} 字符`, preview ? `写入预览${content.length > preview.length ? "（末尾）" : ""}：\n${preview}` : ""].filter(Boolean).join("\n\n");
+  }
+  if (name === "edit") return `目标：${String(args.path || "")}\n修改块：${Array.isArray(args.edits) ? args.edits.length : 0}`;
+  if (name === "bash") return `命令：${String(args.command || "")}`;
+  const formatted = JSON.stringify(args, null, 2);
+  return formatted.length > 4000 ? `${formatted.slice(0, 4000)}\n… 参数显示已截断` : formatted;
+}
+
+function historyFromEntries(data) {
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  const byId = new Map(entries.filter(entry => entry?.id).map(entry => [String(entry.id), entry]));
+  const branch = [];
+  let id = data?.leafId == null ? null : String(data.leafId);
+  const seen = new Set();
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const entry = byId.get(id);
+    if (!entry) break;
+    branch.push(entry);
+    id = entry.parentId == null ? null : String(entry.parentId);
+  }
+  branch.reverse();
+
+  const history = [];
+  const toolLines = new Map();
+  const add = (role, text, toolCallId = "", collapsed = false) => {
+    if (!String(text || "").trim()) return;
+    history.push({ role, text: String(text), toolCallId, collapsed });
+  };
+
+  for (const entry of branch) {
+    if (entry?.type === "message") {
+      const message = entry.message || {};
+      const role = String(message.role || "");
+      if (role === "user") {
+        add("user", contentText(message.content, "[图片附件]"));
+      } else if (role === "assistant") {
+        const content = Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }];
+        for (const part of content) {
+          if (part?.type === "thinking") add("thinking", String(part.thinking || part.text || ""));
+          else if (part?.type === "text") add("assistant", String(part.text || ""));
+          else if (part?.type === "toolCall") {
+            const callId = String(part.id || "");
+            const name = String(part.name || "tool");
+            const details = toolArgumentsText(name, part.arguments);
+            add("tool", `执行工具：${name}${details ? `\n\n${details}` : ""}`, callId, true);
+            if (callId) toolLines.set(callId, history.length - 1);
+          }
+        }
+        if (message.stopReason === "aborted" && !content.some(part => part?.type === "text" && String(part.text || "").trim())) {
+          add("system", "本轮任务已中止");
+        } else if (message.stopReason === "error" && message.errorMessage) {
+          add("system", `模型错误：${String(message.errorMessage)}`);
+        }
+      } else if (role === "toolResult") {
+        const callId = String(message.toolCallId || "");
+        const name = String(message.toolName || "tool");
+        const output = contentText(message.content, "[图片输出]");
+        const status = message.isError ? `工具执行失败：${name}` : `工具完成：${name}`;
+        const suffix = `${status}${output ? `\n\n${output}` : ""}`;
+        const index = toolLines.get(callId);
+        if (index != null && history[index]) history[index].text += `\n\n${suffix}`;
+        else add("tool", suffix, callId, true);
+      } else if (role === "bashExecution") {
+        const output = contentText(message.content) || String(message.output || "");
+        add("tool", `执行 Bash：${String(message.command || "")}${output ? `\n\n${output}` : ""}`, String(message.toolCallId || entry.id || ""), true);
+      }
+    } else if (entry?.type === "compaction") {
+      const tokens = Number(entry.tokensBefore || 0);
+      add("system", `上下文压缩点${tokens > 0 ? ` · ${Math.round(tokens / 1000)}k tokens` : ""}`);
+    } else if (entry?.type === "branch_summary") {
+      add("system", `分支摘要：${String(entry.summary || "")}`);
+    } else if (entry?.type === "custom_message" && !String(entry.customType || "").startsWith("__android_")) {
+      add("system", contentText(entry.content));
+    }
+  }
+  return history;
+}
+
+async function durableHistory() {
+  const response = await rpc({ type: "get_entries" }, 60_000);
+  const data = response?.data || {};
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const leaf = entries.find(entry => String(entry?.id || "") === String(data.leafId || ""));
+  const editorText = leaf?.type === "custom" && leaf.customType === "__android_tree_edit__"
+    ? String(leaf.data?.editorText ?? "")
+    : null;
+  return { history: historyFromEntries(data), editorText };
 }
 
 async function readSlice(handle, offset, length) {
@@ -611,6 +727,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/models") return rpcResponse(res, { type: "get_available_models" });
     if (req.method === "GET" && url.pathname === "/commands") return rpcResponse(res, { type: "get_commands" });
     if (req.method === "GET" && url.pathname === "/messages") return rpcResponse(res, { type: "get_messages" });
+    if (req.method === "GET" && url.pathname === "/history") {
+      const durable = await durableHistory();
+      return send(res, 200, { ok: true, history: durable.history });
+    }
+    if (req.method === "GET" && url.pathname === "/snapshot") {
+      const durable = await durableHistory();
+      const latest = sequence;
+      const activeEvents = activeAgentStart > 0 ? events.filter(item => item.seq >= activeAgentStart && item.seq <= latest) : [];
+      return send(res, 200, {
+        ok: true,
+        history: durable.history,
+        editorText: durable.editorText,
+        events: activeEvents,
+        latest,
+        pendingUi: [...pendingUiRequests.values()],
+      });
+    }
 
     if (req.method === "GET" && url.pathname === "/sessions") {
       const sessions = await listSessions();
@@ -672,6 +805,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/extension-ui") {
       const input = JSON.parse(await readBody(req));
+      pendingUiRequests.delete(String(input.id || ""));
       sendRaw({ type: "extension_ui_response", ...input });
       return send(res, 200, { ok: true });
     }
