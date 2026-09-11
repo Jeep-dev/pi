@@ -224,6 +224,49 @@ export default function (pi: any) {
     return points.find((point: any) => point.label === selected);
   }
 
+  function loadedExtensionLabels(): string[] {
+    const resources = [...pi.getCommands(), ...pi.getAllTools()];
+    const byPath = new Map<string, any>();
+    for (const resource of resources) {
+      const sourceInfo = resource?.sourceInfo;
+      const resourcePath = String(sourceInfo?.path || "");
+      const source = String(sourceInfo?.source || "");
+      if (!resourcePath || resourcePath.startsWith("<") || source === "builtin" || source === "sdk") continue;
+      if (!byPath.has(resourcePath)) byPath.set(resourcePath, sourceInfo);
+    }
+
+    const localItems = [...byPath.entries()]
+      .filter(([, sourceInfo]) => !String(sourceInfo?.source || "").startsWith("npm:") && !String(sourceInfo?.source || "").startsWith("git:"))
+      .map(([resourcePath, sourceInfo]) => {
+        const segments = resourcePath.replace(/\\/g, "/").split("/").filter(Boolean);
+        if (segments.length > 1 && ["index.ts", "index.js"].includes(segments.at(-1) || "")) segments.pop();
+        return { resourcePath, sourceInfo, segments };
+      });
+
+    const labels = [...byPath.entries()].map(([resourcePath, sourceInfo]) => {
+      const source = String(sourceInfo?.source || "");
+      if (source.startsWith("npm:")) return source.slice("npm:".length) || basename(resourcePath);
+      if (source.startsWith("git:")) {
+        const repository = source.replace(/^git:/, "").replace(/[#/]$/, "").split("/").at(-1)?.replace(/\.git$/, "");
+        return repository || basename(resourcePath);
+      }
+      const item = localItems.find((candidate) => candidate.resourcePath === resourcePath);
+      if (!item || item.segments.length === 0) return basename(resourcePath);
+      for (let count = 1; count <= item.segments.length; count++) {
+        const candidate = item.segments.slice(-count).join("/");
+        if (localItems.every((other) => other.resourcePath === resourcePath || other.segments.slice(-count).join("/") !== candidate)) {
+          return candidate;
+        }
+      }
+      return item.segments.join("/");
+    });
+    return [...new Set(labels)].sort((left, right) => left.localeCompare(right));
+  }
+
+  function publishLoadedExtensions(ctx: any) {
+    ctx.ui.setWidget("__android_loaded_extensions", loadedExtensionLabels(), { placement: "aboveEditor" });
+  }
+
   pi.registerCommand("tree", {
     description: "Navigate the user-message session tree",
     handler: async (args: string, ctx: any) => {
@@ -446,4 +489,9 @@ export default function (pi: any) {
       }
     },
   });
+
+  // RPC has no built-in loaded-resource query. Publish the runtime's real
+  // extension source metadata through a persistent widget so Android can render
+  // the same compact [Extensions] startup section as Pi's terminal UI.
+  pi.on("session_start", (_event: any, ctx: any) => publishLoadedExtensions(ctx));
 }

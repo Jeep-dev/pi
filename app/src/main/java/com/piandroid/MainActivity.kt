@@ -107,6 +107,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -147,6 +148,8 @@ class MainActivity : ComponentActivity() {
         if (requested.isNotEmpty()) requestPermissions(requested.toTypedArray(), permissionRequestCode)
     }
 }
+
+private const val ANDROID_EXTENSIONS_WIDGET = "__android_loaded_extensions"
 
 private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes }
 private data class ChatLine(
@@ -365,12 +368,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     var currentStats by remember { mutableStateOf<PiStats?>(null) }
     var models by remember { mutableStateOf<List<PiModel>>(emptyList()) }
     var remoteCommands by remember { mutableStateOf<List<PiCommand>>(emptyList()) }
+    var loadedExtensions by remember { mutableStateOf<List<String>>(emptyList()) }
     var cursor by remember { mutableLongStateOf(0L) }
     var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
     val toolDraftChars = remember { mutableMapOf<Int, Int>() }
     val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
     val toolDraftRefreshAt = remember { mutableMapOf<Int, Long>() }
+    val toolOutputRefreshAt = remember { mutableMapOf<String, Long>() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -526,7 +531,9 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     suspend fun syncAttachedRuntime() {
         bridge.health().onSuccess { health ->
             if (health.cwd.isNotBlank()) cwd = health.cwd
-            if (health.launchCommand.isNotBlank()) launchCommand = health.launchCommand
+            if (health.launchCommand.isNotBlank()) {
+                launchCommand = bridge.recoveryLaunchCommand(health.launchCommand, health.activeSessionFile)
+            }
         }
     }
 
@@ -619,6 +626,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     fun updateTool(toolCallId: String, text: String) {
         if (text.isBlank()) return
+        val refreshKey = toolCallId.ifBlank { "__active_tool__" }
+        val now = android.os.SystemClock.uptimeMillis()
+        val lastRefresh = toolOutputRefreshAt[refreshKey] ?: 0L
+        if (now - lastRefresh < 50L) return
+        toolOutputRefreshAt[refreshKey] = now
         val index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
         }
@@ -632,6 +644,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     }
 
     fun finishTool(toolCallId: String, text: String) {
+        toolOutputRefreshAt.remove(toolCallId.ifBlank { "__active_tool__" })
         val index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
         }
@@ -728,6 +741,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     toolDraftChars.clear()
                     toolDraftBuffers.clear()
                     toolDraftRefreshAt.clear()
+                    toolOutputRefreshAt.clear()
                 }
             }
             "tool_execution_start" -> startTool(event.toolCallId, event.text)
@@ -736,6 +750,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
                 settleStreams()
+                currentState = currentState?.copy(streaming = false, compacting = false)
                 AgentKeepAliveService.stop(bridge.applicationContext())
                 addSystem(event.text)
                 if (intentionalQuit) {
@@ -770,6 +785,9 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                         }
                     }
                     "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
+                    "setWidget" -> if (req.title == ANDROID_EXTENSIONS_WIDGET) {
+                        loadedExtensions = req.options.distinct()
+                    }
                     "set_editor_text" -> if (req.message.isNotBlank()) input = req.message
                     "select", "confirm", "input", "editor" -> {
                         pendingUi = req
@@ -807,7 +825,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     status = "Waiting for bridge"
                     bridge.waitForBridge(30_000).getOrThrow()
                     status = "Starting Pi"
-                    val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
+                    val recoveredLaunch = bridge.recoveryLaunchCommand(
+                        launchCommand.trim(),
+                        currentState?.sessionFile
+                    )
                     currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
                     val availableModels = bridge.models().getOrDefault(emptyList())
                     models = availableModels
@@ -1012,7 +1033,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.8
+                """Pi Android v5.16.9
+                |• 掉线重连始终恢复断线前实际活跃的 session，不再回到启动时的旧会话
+                |• 顶部按原版 Pi 风格显示当前实际加载的 [Extensions] 列表
+                |• 合并流式滚动与工具更新，生成中使用稳定文本渲染，减少闪烁和掉帧
+                |• 底栏工作状态固定为简洁的 WORKING / RECONNECTING
                 |• 修复 /tree 对话框等待导致的 timeout，并自动定位最新当前消息
                 |• 恢复旧 session 时严格保留该会话的模型与 thinking level
                 |• 工具输出默认最多显示 10 个视觉行，只有手动展开才显示全文
@@ -1125,7 +1150,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     }
 
     suspend fun recoverBridge(): String {
-        status = "RECONNECTING"
+        status = if (currentState?.streaming == true) "Working" else "RECONNECTING"
         val attached = bridge.attachToRunningBridge().getOrNull()
         if (attached != null) {
             syncAttachedRuntime()
@@ -1135,7 +1160,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         return runCatching {
             bridge.installAndStartBridge().getOrThrow()
             bridge.waitForBridge(30_000).getOrThrow()
-            val recoveredLaunch = bridge.recoveryLaunchCommand(launchCommand.trim())
+            val recoveredLaunch = bridge.recoveryLaunchCommand(
+                launchCommand.trim(),
+                currentState?.sessionFile
+            )
             currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
             "restarted"
         }.getOrElse { "failed" }
@@ -1184,7 +1212,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 }
             }.onFailure { error ->
                 eventFailures += 1
-                status = if (currentState?.streaming == true) "RECONNECTING · 工作仍在继续" else "RECONNECTING"
+                status = if (currentState?.streaming == true) "Working" else "RECONNECTING"
                 delay((500L * (1L shl (eventFailures.coerceAtMost(3) - 1))).coerceAtMost(5_000L))
                 if (eventFailures >= 3) {
                     when (recoverBridge()) {
@@ -1207,14 +1235,29 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    LaunchedEffect(lines.size, lines.sumOf { it.text.length }, followOutput) {
-        if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
+    LaunchedEffect(chatListState) {
+        snapshotFlow {
+            Triple(
+                lines.size,
+                lines.sumOf { if (it.streaming) it.text.length.toLong() else 0L },
+                followOutput
+            )
+        }
+            .distinctUntilChanged()
+            .conflate()
+            .collect { (lineCount, _, shouldFollow) ->
+                if (shouldFollow && lineCount > 0) {
+                    // Coalesce rapid token events into one layout/scroll update.
+                    delay(32)
+                    if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom()
+                }
+            }
     }
 
     LaunchedEffect(imeBottom) {
         if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
             delay(80)
-            chatListState.scrollToRealBottom(lines.lastIndex)
+            chatListState.scrollToRealBottom()
         }
     }
 
@@ -1293,7 +1336,15 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                                         scope.launch {
                                             status = "Switching session"
                                             bridge.switchSession(session.path).fold(
-                                                onSuccess = {
+                                                onSuccess = { switchedState ->
+                                                    // Persist and use the state returned by the switch itself;
+                                                    // otherwise a disconnect in this window could relaunch the
+                                                    // session that Pi originally started with.
+                                                    currentState = switchedState
+                                                    launchCommand = bridge.recoveryLaunchCommand(
+                                                        launchCommand,
+                                                        switchedState.sessionFile
+                                                    )
                                                     loadHistory()
                                                     refreshMeta()
                                                     status = "Ready"
@@ -1362,6 +1413,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     cwd = cwd,
                     model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
                     status = chatStatus,
+                    extensions = loadedExtensions,
                     connected = connected,
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
@@ -1507,7 +1559,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                             showScrollControls = false
                             followOutput = true
                             scope.launch {
-                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom(lines.lastIndex)
+                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom()
                             }
                         },
                         contentAlignment = Alignment.Center
@@ -1608,16 +1660,20 @@ private fun TerminalHeader(
     }
 }
 
-private suspend fun LazyListState.scrollToRealBottom(lastIndex: Int) {
-    repeat(4) {
-        // The streaming item may have grown after the previous layout pass.
-        // Wait for measurement before calculating the final scroll position.
+private suspend fun LazyListState.scrollToRealBottom() {
+    repeat(3) {
+        // Wait for the latest streamed text to be measured. Never snap an
+        // already-visible growing item back to its top; that caused flicker.
         withFrameNanos { }
         val count = layoutInfo.totalItemsCount
         if (count == 0) return
-        val target = lastIndex.coerceIn(0, count - 1)
-        scrollToItem(target)
-        withFrameNanos { }
+        val target = count - 1
+        val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (lastVisible < target - 1) {
+            scrollToItem(target)
+            withFrameNanos { }
+        }
+        if (!canScrollForward) return
         val moved = scrollBy(1_000_000f)
         if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return
     }
@@ -1630,6 +1686,7 @@ private fun ChatPanel(
     cwd: String,
     model: String,
     status: String,
+    extensions: List<String>,
     connected: Boolean,
     onConnect: () -> Unit,
     onSettings: () -> Unit,
@@ -1709,6 +1766,23 @@ private fun ChatPanel(
                         fontSize = 11.sp
                     )
                 }
+                if (extensions.isNotEmpty()) {
+                    Text(
+                        "[Extensions]",
+                        color = Blue,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Text(
+                        "  ${extensions.joinToString(", ")}",
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                }
             }
         }
 
@@ -1730,7 +1804,11 @@ private fun ChatPanel(
             // hundreds of visual lines. Clamp rendered lines as well as detecting
             // long character-only output.
             val hasHiddenToolContent = isTool && (fullText.lines().size > 10 || fullText.length > 240)
-            val visibleText = fullText
+            val visibleText = if (isTool && line.collapsed && fullText.length > 4_000) {
+                fullText.take(4_000) + "\n…"
+            } else {
+                fullText
+            }
             SelectionContainer {
                 when (line.role) {
                 "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent" || line.delivery == "steering_failed") {
@@ -1765,12 +1843,23 @@ private fun ChatPanel(
                     lineHeight = 22.sp,
                     modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 12.dp)
                 )
-                "assistant" -> PiMarkdown(
-                    visibleText,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
-                )
+                "assistant" -> if (line.streaming) {
+                    Text(
+                        visibleText,
+                        color = LocalPiColors.current.markdownText,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
+                    )
+                } else {
+                    PiMarkdown(
+                        visibleText,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
+                    )
+                }
                 "thinking" -> Text(
-                    markdownText(visibleText, Blue),
+                    visibleText,
                     color = ThinkingText,
                     fontFamily = FontFamily.Monospace,
                     fontStyle = FontStyle.Italic,
@@ -1974,14 +2063,21 @@ private fun compactCount(value: Long): String = when {
 
 @Composable
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
+    // Keep the narrow bottom line terse even if a richer status is useful in
+    // the conversation header.
+    val compactStatus = when {
+        status.startsWith("WORKING") -> "WORKING"
+        status.startsWith("RECONNECTING") -> "RECONNECTING"
+        else -> ""
+    }
     val parts = if (stats == null) {
         buildList {
-            if (status.startsWith("WORKING") || status.startsWith("RECONNECTING")) add(status)
+            if (compactStatus.isNotBlank()) add(compactStatus)
             add("—/—")
         }
     } else {
         buildList {
-            if (status.startsWith("WORKING") || status.startsWith("RECONNECTING")) add(status)
+            if (compactStatus.isNotBlank()) add(compactStatus)
             if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}")
             if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}")
             if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}")

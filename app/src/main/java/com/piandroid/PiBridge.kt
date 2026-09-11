@@ -19,8 +19,13 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.12"
-    private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
+    private val expectedBridgeVersion = "2026-09-11.13"
+    private val requiredBridgeCapabilities = setOf(
+        "file-reference-v1",
+        "durable-history-v1",
+        "recovery-snapshot-v1",
+        "persistent-widgets-v1"
+    )
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
 
@@ -103,6 +108,7 @@ class PiBridge(context: Context) {
             piRunning = root.optBoolean("piRunning"),
             cwd = root.optString("cwd"),
             launchCommand = root.optString("launchCommand"),
+            activeSessionFile = root.optString("activeSessionFile"),
             stderr = root.optString("lastStderr")
         )
     }
@@ -230,12 +236,11 @@ class PiBridge(context: Context) {
 
     private fun runtimePreferences() = context.getSharedPreferences("pi_runtime", Context.MODE_PRIVATE)
 
-    fun recoveryLaunchCommand(baseCommand: String): String {
-        if (selectsExistingPiSession(baseCommand)) return baseCommand
-        val sessionFile = runtimePreferences().getString("last_session_file", "").orEmpty()
-        if (sessionFile.isBlank()) return baseCommand
-        val quoted = "'${sessionFile.replace("'", "'\\''")}'"
-        return "$baseCommand --session $quoted"
+    fun recoveryLaunchCommand(baseCommand: String, activeSessionFile: String? = null): String {
+        val sessionFile = activeSessionFile
+            ?.takeIf { it.isNotBlank() }
+            ?: runtimePreferences().getString("last_session_file", "").orEmpty()
+        return pinPiLaunchToSession(baseCommand, sessionFile)
     }
 
     fun defaultModelKey(): String = context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
@@ -364,7 +369,7 @@ class PiBridge(context: Context) {
         root.optJSONObject("data") ?: JSONObject()
     }
 
-    private fun parseState(data: JSONObject): PiState {
+    internal fun parseState(data: JSONObject): PiState {
         val model = data.optJSONObject("model")
         val state = PiState(
             provider = model?.optString("provider").orEmpty(),
@@ -380,7 +385,13 @@ class PiBridge(context: Context) {
             autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
         )
         if (state.sessionFile.isNotBlank()) {
-            runtimePreferences().edit().putString("last_session_file", state.sessionFile).apply()
+            val preferences = runtimePreferences()
+            if (preferences.getString("last_session_file", "") != state.sessionFile) {
+                // Recovery correctness is more important than an asynchronous
+                // write here: a process death immediately after /resume must not
+                // fall back to the previously active conversation.
+                preferences.edit().putString("last_session_file", state.sessionFile).commit()
+            }
         }
         return state
     }
@@ -495,17 +506,22 @@ class PiBridge(context: Context) {
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
             "extension_ui_request" -> {
-                val optionsArray = value.optJSONArray("options") ?: JSONArray()
+                val method = value.optString("method")
+                val optionsArray = if (method == "setWidget") {
+                    value.optJSONArray("widgetLines") ?: JSONArray()
+                } else {
+                    value.optJSONArray("options") ?: JSONArray()
+                }
                 val options = buildList { for (i in 0 until optionsArray.length()) add(optionsArray.optString(i)) }
                 PiEvent(
                     seq = seq,
                     type = type,
-                    subtype = value.optString("method"),
+                    subtype = method,
                     text = value.optString("message", value.optString("text", value.optString("statusText"))),
                     uiRequest = PiUiRequest(
                         id = value.optString("id"),
-                        method = value.optString("method"),
-                        title = value.optString("title"),
+                        method = method,
+                        title = if (method == "setWidget") value.optString("widgetKey") else value.optString("title"),
                         message = value.optString("message", value.optString("text")),
                         options = options,
                         placeholder = value.optString("placeholder"),
@@ -584,7 +600,13 @@ class PiBridge(context: Context) {
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
 }
 
-data class PiHealth(val piRunning: Boolean, val cwd: String, val launchCommand: String, val stderr: String)
+data class PiHealth(
+    val piRunning: Boolean,
+    val cwd: String,
+    val launchCommand: String,
+    val activeSessionFile: String,
+    val stderr: String
+)
 data class PiState(
     val provider: String,
     val modelId: String,

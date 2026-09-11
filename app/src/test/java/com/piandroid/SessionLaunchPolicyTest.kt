@@ -1,5 +1,6 @@
 package com.piandroid
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,6 +23,33 @@ class SessionLaunchPolicyTest {
             assertTrue(selectsExistingPiSession(command))
             assertFalse(shouldApplyAndroidDefaultModel(command, 0))
         }
+    }
+
+    @Test
+    fun reconnectPinsTheActuallyActiveSessionInsteadOfTheStartupSession() {
+        val active = "/tmp/current session's branch.jsonl"
+        val staleCommands = listOf(
+            "pi --mode rpc --session /tmp/stale.jsonl -e ~/.pi/android/mobile.ts",
+            "pi --mode rpc --session=/tmp/stale.jsonl -e ~/.pi/android/mobile.ts",
+            "pi --mode rpc --session-id stale-id -e ~/.pi/android/mobile.ts",
+            "pi --mode rpc --continue -e ~/.pi/android/mobile.ts",
+            "pi --mode rpc --resume stale-id -e ~/.pi/android/mobile.ts",
+            "pi --mode rpc --fork /tmp/stale.jsonl -e ~/.pi/android/mobile.ts"
+        )
+
+        staleCommands.forEach { command ->
+            val recovered = pinPiLaunchToSession(command, active)
+            assertFalse(recovered.contains("stale"))
+            assertTrue(recovered.contains("--session"))
+            assertTrue(recovered.contains("current session"))
+            assertEquals(1, Regex("(^|\\s)--session(?:\\s|=)").findAll(recovered).count())
+        }
+    }
+
+    @Test
+    fun sessionPinningDoesNotRewriteCustomShellLaunchers() {
+        val custom = "bash -lc 'exec my-agent --mode rpc'"
+        assertEquals(custom, pinPiLaunchToSession(custom, "/tmp/current.jsonl"))
     }
 
     @Test

@@ -17,6 +17,7 @@ await writeFile(fakePi, `
 process.on("SIGTERM", () => setTimeout(() => process.exit(0), 150));
 let buffer = "";
 let pendingTreeCommand = "";
+let activeSessionFile = process.env.FAKE_SESSION_FILE || "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => {
   buffer += chunk;
@@ -39,8 +40,9 @@ process.stdin.on("data", chunk => {
       continue;
     }
     let data = {};
+    if (command.type === "switch_session") activeSessionFile = String(command.sessionPath || "");
     if (command.type === "get_state") {
-      data = { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 4 };
+      data = { sessionId: "test", sessionFile: activeSessionFile, isStreaming: false, isCompacting: false, messageCount: 4 };
     } else if (command.type === "get_entries") {
       data = {
         leafId: "final",
@@ -54,6 +56,9 @@ process.stdin.on("data", chunk => {
     }
     if (command.type === "prompt" && command.message === "__tree_test__") {
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "tree-dialog", method: "select", title: "Session Tree", options: ["root", "leaf"] }) + "\\n");
+    }
+    if (command.type === "prompt" && command.message === "__widget_test__") {
+      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "extensions-widget", method: "setWidget", widgetKey: "__android_loaded_extensions", widgetLines: ["mobile.ts", "project.ts"] }) + "\\n");
     }
     const isAttachmentTest = command.type === "prompt" && command.message.startsWith("__attachment_test__");
     const attachmentValid = !isAttachmentTest || command.message.includes(".pi-android-uploads/");
@@ -90,10 +95,11 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-10.12");
+  assert.equal(health.bridgeVersion, "2026-09-11.13");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
+  assert.ok(health.capabilities.includes("persistent-widgets-v1"));
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -143,6 +149,22 @@ try {
     assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
   }
   await new Promise(resolve => setTimeout(resolve, 250));
+
+  const sessionDirectoryName = `--${path.resolve(home).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  const sessionDirectory = path.join(home, ".pi", "agent", "sessions", sessionDirectoryName);
+  const activeSession = path.join(sessionDirectory, "active.jsonl");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(activeSession, "{}\n");
+  const switched = await fetch(`http://127.0.0.1:${port}/switch-session`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ path: activeSession }),
+  });
+  assert.equal(switched.status, 200, `session switch failed: ${await switched.text()}`);
+  const switchedHealth = await fetch(`http://127.0.0.1:${port}/health`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(response => response.json());
+  assert.equal(switchedHealth.activeSessionFile, activeSession, "bridge health must track the actually active session");
 
   const commandStarted = Date.now();
   const detachedCommand = await fetch(`http://127.0.0.1:${port}/command`, {
@@ -201,6 +223,12 @@ try {
     body: JSON.stringify({ message: "__tree_test__" }),
   });
   assert.equal(treePrompt.status, 200);
+  const widgetPrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ message: "__widget_test__" }),
+  });
+  assert.equal(widgetPrompt.status, 200);
   const snapshotResponse = await fetch(`http://127.0.0.1:${port}/snapshot`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -210,6 +238,10 @@ try {
   assert.match(snapshot.history.find(item => item.role === "tool").text, /npm test[\s\S]*all tests passed/,
     "completed tool calls and output must survive UI process restart");
   assert.equal(snapshot.pendingUi[0]?.id, "tree-dialog", "an open /tree selector must survive UI process restart");
+  assert.ok(
+    snapshot.events.some(item => item.value?.widgetKey === "__android_loaded_extensions" && item.value?.widgetLines?.length === 2),
+    "persistent extension widgets must survive Android UI reconnects",
+  );
 
   const closeTree = await fetch(`http://127.0.0.1:${port}/extension-ui`, {
     method: "POST",

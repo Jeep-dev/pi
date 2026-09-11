@@ -10,8 +10,15 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.12";
-const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
+const bridgeVersion = "2026-09-11.13";
+const bridgeCapabilities = [
+  "file-reference-v1",
+  "stream-upload-v1",
+  "long-compact-v1",
+  "durable-history-v1",
+  "recovery-snapshot-v1",
+  "persistent-widgets-v1",
+];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
 const execFileAsync = promisify(execFile);
@@ -27,6 +34,7 @@ const maxUploadBytes = 128 * 1024 * 1024;
 let child = null;
 let cwd = termuxHome;
 let launchCommand = "pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts";
+let activeSessionFile = "";
 let sequence = 0;
 let lastStderr = "";
 let lastStdoutTail = "";
@@ -36,6 +44,7 @@ const maxEvents = 5000;
 const pending = new Map();
 const eventWaiters = new Set();
 const pendingUiRequests = new Map();
+const persistentUiEvents = new Map();
 let activeAgentStart = 0;
 
 function addEvent(value) {
@@ -46,6 +55,11 @@ function addEvent(value) {
   if (value?.type === "agent_settled" || value?.type === "process_exit") activeAgentStart = 0;
   if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
     pendingUiRequests.set(String(value.id), value);
+  }
+  if (value?.type === "extension_ui_request" && value.method === "setWidget" && value.widgetKey) {
+    const key = String(value.widgetKey);
+    if (Array.isArray(value.widgetLines)) persistentUiEvents.set(key, event);
+    else persistentUiEvents.delete(key);
   }
   for (const wake of eventWaiters) wake();
   eventWaiters.clear();
@@ -72,7 +86,12 @@ function settlePending(id, value) {
   if (!item) return false;
   pending.delete(id);
   clearTimeout(item.timer);
-  if (value.success === false) item.reject(new Error(value.error || `${value.command || "RPC"} failed`));
+  const responseCommand = String(value.command || item.command || "");
+  if (value.success !== false && responseCommand === "get_state") {
+    const sessionFile = String(value?.data?.sessionFile || "");
+    if (sessionFile) activeSessionFile = sessionFile;
+  }
+  if (value.success === false) item.reject(new Error(value.error || `${responseCommand || "RPC"} failed`));
   else item.resolve(value);
   return true;
 }
@@ -115,6 +134,7 @@ function attachJsonl(stream) {
 function stopPi() {
   activeAgentStart = 0;
   pendingUiRequests.clear();
+  persistentUiEvents.clear();
   if (child && child.exitCode == null) {
     try { child.kill("SIGTERM"); } catch {}
   }
@@ -279,7 +299,7 @@ function rpc(command, timeoutMs = 15000) {
       pending.delete(id);
       reject(new Error(`RPC timeout: ${command.type}`));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { resolve, reject, timer, command: command.type });
     try {
       sendRaw({ ...command, id });
     } catch (error) {
@@ -674,6 +694,7 @@ const server = http.createServer(async (req, res) => {
         piRunning: !!child && child.exitCode == null,
         cwd,
         launchCommand,
+        activeSessionFile,
         latest: sequence,
         lastStderr,
         lastStdoutTail,
@@ -771,11 +792,14 @@ const server = http.createServer(async (req, res) => {
       const durable = await durableHistory();
       const latest = sequence;
       const activeEvents = activeAgentStart > 0 ? events.filter(item => item.seq >= activeAgentStart && item.seq <= latest) : [];
+      const recoveryEvents = [...persistentUiEvents.values(), ...activeEvents]
+        .filter((item, index, all) => all.findIndex((candidate) => candidate.seq === item.seq) === index)
+        .sort((left, right) => left.seq - right.seq);
       return send(res, 200, {
         ok: true,
         history: durable.history,
         editorText: durable.editorText,
-        events: activeEvents,
+        events: recoveryEvents,
         latest,
         pendingUi: [...pendingUiRequests.values()],
       });
@@ -799,6 +823,7 @@ const server = http.createServer(async (req, res) => {
       if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
       const result = await rpc({ type: "switch_session", sessionPath: canonicalTarget }, 30000);
       const state = await rpc({ type: "get_state" }, 60000);
+      activeSessionFile = String(state?.data?.sessionFile || canonicalTarget);
       return send(res, 200, { ok: true, result: result.data || null, state: state.data || null });
     }
 

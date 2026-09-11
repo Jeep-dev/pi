@@ -85,12 +85,16 @@ suspend fun PiBridge.sessions(): Result<List<PiSession>> = request("/sessions", 
     }
 }
 
-suspend fun PiBridge.switchSession(sessionPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+suspend fun PiBridge.switchSession(sessionPath: String): Result<PiState> = withContext(Dispatchers.IO) {
     request(
         "/switch-session",
         JSONObject().put("path", sessionPath).toString(),
-        35_000
-    ).map { Unit }
+        70_000
+    ).mapCatching { raw ->
+        val state = JSONObject(raw).optJSONObject("state")
+            ?: throw IllegalStateException("Pi did not return the switched session state")
+        parseState(state)
+    }
 }
 
 data class PiSession(

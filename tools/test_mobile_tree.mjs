@@ -87,6 +87,7 @@ let buffer = "";
 let editorText = "";
 let switched = false;
 let treeWasComplete = false;
+let extensionsPublished = false;
 let completed = false;
 
 function send(value) {
@@ -108,6 +109,9 @@ function handle(value) {
   }
   if (value.type === "extension_ui_request" && value.method === "select" && value.title === "Summarize branch?") {
     throw new Error("Tree navigation must branch immediately without a second summary dialog");
+  }
+  if (value.type === "extension_ui_request" && value.method === "setWidget" && value.widgetKey === "__android_loaded_extensions") {
+    extensionsPublished = Array.isArray(value.widgetLines) && value.widgetLines.some((line) => line.includes("pi-android-mobile"));
   }
   if (value.type === "extension_ui_request" && value.method === "set_editor_text") editorText = value.text;
   if (value.type === "extension_ui_request" && value.method === "notify" && value.message === "ANDROID_SESSION_SWITCHED") {
@@ -154,6 +158,7 @@ function handle(value) {
     if (messages.length !== 2 || !JSON.stringify(messages[1]).includes("first answer")) {
       throw new Error("Messages after the selected tree point leaked into model context");
     }
+    if (!extensionsPublished) throw new Error("Loaded extensions were not published to the Android startup widget");
     completed = true;
     child.kill();
   }
