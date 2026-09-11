@@ -3,14 +3,14 @@ import { spawn, execFile } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-11.15";
+const bridgeVersion = "2026-09-11.16";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -18,6 +18,8 @@ const bridgeCapabilities = [
   "durable-history-v1",
   "recovery-snapshot-v1",
   "persistent-widgets-v1",
+  "consistent-recovery-v1",
+  "bounded-event-cache-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -41,18 +43,27 @@ let lastStdoutTail = "";
 let lastExit = null;
 const events = [];
 const maxEvents = 5000;
+const configuredEventBytes = Number(process.env.PI_ANDROID_MAX_EVENT_BYTES || 24 * 1024 * 1024);
+const maxEventBytes = Number.isFinite(configuredEventBytes) ? Math.max(256 * 1024, configuredEventBytes) : 24 * 1024 * 1024;
+let eventBytes = 0;
+const responseEventSequence = Symbol("responseEventSequence");
 const pending = new Map();
 const eventWaiters = new Set();
 const pendingUiRequests = new Map();
 const persistentUiEvents = new Map();
-let activeAgentStart = 0;
+let latestQueueEvent = null;
 
 function addEvent(value) {
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
+  const byteSize = Buffer.byteLength(JSON.stringify(value));
+  Object.defineProperty(event, "byteSize", { value: byteSize });
   events.push(event);
-  if (events.length > maxEvents) events.shift();
-  if (value?.type === "agent_start") activeAgentStart = event.seq;
-  if (value?.type === "agent_settled" || value?.type === "process_exit") activeAgentStart = 0;
+  eventBytes += byteSize;
+  while (events.length > 1 && (events.length > maxEvents || eventBytes > maxEventBytes)) {
+    eventBytes -= events.shift().byteSize;
+  }
+  if (value?.type === "queue_update") latestQueueEvent = event;
+  if (value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") latestQueueEvent = null;
   if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
     pendingUiRequests.set(String(value.id), value);
   }
@@ -86,6 +97,7 @@ function settlePending(id, value) {
   if (!item) return false;
   pending.delete(id);
   clearTimeout(item.timer);
+  value[responseEventSequence] = sequence;
   const responseCommand = String(value.command || item.command || "");
   if (value.success !== false && responseCommand === "get_state") {
     const sessionFile = String(value?.data?.sessionFile || "");
@@ -132,7 +144,7 @@ function attachJsonl(stream) {
 }
 
 function stopPi() {
-  activeAgentStart = 0;
+  addEvent({ type: "process_reset" });
   pendingUiRequests.clear();
   persistentUiEvents.clear();
   if (child && child.exitCode == null) {
@@ -353,6 +365,16 @@ function toolArgumentsText(name, args) {
   return formatted.length > 4000 ? `${formatted.slice(0, 4000)}\n… 参数显示已截断` : formatted;
 }
 
+function toolResultText(name, message) {
+  const output = contentText(message?.content, "[图片输出]");
+  const isError = Boolean(message?.isError);
+  const sections = [isError ? `工具执行失败：${name}` : `工具完成：${name}`];
+  const diff = !isError && name === "edit" ? String(message?.details?.diff || "") : "";
+  if (diff.trim() && !output.includes(diff)) sections.push(diff);
+  if (output.trim()) sections.push(output);
+  return sections.join("\n\n");
+}
+
 function historyFromEntries(data) {
   const entries = Array.isArray(data?.entries) ? data.entries : [];
   const byId = new Map(entries.filter(entry => entry?.id).map(entry => [String(entry.id), entry]));
@@ -426,12 +448,10 @@ function historyFromEntries(data) {
       } else if (role === "toolResult") {
         const callId = String(message.toolCallId || "");
         const name = String(message.toolName || "tool");
-        const output = contentText(message.content, "[图片输出]");
-        const status = message.isError ? `工具执行失败：${name}` : `工具完成：${name}`;
-        const suffix = `${status}${output ? `\n\n${output}` : ""}`;
+        const result = toolResultText(name, message);
         const index = toolLines.get(callId);
-        if (index != null && history[index]) history[index].text += `\n\n${suffix}`;
-        else add("tool", suffix, callId, true);
+        if (index != null && history[index]) history[index].text += `\n\n${result}`;
+        else add("tool", result, callId, true);
       } else if (role === "bashExecution") {
         const output = contentText(message.content) || String(message.output || "");
         add("tool", `执行 Bash：${String(message.command || "")}${output ? `\n\n${output}` : ""}`, String(message.toolCallId || entry.id || ""), true);
@@ -461,7 +481,95 @@ async function durableHistory() {
   const editorText = leaf?.type === "custom" && leaf.customType === "__android_tree_edit__"
     ? String(leaf.data?.editorText ?? "")
     : null;
-  return { history: historyFromEntries(data), editorText };
+  const toolResultIds = new Set(
+    entries
+      .filter(entry => entry?.type === "message" && entry.message?.role === "toolResult")
+      .map(entry => String(entry.message.toolCallId || ""))
+      .filter(Boolean),
+  );
+  return {
+    history: historyFromEntries(data),
+    editorText,
+    eventSeq: Number(response?.[responseEventSequence] ?? sequence),
+    toolResultIds,
+  };
+}
+
+function recoveryEventsAfterHistory(historySeq, latest, toolResultIds = new Set()) {
+  const before = events.filter(item => item.seq <= historySeq);
+  const carry = new Set();
+  let agentStart = null;
+  let openMessageStart = null;
+  let compactionStart = null;
+  let latestQueue = null;
+  const activeTools = new Map();
+  const completedToolCarry = new Set();
+
+  for (const item of before) {
+    const value = item.value || {};
+    const type = value.type;
+    if (type === "agent_start") {
+      agentStart = item;
+      openMessageStart = null;
+      activeTools.clear();
+      completedToolCarry.clear();
+      latestQueue = null;
+    } else if (type === "process_reset") {
+      agentStart = null;
+      openMessageStart = null;
+      activeTools.clear();
+      completedToolCarry.clear();
+      latestQueue = null;
+    } else if (type === "agent_settled" || type === "process_exit") {
+      agentStart = null;
+      openMessageStart = null;
+      activeTools.clear();
+      latestQueue = null;
+    } else if (type === "message_start") {
+      openMessageStart = item.seq;
+    } else if (type === "message_end") {
+      openMessageStart = null;
+    } else if (type === "tool_execution_start") {
+      activeTools.set(String(value.toolCallId || ""), { start: item, update: null });
+    } else if (type === "tool_execution_update") {
+      const key = String(value.toolCallId || "");
+      const state = activeTools.get(key) || { start: null, update: null };
+      state.update = item;
+      activeTools.set(key, state);
+    } else if (type === "tool_execution_end") {
+      const key = String(value.toolCallId || "");
+      const state = activeTools.get(key);
+      if (key && !toolResultIds.has(key)) {
+        if (state?.start) completedToolCarry.add(state.start.seq);
+        if (state?.update) completedToolCarry.add(state.update.seq);
+        completedToolCarry.add(item.seq);
+      }
+      activeTools.delete(key);
+    } else if (type === "queue_update") {
+      latestQueue = item;
+    } else if (type === "compaction_start") {
+      compactionStart = item;
+    } else if (type === "compaction_end") {
+      compactionStart = null;
+    }
+  }
+
+  if (agentStart) carry.add(agentStart.seq);
+  if (openMessageStart != null) {
+    for (const item of before) {
+      if (item.seq < openMessageStart) continue;
+      if (item.value?.type === "message_start" || item.value?.type === "message_update") carry.add(item.seq);
+    }
+  }
+  for (const state of activeTools.values()) {
+    if (state.start) carry.add(state.start.seq);
+    if (state.update) carry.add(state.update.seq);
+  }
+  for (const seq of completedToolCarry) carry.add(seq);
+  if (latestQueue) carry.add(latestQueue.seq);
+  if (compactionStart) carry.add(compactionStart.seq);
+
+  return events.filter(item => item.seq <= latest && (carry.has(item.seq) || item.seq > historySeq));
 }
 
 async function readSlice(handle, offset, length) {
@@ -537,8 +645,8 @@ async function listSessions() {
     if (!name.endsWith(".jsonl")) continue;
     const file = path.join(dir, name);
     try {
-      const info = await stat(file);
-      files.push({ file, modified: info.mtimeMs });
+      const info = await lstat(file);
+      if (info.isFile()) files.push({ file, modified: info.mtimeMs });
     } catch {}
   }
   files.sort((a, b) => b.modified - a.modified);
@@ -820,8 +928,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/snapshot") {
       const durable = await durableHistory();
       const latest = sequence;
-      const activeEvents = activeAgentStart > 0 ? events.filter(item => item.seq >= activeAgentStart && item.seq <= latest) : [];
-      const recoveryEvents = [...persistentUiEvents.values(), ...activeEvents]
+      const activeEvents = recoveryEventsAfterHistory(durable.eventSeq, latest, durable.toolResultIds);
+      const recoveryEvents = [...persistentUiEvents.values(), ...(latestQueueEvent ? [latestQueueEvent] : []), ...activeEvents]
         .filter((item, index, all) => all.findIndex((candidate) => candidate.seq === item.seq) === index)
         .sort((left, right) => left.seq - right.seq);
       return send(res, 200, {
@@ -930,8 +1038,22 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/file") {
       const relativePath = url.searchParams.get("path") || "";
-      const content = await readFile(await safePath(relativePath), "utf8");
-      return send(res, 200, { path: relativePath, content: content.slice(0, 2_000_000), truncated: content.length > 2_000_000 });
+      const target = await safePath(relativePath);
+      const info = await stat(target);
+      if (!info.isFile()) throw new Error("file path is not a regular file");
+      const maxBytes = 2_000_000;
+      const handle = await open(target, "r");
+      let content;
+      try {
+        const buffer = Buffer.alloc(Math.min(info.size, maxBytes));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const decoder = new StringDecoder("utf8");
+        content = decoder.write(buffer.subarray(0, bytesRead));
+        if (info.size <= maxBytes) content += decoder.end();
+      } finally {
+        await handle.close();
+      }
+      return send(res, 200, { path: relativePath, content, truncated: info.size > maxBytes });
     }
 
     if (req.method === "POST" && url.pathname === "/file") {

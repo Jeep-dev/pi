@@ -500,8 +500,8 @@ export default function (pi: any) {
     description: "Reload extensions, skills, prompts, themes, and context files",
     handler: async (_args: string, ctx: any) => {
       await ctx.waitForIdle();
+      // reload() replaces the runtime; the old context must not be used after it resolves.
       await ctx.reload();
-      ctx.ui.notify("资源已重新加载", "info");
     },
   });
 
@@ -551,5 +551,8 @@ export default function (pi: any) {
   // RPC has no built-in loaded-resource query. Publish the runtime's real
   // extension source metadata through a persistent widget so Android can render
   // the same compact [Extensions] startup section as Pi's terminal UI.
-  pi.on("session_start", (_event: any, ctx: any) => publishLoadedExtensions(ctx));
+  pi.on("session_start", (event: any, ctx: any) => {
+    publishLoadedExtensions(ctx);
+    if (event?.reason === "reload") ctx.ui.notify("资源已重新加载", "info");
+  });
 }

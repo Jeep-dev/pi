@@ -88,10 +88,20 @@ let editorText = "";
 let switched = false;
 let treeWasComplete = false;
 let extensionsPublished = false;
+let reloadRequested = false;
+let reloadWidgetPublished = false;
+let reloadNotified = false;
+let reloadResponse = false;
 let completed = false;
 
 function send(value) {
   child.stdin.write(`${JSON.stringify(value)}\n`);
+}
+
+function finishReloadTest() {
+  if (!reloadResponse || !reloadWidgetPublished || !reloadNotified) return;
+  completed = true;
+  child.kill();
 }
 
 function handle(value) {
@@ -112,10 +122,16 @@ function handle(value) {
   }
   if (value.type === "extension_ui_request" && value.method === "setWidget" && value.widgetKey === "__android_loaded_extensions") {
     extensionsPublished = Array.isArray(value.widgetLines) && value.widgetLines.some((line) => line.includes("pi-android-mobile"));
+    if (reloadRequested && extensionsPublished) reloadWidgetPublished = true;
+    finishReloadTest();
   }
   if (value.type === "extension_ui_request" && value.method === "set_editor_text") editorText = value.text;
   if (value.type === "extension_ui_request" && value.method === "notify" && value.message === "ANDROID_SESSION_SWITCHED") {
     switched = true;
+  }
+  if (value.type === "extension_ui_request" && value.method === "notify" && value.message === "资源已重新加载") {
+    reloadNotified = true;
+    finishReloadTest();
   }
   if (value.id === "navigate") send({ id: "tree", type: "get_tree" });
   if (value.id === "tree") {
@@ -159,8 +175,12 @@ function handle(value) {
       throw new Error("Messages after the selected tree point leaked into model context");
     }
     if (!extensionsPublished) throw new Error("Loaded extensions were not published to the Android startup widget");
-    completed = true;
-    child.kill();
+    reloadRequested = true;
+    send({ id: "reload", type: "prompt", message: "/reload" });
+  }
+  if (value.id === "reload") {
+    reloadResponse = true;
+    finishReloadTest();
   }
 }
 

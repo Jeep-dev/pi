@@ -19,12 +19,14 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-11.15"
+    private val expectedBridgeVersion = "2026-09-11.16"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
         "recovery-snapshot-v1",
-        "persistent-widgets-v1"
+        "persistent-widgets-v1",
+        "consistent-recovery-v1",
+        "bounded-event-cache-v1"
     )
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
@@ -349,8 +351,9 @@ class PiBridge(context: Context) {
         }
     }
 
-    suspend fun file(path: String): Result<String> = request("/file?path=${encode(path)}", null).mapCatching {
-        JSONObject(it).optString("content")
+    suspend fun file(path: String): Result<PiFileContent> = request("/file?path=${encode(path)}", null).mapCatching {
+        val root = JSONObject(it)
+        PiFileContent(root.optString("content"), root.optBoolean("truncated"))
     }
 
     suspend fun writeFile(path: String, content: String): Result<Unit> {
@@ -417,14 +420,14 @@ class PiBridge(context: Context) {
                     append("目标：${args.optString("path")}\n")
                     append("内容：${content.length} 字符")
                     if (content.isNotBlank()) {
-                        val preview = content.takeLast(1_600).lineSequence().toList().takeLast(18).joinToString("\n")
+                        val preview = content.takeLast(1_600)
                         append("\n\n写入预览${if (content.length > preview.length) "（末尾）" else ""}：\n$preview")
                     }
                 }
             }
             "edit" -> "目标：${args.optString("path")}\n修改块：${args.optJSONArray("edits")?.length() ?: 0}"
             "bash" -> "命令：${args.optString("command")}"
-            else -> args.toString(2).let { if (it.length > 2_000) it.take(2_000) + "\n… 参数已截断" else it }
+            else -> args.toString(2).let { if (it.length > 4_000) it.take(4_000) + "\n… 参数显示已截断" else it }
         }
     }
 
@@ -450,7 +453,8 @@ class PiBridge(context: Context) {
                 val message = value.optJSONObject("message") ?: JSONObject()
                 PiEvent(
                     seq, type, message.optString("role"), messageText(message),
-                    stopReason = message.optString("stopReason")
+                    stopReason = message.optString("stopReason"),
+                    errorMessage = message.optString("errorMessage")
                 )
             }
             "tool_execution_start" -> {
@@ -474,18 +478,37 @@ class PiBridge(context: Context) {
                         }
                     }
                 }
-                PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
+                val toolName = value.optString("toolName")
+                PiEvent(
+                    seq, type, "", text,
+                    toolCallId = value.optString("toolCallId"),
+                    argsText = buildString {
+                        append("执行工具：$toolName")
+                        toolArgsText(toolName, value.optJSONObject("args")).takeIf { it.isNotBlank() }?.let { append("\n\n$it") }
+                    }
+                )
             }
-            "queue_update" -> PiEvent(
-                seq = seq,
-                type = type,
-                subtype = "",
-                text = "",
-                steeringCount = value.optJSONArray("steering")?.length() ?: 0,
-                followUpCount = value.optJSONArray("followUp")?.length() ?: 0
-            )
+            "queue_update" -> {
+                val steering = value.optJSONArray("steering")?.let { array ->
+                    List(array.length()) { index -> array.optString(index) }
+                }.orEmpty()
+                val followUp = value.optJSONArray("followUp")?.let { array ->
+                    List(array.length()) { index -> array.optString(index) }
+                }.orEmpty()
+                PiEvent(
+                    seq = seq,
+                    type = type,
+                    subtype = "",
+                    text = "",
+                    steeringCount = steering.size,
+                    followUpCount = followUp.size,
+                    steeringQueue = steering,
+                    followUpQueue = followUp
+                )
+            }
             "tool_execution_end" -> {
-                val content = value.optJSONObject("result")?.optJSONArray("content") ?: JSONArray()
+                val result = value.optJSONObject("result")
+                val content = result?.optJSONArray("content") ?: JSONArray()
                 val output = buildString {
                     for (i in 0 until content.length()) {
                         val part = content.optJSONObject(i) ?: continue
@@ -496,9 +519,15 @@ class PiBridge(context: Context) {
                         }
                     }
                 }
-                val status = if (value.optBoolean("isError")) "工具执行失败" else "工具完成：${value.optString("toolName")}"
+                val name = value.optString("toolName")
                 PiEvent(
-                    seq, type, "", status + if (output.isBlank()) "" else "\n\n$output",
+                    seq, type, "",
+                    toolResultText(
+                        toolName = name,
+                        output = output,
+                        isError = value.optBoolean("isError"),
+                        diff = result?.optJSONObject("details")?.optString("diff").orEmpty()
+                    ),
                     toolCallId = value.optString("toolCallId")
                 )
             }
@@ -675,8 +704,13 @@ data class PiEvent(
     val toolCallId: String = "",
     val contentIndex: Int = -1,
     val stopReason: String = "",
+    val errorMessage: String = "",
     val steeringCount: Int = 0,
-    val followUpCount: Int = 0
+    val followUpCount: Int = 0,
+    val steeringQueue: List<String> = emptyList(),
+    val followUpQueue: List<String> = emptyList(),
+    val argsText: String = ""
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)
+data class PiFileContent(val content: String, val truncated: Boolean)

@@ -398,6 +398,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     var files by remember { mutableStateOf<List<PiFile>>(emptyList()) }
     var selectedFile by remember { mutableStateOf("") }
     var fileText by remember { mutableStateOf("") }
+    var fileLoading by remember { mutableStateOf(false) }
+    var fileTruncated by remember { mutableStateOf(false) }
     var diffText by remember { mutableStateOf("") }
     var pendingUi by remember { mutableStateOf<PiUiRequest?>(null) }
     var dialogInput by remember { mutableStateOf("") }
@@ -626,15 +628,21 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    fun updateTool(toolCallId: String, text: String) {
+    fun updateTool(toolCallId: String, text: String, argsText: String = "") {
         if (text.isBlank()) return
         val refreshKey = toolCallId.ifBlank { "__active_tool__" }
         val now = android.os.SystemClock.uptimeMillis()
         val lastRefresh = toolOutputRefreshAt[refreshKey] ?: 0L
         if (now - lastRefresh < 50L) return
         toolOutputRefreshAt[refreshKey] = now
-        val index = lines.indexOfLast {
+        var index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
+        }
+        if (index < 0 && argsText.isNotBlank()) {
+            startTool(toolCallId, argsText)
+            index = lines.indexOfLast {
+                it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
+            }
         }
         if (index >= 0) {
             val line = lines[index]
@@ -647,8 +655,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     fun finishTool(toolCallId: String, text: String) {
         toolOutputRefreshAt.remove(toolCallId.ifBlank { "__active_tool__" })
-        val index = lines.indexOfLast {
+        var index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
+        }
+        if (index < 0 && toolCallId.isNotBlank()) {
+            index = lines.indexOfLast { it.role == "tool" && it.toolCallId == toolCallId }
         }
         if (index >= 0) {
             val line = lines[index]
@@ -660,11 +671,13 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    fun finalizeAssistant(text: String) {
-        if (text.isBlank()) return
-        val index = lines.indexOfLast { it.role == "assistant" && it.streaming }
-        if (index >= 0) lines[index] = lines[index].copy(text = text, streaming = false)
-        else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
+    fun finalizeAssistant(text: String, stopReason: String, errorMessage: String) {
+        if (text.isNotBlank()) {
+            val index = lines.indexOfLast { it.role == "assistant" && it.streaming }
+            if (index >= 0) lines[index] = lines[index].copy(text = text, streaming = false)
+            else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
+        }
+        assistantCompletionNotice(stopReason, text, errorMessage)?.let(::addSystem)
     }
 
     fun toggleLine(index: Int) {
@@ -701,7 +714,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         }
     }
 
-    suspend fun applyEvent(event: PiEvent) {
+    fun restoreQueuedPrompts(prompts: List<String>) {
+        val existing = lines.count { it.delivery == "steering" || it.delivery == "steering_queued" }
+        prompts.drop(existing).forEach { prompt ->
+            lines.add(ChatLine("user", prompt, delivery = "steering_queued"))
+        }
+    }
+
+    suspend fun applyEvent(event: PiEvent, recovering: Boolean = false) {
         when (event.type) {
             "agent_start" -> {
                 status = "Working"
@@ -709,6 +729,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             }
             "agent_end" -> Unit
             "queue_update" -> {
+                if (recovering) restoreQueuedPrompts(event.steeringQueue)
                 steeringQueueSize = event.steeringCount
                 followUpQueueSize = event.followUpCount
                 reconcileSteeringQueue(event.steeringCount)
@@ -732,7 +753,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 else -> Unit
             }
             "message_end" -> if (event.subtype == "assistant") {
-                finalizeAssistant(event.text)
+                finalizeAssistant(event.text, event.stopReason, event.errorMessage)
                 if (event.stopReason == "aborted" || event.stopReason == "error") {
                     for (i in lines.indices) {
                         if (lines[i].role == "tool-draft" && lines[i].streaming) {
@@ -749,7 +770,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 }
             }
             "tool_execution_start" -> startTool(event.toolCallId, event.text)
-            "tool_execution_update" -> updateTool(event.toolCallId, event.text)
+            "tool_execution_update" -> updateTool(event.toolCallId, event.text, event.argsText)
             "tool_execution_end" -> finishTool(event.toolCallId, event.text)
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
@@ -854,7 +875,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 val snapshot = bridge.recoverySnapshot().getOrThrow()
                 restoreHistory(snapshot.history)
                 cursor = snapshot.latest
-                snapshot.events.forEach { applyEvent(it) }
+                snapshot.events.forEach { applyEvent(it, recovering = true) }
                 pendingUi = snapshot.pendingUi.lastOrNull()
                 snapshot.pendingUi.lastOrNull()?.let { request ->
                     dialogInput = request.prefill.ifBlank { "" }
@@ -1042,7 +1063,12 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.11
+                """Pi Android v5.16.12
+                |• 恢复 edit 工具的原生 diff 数据，默认折叠且可展开全文
+                |• 重连快照按持久历史边界去重，并保留未完成输出、工具结果和 steering 队列
+                |• 显示真实工具失败和模型错误；限制 Bridge 事件缓存内存
+                |• /reload 使用新 runtime 发布扩展列表和完成通知
+                |• 超过 2 MB 的文件只提供安全只读预览，避免截断覆盖
                 |• /fork 明确区分当前、已压缩及其他分支，并在历史 Fork 前确认
                 |• /fork 现在真实切换到独立 session，并将所选消息恢复到输入框
                 |• session 选择器自动遮蔽常见 API key、token 与私钥预览
@@ -1190,7 +1216,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         bridge.recoverySnapshot().onSuccess { snapshot ->
             restoreHistory(snapshot.history, preservePending = true)
             cursor = snapshot.latest
-            snapshot.events.forEach { event -> applyEvent(event) }
+            snapshot.events.forEach { event -> applyEvent(event, recovering = true) }
             pendingUi = snapshot.pendingUi.lastOrNull()
             snapshot.editorText?.let { input = it }
         }
@@ -1207,7 +1233,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                         onSuccess = { snapshot ->
                             restoreHistory(snapshot.history, preservePending = true)
                             cursor = snapshot.latest
-                            snapshot.events.forEach { applyEvent(it) }
+                            snapshot.events.forEach { applyEvent(it, recovering = true) }
                             pendingUi = snapshot.pendingUi.lastOrNull()
                             snapshot.editorText?.let { input = it }
                         },
@@ -1500,25 +1526,57 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     files = files,
                     selectedFile = selectedFile,
                     fileText = fileText,
+                    fileLoading = fileLoading,
+                    fileTruncated = fileTruncated,
                     onBack = { panel = Panel.Chat },
                     onOpen = { item ->
                         if (item.type == "directory") {
                             currentPath = item.path
                             selectedFile = ""
+                            fileText = ""
+                            fileLoading = false
+                            fileTruncated = false
                             scope.launch { bridge.files(currentPath).onSuccess { files = it } }
                         } else {
-                            selectedFile = item.path
-                            scope.launch { bridge.file(item.path).onSuccess { fileText = it }.onFailure { addSystem(it.message.orEmpty()) } }
+                            val requested = item.path
+                            selectedFile = requested
+                            fileText = ""
+                            fileLoading = true
+                            fileTruncated = false
+                            scope.launch {
+                                bridge.file(requested).fold(
+                                    onSuccess = { loaded ->
+                                        if (selectedFile == requested) {
+                                            fileText = loaded.content
+                                            fileTruncated = loaded.truncated
+                                            fileLoading = false
+                                        }
+                                    },
+                                    onFailure = {
+                                        if (selectedFile == requested) {
+                                            selectedFile = ""
+                                            fileText = ""
+                                            fileLoading = false
+                                        }
+                                        addSystem(it.message.orEmpty())
+                                    }
+                                )
+                            }
                         }
                     },
                     onUp = {
                         currentPath = currentPath.substringBeforeLast('/', "")
                         selectedFile = ""
+                        fileText = ""
+                        fileLoading = false
+                        fileTruncated = false
                         scope.launch { bridge.files(currentPath).onSuccess { files = it } }
                     },
                     onText = { fileText = it },
                     onSave = {
-                        if (selectedFile.isNotBlank()) scope.launch {
+                        if (fileTruncated) {
+                            addSystem("文件超过 2 MB，只显示了只读预览；为防止数据丢失，不能从这里覆盖保存")
+                        } else if (!fileLoading && selectedFile.isNotBlank()) scope.launch {
                             bridge.writeFile(selectedFile, fileText).fold(
                                 onSuccess = { addSystem("已保存 $selectedFile") },
                                 onFailure = { addSystem("保存失败：${it.message}") }
@@ -1929,7 +1987,7 @@ private fun ChatPanel(
                 ) {
                     Text(
                         visibleText,
-                        color = TextMuted,
+                        color = if (fullText.contains("工具执行失败：")) Danger else TextMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
@@ -1953,7 +2011,7 @@ private fun ChatPanel(
                 }
                     else -> Text(
                         visibleText,
-                        color = if (line.text.contains("失败") || line.text.contains("ERROR")) Danger else TextMuted,
+                        color = if (line.text.contains("失败") || line.text.contains("错误") || line.text.contains("ERROR")) Danger else TextMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
@@ -2321,6 +2379,8 @@ private fun FilesPanel(
     files: List<PiFile>,
     selectedFile: String,
     fileText: String,
+    fileLoading: Boolean,
+    fileTruncated: Boolean,
     onBack: () -> Unit,
     onOpen: (PiFile) -> Unit,
     onUp: () -> Unit,
@@ -2347,14 +2407,25 @@ private fun FilesPanel(
             }
         } else {
             Text(selectedFile, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp))
+            if (fileTruncated) {
+                Text(
+                    "文件超过 2 MB：当前为截断的只读预览，不会允许覆盖原文件。",
+                    color = Danger,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
             OutlinedTextField(
                 value = fileText,
                 onValueChange = onText,
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(10.dp),
+                readOnly = fileLoading || fileTruncated,
+                placeholder = { if (fileLoading) Text("加载中…") },
                 textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMain)
             )
             Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSave) { Text("保存") }
+                Button(onClick = onSave, enabled = !fileLoading && !fileTruncated) { Text("保存") }
                 TextButton(onClick = { onOpen(PiFile("..", "directory", path)) }) { Text("返回文件列表") }
             }
         }
