@@ -245,6 +245,9 @@ class PiBridge(context: Context) {
         return pinPiLaunchToSession(baseCommand, sessionFile)
     }
 
+    /** Build a clean command for a new cwd without inheriting any old session selector. */
+    fun freshLaunchCommand(baseCommand: String): String = launchPiWithoutSession(baseCommand)
+
     fun defaultModelKey(): String = context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
         .getString("default_model", "").orEmpty()
 

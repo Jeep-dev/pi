@@ -358,6 +358,8 @@ private fun PiTouchApp(bridge: PiBridge) {
 @Composable
 private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiThemeMode) -> Unit) {
     var cwd by rememberSaveable { mutableStateOf("/data/data/com.termux/files/home") }
+    var runtimeCwd by rememberSaveable { mutableStateOf("") }
+    var cwdEdited by rememberSaveable { mutableStateOf(false) }
     var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts") }
     var input by rememberSaveable { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
@@ -532,13 +534,47 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         bridge.history().onSuccess { restoreHistory(it, preservePending) }
     }
 
+    fun applyRuntimeHealth(health: PiHealth) {
+        if (health.cwd.isNotBlank()) {
+            runtimeCwd = health.cwd
+            cwd = health.cwd
+            cwdEdited = false
+        }
+    }
+
+    fun reconnectDecisionForRuntime(runningCwd: String): ReconnectDecision =
+        if (!cwdEdited) ReconnectDecision.ATTACH else reconnectDecision(cwd, runningCwd)
+
     suspend fun syncAttachedRuntime() {
-        bridge.health().onSuccess { health ->
-            if (health.cwd.isNotBlank()) cwd = health.cwd
-            if (health.launchCommand.isNotBlank()) {
-                launchCommand = bridge.recoveryLaunchCommand(health.launchCommand, health.activeSessionFile)
+        // The runtime command may contain a temporary --session selector. Do
+        // not copy it back into the user's editable base command.
+        bridge.health().onSuccess(::applyRuntimeHealth)
+    }
+
+    suspend fun restartPi(preserveSession: Boolean): PiState {
+        status = "Checkpointing session"
+        bridge.state(1_500).onSuccess { previous ->
+            currentState = previous
+            if (!previous.streaming && !previous.compacting) {
+                val canCheckpoint = bridge.commands().getOrDefault(emptyList()).any { it.name == "__android_checkpoint" }
+                if (canCheckpoint) bridge.prompt("/__android_checkpoint")
             }
         }
+        status = "Installing bridge"
+        bridge.installAndStartBridge().getOrThrow()
+        status = "Waiting for bridge"
+        bridge.waitForBridge(30_000).getOrThrow()
+        status = "Starting Pi"
+        // Keep the editable launchCommand as the user's base command; session
+        // recovery is generated only for this one start operation.
+        val launch = if (preserveSession) {
+            bridge.recoveryLaunchCommand(launchCommand.trim(), currentState?.sessionFile)
+        } else {
+            bridge.freshLaunchCommand(launchCommand.trim())
+        }
+        val started = bridge.start(cwd.trim(), launch).getOrThrow()
+        applyRuntimeHealth(bridge.health().getOrThrow())
+        return started
     }
 
     suspend fun refreshMeta() = coroutineScope {
@@ -837,35 +873,45 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 connected = false
                 status = "Checking running agent"
                 val attached = bridge.attachToRunningBridge().getOrNull()
+                var restarted = false
+                var preservedSessionOnRestart = false
                 if (attached != null) {
-                    syncAttachedRuntime()
-                    currentState = attached
-                    status = "Ready"
-                } else {
-                    status = "Checkpointing session"
-                    bridge.state(1_500).onSuccess { previous ->
-                        currentState = previous
-                        if (!previous.streaming && !previous.compacting) {
-                            val canCheckpoint = bridge.commands().getOrDefault(emptyList()).any { it.name == "__android_checkpoint" }
-                            if (canCheckpoint) bridge.prompt("/__android_checkpoint")
-                        }
+                    val runningCwd = bridge.health().getOrNull()?.cwd
+                        ?.takeIf { it.isNotBlank() }
+                        ?: runtimeCwd
+                    if (reconnectDecisionForRuntime(runningCwd) == ReconnectDecision.ATTACH) {
+                        syncAttachedRuntime()
+                        currentState = attached
+                        status = "Ready"
+                    } else {
+                        currentState = restartPi(preserveSession = false)
+                        restarted = true
                     }
-                    status = "Installing bridge"
-                    bridge.installAndStartBridge().getOrThrow()
-                    status = "Waiting for bridge"
-                    bridge.waitForBridge(30_000).getOrThrow()
-                    status = "Starting Pi"
-                    val recoveredLaunch = bridge.recoveryLaunchCommand(
-                        launchCommand.trim(),
-                        currentState?.sessionFile
-                    )
-                    currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
+                } else {
+                    val knownRuntimeCwd = bridge.health().getOrNull()?.cwd
+                        ?.takeIf { it.isNotBlank() }
+                        ?: runtimeCwd
+                    val preserveSession = if (knownRuntimeCwd.isBlank()) {
+                        !cwdEdited
+                    } else {
+                        reconnectDecisionForRuntime(knownRuntimeCwd) == ReconnectDecision.ATTACH
+                    }
+                    currentState = restartPi(preserveSession)
+                    restarted = true
+                    preservedSessionOnRestart = preserveSession
+                }
+                if (restarted) {
                     val availableModels = bridge.models().getOrDefault(emptyList())
                     models = availableModels
                     // Pi restores model + thinking level from an existing session.
                     // Android's preference is only for a genuinely new session;
                     // /new applies it for subsequent new conversations.
-                    if (shouldApplyAndroidDefaultModel(recoveredLaunch, currentState?.messageCount ?: 0)) {
+                    val launch = if (preservedSessionOnRestart) {
+                        bridge.recoveryLaunchCommand(launchCommand.trim(), currentState?.sessionFile)
+                    } else {
+                        bridge.freshLaunchCommand(launchCommand.trim())
+                    }
+                    if (shouldApplyAndroidDefaultModel(launch, currentState?.messageCount ?: 0)) {
                         bridge.applyDefaultModel(availableModels).onSuccess { selected ->
                             if (selected != null) bridge.state().onSuccess { state -> currentState = state }
                         }.onFailure { addSystem(it.message.orEmpty()) }
@@ -1195,19 +1241,22 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     suspend fun recoverBridge(): String {
         status = if (currentState?.streaming == true) "Working" else "RECONNECTING"
         val attached = bridge.attachToRunningBridge().getOrNull()
-        if (attached != null) {
+        val runningCwd = bridge.health().getOrNull()?.cwd
+            ?.takeIf { it.isNotBlank() }
+            ?: runtimeCwd
+        if (attached != null && reconnectDecisionForRuntime(runningCwd) == ReconnectDecision.ATTACH) {
             syncAttachedRuntime()
             currentState = attached
             return "attached"
         }
+        val knownRuntimeCwd = runningCwd.takeIf { it.isNotBlank() } ?: runtimeCwd
+        val preserveSession = if (knownRuntimeCwd.isBlank()) {
+            !cwdEdited
+        } else {
+            reconnectDecisionForRuntime(knownRuntimeCwd) == ReconnectDecision.ATTACH
+        }
         return runCatching {
-            bridge.installAndStartBridge().getOrThrow()
-            bridge.waitForBridge(30_000).getOrThrow()
-            val recoveredLaunch = bridge.recoveryLaunchCommand(
-                launchCommand.trim(),
-                currentState?.sessionFile
-            )
-            currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
+            currentState = restartPi(preserveSession)
             "restarted"
         }.getOrElse { "failed" }
     }
@@ -1384,10 +1433,6 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                                                     // otherwise a disconnect in this window could relaunch the
                                                     // session that Pi originally started with.
                                                     currentState = switchedState
-                                                    launchCommand = bridge.recoveryLaunchCommand(
-                                                        launchCommand,
-                                                        switchedState.sessionFile
-                                                    )
                                                     loadHistory()
                                                     refreshMeta()
                                                     status = "Ready"
@@ -1596,7 +1641,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     launchCommand = launchCommand,
                     connected = connected,
                     autoCompaction = currentState?.autoCompactionEnabled ?: true,
-                    onCwd = { cwd = it },
+                    onCwd = {
+                        cwd = it
+                        cwdEdited = true
+                    },
                     onLaunch = { launchCommand = it },
                     onConnect = connect,
                     onAutoCompaction = { enabled ->

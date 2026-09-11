@@ -7,6 +7,26 @@ import org.junit.Test
 
 class SessionLaunchPolicyTest {
     @Test
+    fun cwdMismatchRestartsButMatchingCwdCanAttach() {
+        assertEquals(ReconnectDecision.RESTART, reconnectDecision("/tmp/new-project", "/tmp/old-project"))
+        assertEquals(ReconnectDecision.ATTACH, reconnectDecision(" /tmp/project ", "/tmp/project"))
+    }
+
+    @Test
+    fun cwdChangeLaunchRemovesEveryExistingSessionSelector() {
+        val command = "pi --mode rpc --session /tmp/old.jsonl --resume old-id --continue -e ~/.pi/android/mobile.ts"
+        val fresh = launchPiWithoutSession(command)
+
+        assertFalse(fresh.contains("--session"))
+        assertFalse(fresh.contains("--resume"))
+        assertFalse(fresh.contains("--continue"))
+        assertFalse(fresh.contains("old.jsonl"))
+        assertFalse(fresh.contains("old-id"))
+        assertTrue(fresh.contains("--mode rpc"))
+        assertTrue(fresh.contains("-e ~/.pi/android/mobile.ts"))
+    }
+
+    @Test
     fun existingSessionArgumentsNeverReceiveAndroidDefaultModel() {
         val commands = listOf(
             "pi --mode rpc --session /tmp/old.jsonl",

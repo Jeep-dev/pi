@@ -8,6 +8,12 @@ private val existingSessionArgument = Regex(
 internal fun selectsExistingPiSession(command: String): Boolean =
     existingSessionArgument.containsMatchIn(command)
 
+internal enum class ReconnectDecision { ATTACH, RESTART }
+
+/** Decide whether an existing runtime can serve the configured working directory. */
+internal fun reconnectDecision(configuredCwd: String, runtimeCwd: String): ReconnectDecision =
+    if (configuredCwd.trim() == runtimeCwd.trim()) ReconnectDecision.ATTACH else ReconnectDecision.RESTART
+
 private fun splitLaunchArguments(command: String): List<String>? {
     val arguments = mutableListOf<String>()
     val current = StringBuilder()
@@ -44,16 +50,9 @@ private fun quoteLaunchArgument(value: String): String =
     if (value.isNotEmpty() && safeLaunchArgument.matches(value)) value
     else "'${value.replace("'", "'\\''")}'"
 
-/**
- * Pin a direct Pi launch command to the session that was active immediately
- * before disconnect. This deliberately removes stale startup selectors: after
- * /resume or an extension-driven switch, replaying the original --session was
- * the reason reconnect could open an unrelated conversation.
- */
-internal fun pinPiLaunchToSession(command: String, sessionFile: String): String {
-    if (sessionFile.isBlank()) return command
-    val arguments = splitLaunchArguments(command) ?: return command
-    if (arguments.isEmpty() || arguments.first().substringAfterLast('/') != "pi") return command
+private fun withoutPiSessionArguments(command: String): List<String>? {
+    val arguments = splitLaunchArguments(command) ?: return null
+    if (arguments.isEmpty() || arguments.first().substringAfterLast('/') != "pi") return null
 
     val retained = mutableListOf<String>()
     var index = 0
@@ -85,6 +84,24 @@ internal fun pinPiLaunchToSession(command: String, sessionFile: String): String 
             }
         }
     }
+    return retained
+}
+
+/** Remove session selectors so a new cwd always starts a new Pi session. */
+internal fun launchPiWithoutSession(command: String): String {
+    val retained = withoutPiSessionArguments(command) ?: return command
+    return retained.joinToString(" ", transform = ::quoteLaunchArgument)
+}
+
+/**
+ * Pin a direct Pi launch command to the session that was active immediately
+ * before disconnect. This deliberately removes stale startup selectors: after
+ * /resume or an extension-driven switch, replaying the original --session was
+ * the reason reconnect could open an unrelated conversation.
+ */
+internal fun pinPiLaunchToSession(command: String, sessionFile: String): String {
+    if (sessionFile.isBlank()) return command
+    val retained = (withoutPiSessionArguments(command) ?: return command).toMutableList()
     val optionTerminator = retained.indexOf("--")
     if (optionTerminator >= 0) retained.addAll(optionTerminator, listOf("--session", sessionFile))
     else retained += listOf("--session", sessionFile)
