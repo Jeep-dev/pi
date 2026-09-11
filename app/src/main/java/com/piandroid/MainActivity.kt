@@ -159,7 +159,8 @@ private data class ChatLine(
     val toolCallId: String = "",
     val contentIndex: Int = -1,
     val collapsed: Boolean = false,
-    val delivery: String = "normal"
+    val delivery: String = "normal",
+    val tokensBefore: Long = 0
 )
 private data class LocalCommand(val name: String, val description: String)
 
@@ -517,15 +518,16 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     role = message.role,
                     text = message.text,
                     toolCallId = message.toolCallId,
-                    collapsed = message.collapsed
+                    collapsed = message.collapsed,
+                    tokensBefore = message.tokensBefore
                 )
             )
         }
         pending.forEach { lines.add(it) }
     }
 
-    suspend fun loadHistory() {
-        bridge.history().onSuccess { restoreHistory(it) }
+    suspend fun loadHistory(preservePending: Boolean = false) {
+        bridge.history().onSuccess { restoreHistory(it, preservePending) }
     }
 
     suspend fun syncAttachedRuntime() {
@@ -665,9 +667,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
     }
 
-    fun toggleTool(index: Int) {
+    fun toggleLine(index: Int) {
         val line = lines.getOrNull(index) ?: return
-        if (line.role.startsWith("tool")) lines[index] = line.copy(collapsed = !line.collapsed)
+        if (line.role.startsWith("tool") || line.role == "compaction") {
+            lines[index] = line.copy(collapsed = !line.collapsed)
+        }
     }
 
     fun settleStreams() {
@@ -766,6 +770,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 AgentKeepAliveService.start(bridge.applicationContext())
             }
             "compaction_end" -> {
+                // Manual compaction reloads after its RPC response. Automatic
+                // compaction has no command callback, so refresh it here.
+                if (event.stopReason == "success" && event.subtype != "manual") {
+                    loadHistory(preservePending = true)
+                }
                 status = if (currentState?.streaming == true) "Working" else "Ready"
                 if (currentState?.streaming != true) AgentKeepAliveService.stop(bridge.applicationContext())
             }
@@ -1033,7 +1042,9 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.9
+                """Pi Android v5.16.10
+                |• /compact 完成后立即切换到实际压缩上下文，可展开查看完整摘要
+                |• 压缩后的旧原文仍安全保留在 append-only session 文件中，但不再错误显示为当前上下文
                 |• 掉线重连始终恢复断线前实际活跃的 session，不再回到启动时的旧会话
                 |• 顶部按原版 Pi 风格显示当前实际加载的 [Extensions] 列表
                 |• 合并流式滚动与工具更新，生成中使用稳定文本渲染，减少闪烁和掉帧
@@ -1089,7 +1100,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 status = "Compacting"
                 bridge.compact(args).fold(
                     onSuccess = {
-                        addSystem("上下文压缩完成")
+                        // get_entries is append-only; reload its compaction-aware
+                        // projection so summarized originals disappear at once.
+                        loadHistory(preservePending = true)
+                        addSystem("上下文压缩完成 · 点击 [compaction] 可查看摘要")
                         refreshMeta()
                         status = if (currentState?.streaming == true) "Working" else "Ready"
                     },
@@ -1419,7 +1433,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     onSettings = { panel = Panel.Settings },
                     onFollowChange = { followOutput = it },
                     onUserScrollActivity = { showScrollControls = true },
-                    onToggleTool = ::toggleTool
+                    onToggleLine = ::toggleLine
                 )
                 Panel.Models -> ModelsPanel(
                     models = models,
@@ -1692,7 +1706,7 @@ private fun ChatPanel(
     onSettings: () -> Unit,
     onFollowChange: (Boolean) -> Unit,
     onUserScrollActivity: () -> Unit,
-    onToggleTool: (Int) -> Unit
+    onToggleLine: (Int) -> Unit
 ) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
 
@@ -1867,6 +1881,46 @@ private fun ChatPanel(
                     lineHeight = 20.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 3.dp)
                 )
+                "compaction" -> Column(
+                    Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 9.dp)
+                ) {
+                    Text(
+                        "[compaction]",
+                        color = Blue,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        if (line.tokensBefore > 0) {
+                            "已从 ${java.text.NumberFormat.getIntegerInstance().format(line.tokensBefore)} tokens 压缩"
+                        } else {
+                            "上下文已压缩"
+                        },
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                    if (!line.collapsed) {
+                        PiMarkdown(
+                            fullText,
+                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                        )
+                    }
+                    TextButton(
+                        onClick = { onToggleLine(lineIndex) },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            if (line.collapsed) "展开摘要 ↓" else "收起摘要 ↑",
+                            color = Blue,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
                 "tool", "tool-draft" -> Column(
                     Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(horizontal = 6.dp, vertical = 10.dp)
                 ) {
@@ -1881,7 +1935,7 @@ private fun ChatPanel(
                     )
                     if (hasHiddenToolContent) {
                         TextButton(
-                            onClick = { onToggleTool(lineIndex) },
+                            onClick = { onToggleLine(lineIndex) },
                             modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                         ) {

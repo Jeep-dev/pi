@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-11.13";
+const bridgeVersion = "2026-09-11.14";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -356,7 +356,7 @@ function toolArgumentsText(name, args) {
 function historyFromEntries(data) {
   const entries = Array.isArray(data?.entries) ? data.entries : [];
   const byId = new Map(entries.filter(entry => entry?.id).map(entry => [String(entry.id), entry]));
-  const branch = [];
+  let branch = [];
   let id = data?.leafId == null ? null : String(data.leafId);
   const seen = new Set();
   while (id && !seen.has(id)) {
@@ -368,11 +368,35 @@ function historyFromEntries(data) {
   }
   branch.reverse();
 
+  // get_entries intentionally returns the append-only session, including
+  // messages that a compaction has replaced in the model context. Project the
+  // active path the same way Pi's buildContextEntries() does: the newest
+  // compaction summary, its retained tail, and entries created afterwards.
+  const compactionIndex = branch.findLastIndex(entry => entry?.type === "compaction");
+  if (compactionIndex >= 0) {
+    const compaction = branch[compactionIndex];
+    let retained = [];
+    if (Array.isArray(compaction.retainedTail)) {
+      retained = compaction.retainedTail.map((message, index) => ({
+        type: "message",
+        id: `${String(compaction.id || "compaction")}:retained:${index}`,
+        message,
+      }));
+    } else {
+      const firstKeptId = String(compaction.firstKeptEntryId || "");
+      const firstKeptIndex = firstKeptId
+        ? branch.findIndex((entry, index) => index < compactionIndex && String(entry?.id || "") === firstKeptId)
+        : -1;
+      if (firstKeptIndex >= 0) retained = branch.slice(firstKeptIndex, compactionIndex);
+    }
+    branch = [compaction, ...retained, ...branch.slice(compactionIndex + 1)];
+  }
+
   const history = [];
   const toolLines = new Map();
-  const add = (role, text, toolCallId = "", collapsed = false) => {
+  const add = (role, text, toolCallId = "", collapsed = false, extra = {}) => {
     if (!String(text || "").trim()) return;
-    history.push({ role, text: String(text), toolCallId, collapsed });
+    history.push({ role, text: String(text), toolCallId, collapsed, ...extra });
   };
 
   for (const entry of branch) {
@@ -413,8 +437,13 @@ function historyFromEntries(data) {
         add("tool", `执行 Bash：${String(message.command || "")}${output ? `\n\n${output}` : ""}`, String(message.toolCallId || entry.id || ""), true);
       }
     } else if (entry?.type === "compaction") {
-      const tokens = Number(entry.tokensBefore || 0);
-      add("system", `上下文压缩点${tokens > 0 ? ` · ${Math.round(tokens / 1000)}k tokens` : ""}`);
+      add(
+        "compaction",
+        String(entry.summary || "摘要不可用"),
+        "",
+        true,
+        { tokensBefore: Number(entry.tokensBefore || 0) },
+      );
     } else if (entry?.type === "branch_summary") {
       add("system", `分支摘要：${String(entry.summary || "")}`);
     } else if (entry?.type === "custom_message" && !String(entry.customType || "").startsWith("__android_")) {

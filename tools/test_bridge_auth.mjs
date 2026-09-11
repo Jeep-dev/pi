@@ -45,12 +45,16 @@ process.stdin.on("data", chunk => {
       data = { sessionId: "test", sessionFile: activeSessionFile, isStreaming: false, isCompacting: false, messageCount: 4 };
     } else if (command.type === "get_entries") {
       data = {
-        leafId: "final",
+        leafId: "post-final",
         entries: [
-          { type: "message", id: "user", parentId: null, message: { role: "user", content: [{ type: "text", text: "run checks" }] } },
+          { type: "message", id: "summarized-old", parentId: null, message: { role: "user", content: [{ type: "text", text: "obsolete original history" }] } },
+          { type: "message", id: "user", parentId: "summarized-old", message: { role: "user", content: [{ type: "text", text: "run checks" }] } },
           { type: "message", id: "call", parentId: "user", message: { role: "assistant", content: [{ type: "thinking", thinking: "Checking" }, { type: "toolCall", id: "tool-1", name: "bash", arguments: { command: "npm test" } }], stopReason: "toolUse" } },
           { type: "message", id: "result", parentId: "call", message: { role: "toolResult", toolCallId: "tool-1", toolName: "bash", content: [{ type: "text", text: "all tests passed" }], isError: false } },
-          { type: "message", id: "final", parentId: "result", message: { role: "assistant", content: [{ type: "text", text: "Done" }], stopReason: "stop" } },
+          { type: "message", id: "kept-final", parentId: "result", message: { role: "assistant", content: [{ type: "text", text: "Checks done" }], stopReason: "stop" } },
+          { type: "compaction", id: "compact", parentId: "kept-final", summary: "Actual compact summary", firstKeptEntryId: "user", tokensBefore: 136424 },
+          { type: "message", id: "post-user", parentId: "compact", message: { role: "user", content: [{ type: "text", text: "continue" }] } },
+          { type: "message", id: "post-final", parentId: "post-user", message: { role: "assistant", content: [{ type: "text", text: "Done" }], stopReason: "stop" } },
         ],
       };
     }
@@ -95,7 +99,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-11.13");
+  assert.equal(health.bridgeVersion, "2026-09-11.14");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
@@ -234,9 +238,18 @@ try {
   });
   assert.equal(snapshotResponse.status, 200);
   const snapshot = await snapshotResponse.json();
-  assert.deepEqual(snapshot.history.map(item => item.role), ["user", "thinking", "tool", "assistant"]);
+  assert.deepEqual(
+    snapshot.history.map(item => item.role),
+    ["compaction", "user", "thinking", "tool", "assistant", "user", "assistant"],
+    "history must match Pi's active compaction-aware context",
+  );
+  assert.equal(snapshot.history[0].text, "Actual compact summary", "the real compaction summary must be available to Android");
+  assert.equal(snapshot.history[0].tokensBefore, 136424);
+  assert.equal(snapshot.history[0].collapsed, true);
+  assert.ok(!snapshot.history.some(item => item.text.includes("obsolete original history")),
+    "summarized originals must not be rendered after compaction");
   assert.match(snapshot.history.find(item => item.role === "tool").text, /npm test[\s\S]*all tests passed/,
-    "completed tool calls and output must survive UI process restart");
+    "retained tool calls and output must survive UI process restart");
   assert.equal(snapshot.pendingUi[0]?.id, "tree-dialog", "an open /tree selector must survive UI process restart");
   assert.ok(
     snapshot.events.some(item => item.value?.widgetKey === "__android_loaded_extensions" && item.value?.widgetLines?.length === 2),

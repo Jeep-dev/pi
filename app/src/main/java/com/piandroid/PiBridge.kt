@@ -19,7 +19,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-11.13"
+    private val expectedBridgeVersion = "2026-09-11.14"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -500,6 +500,23 @@ class PiBridge(context: Context) {
                 PiEvent(
                     seq, type, "", status + if (output.isBlank()) "" else "\n\n$output",
                     toolCallId = value.optString("toolCallId")
+                )
+            }
+            "compaction_start", "compaction_end" -> {
+                val outcome = when {
+                    type == "compaction_start" -> ""
+                    value.optBoolean("aborted") -> "aborted"
+                    value.optJSONObject("result") != null -> "success"
+                    else -> "error"
+                }
+                PiEvent(
+                    seq = seq,
+                    type = type,
+                    subtype = value.optString("reason"),
+                    text = value.optString("errorMessage").ifBlank {
+                        if (type == "compaction_start") "正在压缩上下文" else "上下文压缩完成"
+                    },
+                    stopReason = outcome
                 )
             }
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
