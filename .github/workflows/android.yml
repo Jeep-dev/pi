@@ -34,11 +34,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Validate and test authenticated bridge
+      - name: Validate bridge, mobile extension, and UI guards
         run: |
+          npm install --global --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
           node --check app/src/main/assets/pi-android-bridge.mjs
           node tools/test_bridge_auth.mjs
           node tools/test_themes.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -52,8 +54,8 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
+        run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.16.7-apks
+          name: pi-android-v5.16.8-apks
           path: app/build/outputs/apk/**/*.apk

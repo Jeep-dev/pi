@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-10.11";
+const bridgeVersion = "2026-09-10.12";
 const bridgeCapabilities = ["file-reference-v1", "stream-upload-v1", "long-compact-v1", "durable-history-v1", "recovery-snapshot-v1"];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -620,6 +620,13 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+function dispatchLongCommand(message) {
+  if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
+  void rpc({ type: "prompt", message }, 24 * 60 * 60 * 1000).catch(error => {
+    addEvent({ type: "extension_error", error: `Command failed: ${String(error?.message || error)}` });
+  });
+}
+
 async function sessionStats() {
   const stats = await rpc({ type: "get_session_stats" });
   const messages = await rpc({ type: "get_messages" });
@@ -708,6 +715,14 @@ const server = http.createServer(async (req, res) => {
       await startPi(String(input.cwd || cwd), String(input.launchCommand || launchCommand));
       const state = await rpc({ type: "get_state" }, 60000);
       return send(res, 200, { ok: true, cwd, launchCommand, state: state.data || null });
+    }
+
+    if (req.method === "POST" && url.pathname === "/command") {
+      const input = JSON.parse(await readBody(req) || "{}");
+      const message = String(input.message || "").trim();
+      if (!message.startsWith("/")) throw new Error("slash command required");
+      dispatchLongCommand(message);
+      return send(res, 202, { ok: true });
     }
 
     if (req.method === "POST" && url.pathname === "/prompt") {

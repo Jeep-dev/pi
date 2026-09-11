@@ -74,11 +74,14 @@ writeFileSync(sessionFile, [
   },
 ].map(JSON.stringify).join("\n") + "\n");
 
-const child = spawn(process.env.PI_BIN || "pi", [
+const piArgs = [
   "--mode", "rpc",
   "--session", sessionFile,
   "-e", extension,
-], { stdio: ["pipe", "pipe", "inherit"] });
+];
+const child = process.env.PI_BIN
+  ? spawn(process.execPath, [process.env.PI_BIN, ...piArgs], { stdio: ["pipe", "pipe", "inherit"] })
+  : spawn("pi", piArgs, { stdio: ["pipe", "pipe", "inherit"] });
 
 let buffer = "";
 let editorText = "";
@@ -94,8 +97,9 @@ function handle(value) {
   if (value.type === "extension_ui_request" && value.method === "select" && value.title === "Session Tree") {
     treeWasComplete =
       value.options.some((option) => option.includes("root prompt")) &&
-      value.options.some((option) => option.includes("second prompt")) &&
+      value.options.some((option) => option.includes("second prompt") && option.includes("◆")) &&
       value.options.some((option) => option.includes("●")) &&
+      value.options.length === 2 &&
       !value.options.some((option) => option.includes("first answer")) &&
       !value.options.some((option) => option.includes("assistant: (tool call)")) &&
       !value.options.some((option) => option.includes("[bash]"));

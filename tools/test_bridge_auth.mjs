@@ -16,6 +16,7 @@ const fakePi = path.join(prefix, "bin", "pi");
 await writeFile(fakePi, `
 process.on("SIGTERM", () => setTimeout(() => process.exit(0), 150));
 let buffer = "";
+let pendingTreeCommand = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => {
   buffer += chunk;
@@ -25,6 +26,18 @@ process.stdin.on("data", chunk => {
     buffer = buffer.slice(newline + 1);
     if (!raw) continue;
     const command = JSON.parse(raw);
+    if (command.type === "extension_ui_response" && command.id === "async-tree-dialog") {
+      if (pendingTreeCommand) {
+        process.stdout.write(JSON.stringify({ id: pendingTreeCommand, type: "response", command: "prompt", success: true }) + "\\n");
+        pendingTreeCommand = "";
+      }
+      continue;
+    }
+    if (command.type === "prompt" && command.message === "/tree-pending") {
+      pendingTreeCommand = command.id;
+      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "async-tree-dialog", method: "select", title: "Session Tree", options: ["◆ latest"] }) + "\\n");
+      continue;
+    }
     let data = {};
     if (command.type === "get_state") {
       data = { sessionId: "test", isStreaming: false, isCompacting: false, messageCount: 4 };
@@ -77,7 +90,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-10.11");
+  assert.equal(health.bridgeVersion, "2026-09-10.12");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
@@ -130,6 +143,27 @@ try {
     assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
   }
   await new Promise(resolve => setTimeout(resolve, 250));
+
+  const commandStarted = Date.now();
+  const detachedCommand = await fetch(`http://127.0.0.1:${port}/command`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ message: "/tree-pending" }),
+  });
+  assert.equal(detachedCommand.status, 202);
+  assert.ok(Date.now() - commandStarted < 1000, "interactive slash commands must not wait for dialog completion");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const commandEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=0`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(response => response.json());
+  assert.ok(commandEvents.events.some(item => item.value?.id === "async-tree-dialog"), "async tree dialog was not forwarded");
+  const completeDetachedCommand = await fetch(`http://127.0.0.1:${port}/extension-ui`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ id: "async-tree-dialog", value: "◆ latest" }),
+  });
+  assert.equal(completeDetachedCommand.status, 200);
+
   const upload = await fetch(`http://127.0.0.1:${port}/upload?name=huge-reference.bin`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },

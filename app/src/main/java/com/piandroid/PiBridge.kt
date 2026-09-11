@@ -19,7 +19,7 @@ class PiBridge(context: Context) {
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = 17649
-    private val expectedBridgeVersion = "2026-09-10.11"
+    private val expectedBridgeVersion = "2026-09-10.12"
     private val requiredBridgeCapabilities = setOf("file-reference-v1", "durable-history-v1", "recovery-snapshot-v1")
     private val authToken: String by lazy(::loadOrCreateAuthToken)
     private var nextId = 3000
@@ -105,6 +105,11 @@ class PiBridge(context: Context) {
             launchCommand = root.optString("launchCommand"),
             stderr = root.optString("lastStderr")
         )
+    }
+
+    suspend fun command(message: String): Result<Unit> {
+        val body = JSONObject().put("message", message).toString()
+        return request("/command", body, 10_000).map { Unit }
     }
 
     suspend fun prompt(
@@ -226,7 +231,7 @@ class PiBridge(context: Context) {
     private fun runtimePreferences() = context.getSharedPreferences("pi_runtime", Context.MODE_PRIVATE)
 
     fun recoveryLaunchCommand(baseCommand: String): String {
-        if (Regex("(^|\\s)--session(?:=|\\s)").containsMatchIn(baseCommand)) return baseCommand
+        if (selectsExistingPiSession(baseCommand)) return baseCommand
         val sessionFile = runtimePreferences().getString("last_session_file", "").orEmpty()
         if (sessionFile.isBlank()) return baseCommand
         val quoted = "'${sessionFile.replace("'", "'\\''")}'"

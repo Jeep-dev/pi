@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -99,6 +100,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -625,7 +627,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             val header = line.text.substringBefore("\n\n工具输出：")
             lines[index] = line.copy(text = "$header\n\n工具输出：\n${text.trimEnd()}")
         } else {
-            lines.add(ChatLine("tool", text.trimEnd(), streaming = true, toolCallId = toolCallId))
+            lines.add(ChatLine("tool", text.trimEnd(), streaming = true, toolCallId = toolCallId, collapsed = true))
         }
     }
 
@@ -639,7 +641,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             val suffix = if (text.isBlank()) "" else "\n\n${text.trim()}"
             lines[index] = line.copy(text = header + suffix, streaming = false, collapsed = true)
         } else if (text.isNotBlank()) {
-            lines.add(ChatLine("tool", text.trim(), toolCallId = toolCallId))
+            lines.add(ChatLine("tool", text.trim(), toolCallId = toolCallId, collapsed = true))
         }
     }
 
@@ -650,9 +652,9 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
     }
 
-    fun toggleTool(toolCallId: String) {
-        val index = lines.indexOfLast { it.role.startsWith("tool") && it.toolCallId == toolCallId }
-        if (index >= 0) lines[index] = lines[index].copy(collapsed = !lines[index].collapsed)
+    fun toggleTool(index: Int) {
+        val line = lines.getOrNull(index) ?: return
+        if (line.role.startsWith("tool")) lines[index] = line.copy(collapsed = !line.collapsed)
     }
 
     fun settleStreams() {
@@ -809,9 +811,14 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     currentState = bridge.start(cwd.trim(), recoveredLaunch).getOrThrow()
                     val availableModels = bridge.models().getOrDefault(emptyList())
                     models = availableModels
-                    bridge.applyDefaultModel(availableModels).onSuccess { selected ->
-                        if (selected != null) bridge.state().onSuccess { state -> currentState = state }
-                    }.onFailure { addSystem(it.message.orEmpty()) }
+                    // Pi restores model + thinking level from an existing session.
+                    // Android's preference is only for a genuinely new session;
+                    // /new applies it for subsequent new conversations.
+                    if (shouldApplyAndroidDefaultModel(recoveredLaunch, currentState?.messageCount ?: 0)) {
+                        bridge.applyDefaultModel(availableModels).onSuccess { selected ->
+                            if (selected != null) bridge.state().onSuccess { state -> currentState = state }
+                        }.onFailure { addSystem(it.message.orEmpty()) }
+                    }
                 }
                 status = "Restoring session"
                 val snapshot = bridge.recoverySnapshot().getOrThrow()
@@ -852,7 +859,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
 
     fun sendExtensionCommand(text: String) {
         scope.launch {
-            bridge.prompt(text).onFailure { addSystem("命令失败：${it.message}") }
+            bridge.command(text).onFailure { addSystem("命令发送失败：${it.message}") }
         }
     }
 
@@ -1005,7 +1012,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.7
+                """Pi Android v5.16.8
+                |• 修复 /tree 对话框等待导致的 timeout，并自动定位最新当前消息
+                |• 恢复旧 session 时严格保留该会话的模型与 thinking level
+                |• 工具输出默认最多显示 10 个视觉行，只有手动展开才显示全文
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1625,7 +1635,7 @@ private fun ChatPanel(
     onSettings: () -> Unit,
     onFollowChange: (Boolean) -> Unit,
     onUserScrollActivity: () -> Unit,
-    onToggleTool: (String) -> Unit
+    onToggleTool: (Int) -> Unit
 ) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
 
@@ -1713,20 +1723,14 @@ private fun ChatPanel(
                 )
             }
         }
-        items(lines) { line ->
+        itemsIndexed(lines) { lineIndex, line ->
             val fullText = line.text.trimEnd()
-            val fullLines = fullText.lines()
             val isTool = line.role.startsWith("tool")
-            val hasHiddenToolLines = isTool && fullLines.size > 10
-            val visibleText = if (hasHiddenToolLines && line.collapsed) {
-                if (line.role == "tool-draft") {
-                    (fullLines.take(2) + "… ${fullLines.size - 9} 行生成中 …" + fullLines.takeLast(7)).joinToString("\n")
-                } else {
-                    fullLines.take(10).joinToString("\n")
-                }
-            } else {
-                fullText
-            }
+            // A single logical line (JSON/source maps, escaped output) may wrap into
+            // hundreds of visual lines. Clamp rendered lines as well as detecting
+            // long character-only output.
+            val hasHiddenToolContent = isTool && (fullText.lines().size > 10 || fullText.length > 240)
+            val visibleText = fullText
             SelectionContainer {
                 when (line.role) {
                 "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent" || line.delivery == "steering_failed") {
@@ -1782,11 +1786,13 @@ private fun ChatPanel(
                         color = TextMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        lineHeight = 18.sp
+                        lineHeight = 18.sp,
+                        maxLines = if (line.collapsed) 10 else Int.MAX_VALUE,
+                        overflow = if (line.collapsed) TextOverflow.Ellipsis else TextOverflow.Clip
                     )
-                    if (hasHiddenToolLines) {
+                    if (hasHiddenToolContent) {
                         TextButton(
-                            onClick = { onToggleTool(line.toolCallId) },
+                            onClick = { onToggleTool(lineIndex) },
                             modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                         ) {
@@ -2363,6 +2369,13 @@ private fun ExtensionDialog(
                 val searchable = option.lowercase()
                 tokens.all { it in searchable }
             }
+            val optionsState = rememberLazyListState()
+            LaunchedEffect(request.id, filter, visibleOptions.size) {
+                if (isSessionTree && filter.isBlank()) {
+                    val currentIndex = visibleOptions.indexOfFirst { "◆" in it }
+                    if (currentIndex >= 0) optionsState.scrollToItem(currentIndex)
+                }
+            }
             AlertDialog(
                 onDismissRequest = onDismiss,
                 title = { Text(request.title.ifBlank { "选择" }) },
@@ -2378,11 +2391,17 @@ private fun ExtensionDialog(
                                 textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                             )
                         }
-                        LazyColumn(Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)) {
+                        if (isSessionTree) {
+                            Text("◆ 当前消息 · ● 当前分支 · 共 ${visibleOptions.size} 条", color = TextMuted, fontSize = 10.sp)
+                        }
+                        LazyColumn(
+                            state = optionsState,
+                            modifier = Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)
+                        ) {
                             items(visibleOptions) { option ->
                                 Text(
                                     option,
-                                    color = if (isSessionTree && "●" in option) Accent else TextMain,
+                                    color = if (isSessionTree && ("◆" in option || "●" in option)) Accent else TextMain,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 12.sp,
                                     lineHeight = 17.sp,

@@ -145,12 +145,16 @@ export default function (pi: any) {
 
     const active = new Set<string>();
     let activeId: string | null = leafId ? String(leafId) : null;
+    let currentVisibleId = "";
     while (activeId) {
       active.add(activeId);
       const node = allById.get(activeId);
       if (node?.entry?.type === "custom" && node.entry.customType === "__android_tree_edit__" && node.entry.data?.targetId) {
-        active.add(String(node.entry.data.targetId));
+        const targetId = String(node.entry.data.targetId);
+        active.add(targetId);
+        if (!currentVisibleId && isConversationPrompt(allById.get(targetId)?.entry)) currentVisibleId = targetId;
       }
+      if (!currentVisibleId && isConversationPrompt(node?.entry)) currentVisibleId = activeId;
       activeId = node?.entry?.parentId == null ? null : String(node.entry.parentId);
     }
 
@@ -180,7 +184,7 @@ export default function (pi: any) {
     const render = (item: any, prefix: string, connector: string) => {
       const node = item.node;
       const id = String(node.entry.id);
-      const pathMark = active.has(id) ? "● " : "  ";
+      const pathMark = id === currentVisibleId ? "◆ " : active.has(id) ? "● " : "  ";
       const label = node.label ? `[${node.label}] ` : "";
       const line = `${prefix}${connector}${pathMark}${label}${entryText(node.entry)} · ${id.slice(0, 8)}`;
       points.push({ id, label: line, entry: node.entry, entryLabel: node.label });
