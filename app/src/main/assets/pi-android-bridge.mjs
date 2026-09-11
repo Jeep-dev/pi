@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-11.14";
+const bridgeVersion = "2026-09-11.15";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",

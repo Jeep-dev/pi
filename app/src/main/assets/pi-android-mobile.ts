@@ -17,8 +17,23 @@ export default function (pi: any) {
       .join("");
   }
 
+  function redactSecrets(value: string): string {
+    return value
+      .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/g, "[PRIVATE KEY REDACTED]")
+      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "github_pat_[REDACTED]")
+      .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "gh*_[REDACTED]")
+      .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "sk-[REDACTED]")
+      .replace(/\bAIza[0-9A-Za-z_-]{30,}\b/g, "AIza[REDACTED]")
+      .replace(/\bAKIA[0-9A-Z]{16}\b/g, "AKIA[REDACTED]")
+      .replace(/\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g, "xox*-[REDACTED]")
+      .replace(
+        /((?:authorization|api[_-]?key|access[_-]?token|token|secret|password)\s*[:=]\s*)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
+        "$1[REDACTED]",
+      );
+  }
+
   function preview(value: string, limit = 92): string {
-    const clean = value.replace(/\s+/g, " ").trim();
+    const clean = redactSecrets(value).replace(/\s+/g, " ").trim();
     return clean.length > limit ? clean.slice(0, limit) + "…" : clean || "(empty)";
   }
 
@@ -87,12 +102,31 @@ export default function (pi: any) {
   }
 
   function userPoints(ctx: any) {
-    return ctx.sessionManager.getEntries()
-      .filter(isConversationPrompt)
-      .map((entry: any, index: number) => ({
-        id: String(entry.id),
-        label: `${index + 1}. ${preview(textOf(entry.message.content), 72)} · ${String(entry.id).slice(0, 8)}`,
-      }));
+    const contextIds = new Set(
+      ctx.sessionManager.buildContextEntries().map((entry: any) => String(entry.id)),
+    );
+    const branchIds = new Set(
+      ctx.sessionManager.getBranch().map((entry: any) => String(entry.id)),
+    );
+    const entries = ctx.sessionManager.getEntries().filter(isConversationPrompt);
+
+    return entries
+      .map((entry: any, index: number) => {
+        const id = String(entry.id);
+        const scope = contextIds.has(id) ? "current" : branchIds.has(id) ? "compacted" : "branch";
+        const scopeLabel = scope === "current" ? "当前上下文" : scope === "compacted" ? "已压缩" : "其他分支";
+        return {
+          id,
+          text: textOf(entry.message.content),
+          scope,
+          scopeRank: scope === "current" ? 0 : scope === "compacted" ? 1 : 2,
+          order: index,
+          label: `[${scopeLabel}] ${index + 1}. ${preview(textOf(entry.message.content), 72)} · ${id.slice(0, 8)}`,
+        };
+      })
+      // Android's generic selector opens at the first row. Put the newest active
+      // prompts first instead of forcing users to scroll through archived history.
+      .sort((left: any, right: any) => left.scopeRank - right.scopeRank || right.order - left.order);
   }
 
   function entryText(entry: any): string {
@@ -324,9 +358,33 @@ export default function (pi: any) {
       const requested = String(args || "").trim();
       const target = requested
         ? points.find((point: any) => point.id === requested || point.id.startsWith(requested))
-        : await chooseUserPoint(ctx, "Fork from message");
+        : await chooseUserPoint(ctx, "从消息创建 Fork");
       if (!target) return;
-      const result = await ctx.fork(target.id, { position: "before" });
+
+      if (target.scope !== "current") {
+        const warning = target.scope === "compacted"
+          ? "这条消息已被当前 compaction 摘要替代，不在当前模型上下文中。"
+          : "这条消息属于当前 session 的其他分支，不在当前模型上下文中。";
+        const confirmed = await ctx.ui.confirm(
+          "确认历史 Fork",
+          `${warning}\n\n继续会创建独立 session，并恢复到该旧时间点；原 session 不会被修改。`,
+        );
+        if (!confirmed) return;
+      }
+
+      // A successful fork replaces the runtime and invalidates the old command
+      // context. Use withSession so Android is updated from the replacement
+      // session, and restore Pi's native behavior of putting the selected prompt
+      // into the editor for review/resubmission.
+      const selectedText = target.text;
+      const result = await ctx.fork(target.id, {
+        position: "before",
+        withSession: async (replacementCtx: any) => {
+          replacementCtx.ui.setEditorText(selectedText);
+          replacementCtx.ui.notify("ANDROID_SESSION_SWITCHED", "info");
+          replacementCtx.ui.notify("已创建独立 Fork；所选消息已放入输入框，确认或修改后再发送。", "info");
+        },
+      });
       if (result.cancelled) ctx.ui.notify("/fork 已取消", "warning");
     },
   });

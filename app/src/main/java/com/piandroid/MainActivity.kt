@@ -1042,7 +1042,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.10
+                """Pi Android v5.16.11
+                |• /fork 明确区分当前、已压缩及其他分支，并在历史 Fork 前确认
+                |• /fork 现在真实切换到独立 session，并将所选消息恢复到输入框
+                |• session 选择器自动遮蔽常见 API key、token 与私钥预览
                 |• /compact 完成后立即切换到实际压缩上下文，可展开查看完整摘要
                 |• 压缩后的旧原文仍安全保留在 append-only session 文件中，但不再错误显示为当前上下文
                 |• 掉线重连始终恢复断线前实际活跃的 session，不再回到启动时的旧会话

@@ -6,6 +6,7 @@ on:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
+      - "tools/test_mobile_fork.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
@@ -16,6 +17,7 @@ on:
       - "app/**"
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
+      - "tools/test_mobile_fork.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
@@ -41,6 +43,7 @@ jobs:
           node tools/test_bridge_auth.mjs
           node tools/test_themes.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_fork.mjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -57,5 +60,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.16.10-apks
+          name: pi-android-v5.16.11-apks
           path: app/build/outputs/apk/**/*.apk
