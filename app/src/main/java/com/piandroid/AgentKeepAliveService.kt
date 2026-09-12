@@ -50,6 +50,7 @@ class AgentKeepAliveService : Service() {
             .apply { acquire(MAX_WAKE_TIME_MS) }
         monitorJob = scope.launch {
             var failures = 0
+            var idlePolls = 0
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
@@ -66,17 +67,22 @@ class AgentKeepAliveService : Service() {
                     state?.streaming == true || state?.compacting == true
                 }
                 val running = probes.count { (_, result) -> result.first?.piRunning == true }
-                if (running > 0) {
+                if (working > 0) {
                     failures = 0
-                    updateNotification(
-                        when {
-                            working > 0 -> "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
-                            else -> "$running 个 Pi Session 在线，当前空闲"
-                        }
-                    )
+                    idlePolls = 0
+                    updateNotification("$working 个 Pi Agent 正在工作 · 共 $running 个在线")
                 } else {
+                    idlePolls++
+                    if (idlePolls >= 2) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                        return@launch
+                    }
                     failures++
-                    updateNotification("没有在线 Pi，等待 App 恢复 · $failures")
+                    updateNotification(
+                        if (running > 0) "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
+                        else "没有在线 Pi，等待 App 恢复 · $failures"
+                    )
                 }
                 delay(15_000)
             }

@@ -1031,7 +1031,7 @@ private fun PiScreen(
                     updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
                 } else {
                     status = "RECONNECTING"
-                    updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
+                    updateSessionRecord { it.copy(status = PiSessionStatus.ERROR, lastError = event.text) }
                 }
             }
             "compaction_start" -> {
