@@ -14,10 +14,11 @@ function palette(name) {
 const dark = palette("Dark");
 const light = palette("Light");
 const gray = palette("Gray");
-assert.equal(Object.keys(dark).length, 31);
-assert.equal(Object.keys(light).length, 31);
-assert.equal(Object.keys(gray).length, 31);
+assert.equal(Object.keys(dark).length, 39);
+assert.equal(Object.keys(light).length, 39);
+assert.equal(Object.keys(gray).length, 39);
 
+// Preserve every established dark color while allowing the native-Pi tool palette additions.
 const originalDark = {
   bg: "FF000000", headerBg: "FF05080A", panelBg: "FF0D1116", cardBg: "FF171B21",
   toolBg: "FF263229", userBg: "FF30313A", border: "FF284864", accent: "FF70E69A",
@@ -29,7 +30,25 @@ const originalDark = {
   markdownBorder: "FF77738E", markdownCodeBg: "FF171620", markdownStrong: "FFF0EEF7",
   markdownInlineCodeBg: "FF252432", markdownCodeText: "FFC9E6E2", markdownQuoteBg: "FF1C1B27",
 };
-assert.deepEqual(dark, originalDark, "the established dark palette must not change");
+for (const [key, value] of Object.entries(originalDark)) {
+  assert.equal(dark[key], value, `established dark color changed: ${key}`);
+}
+
+const nativeToolDark = {
+  toolPendingBg: "FF282832",
+  toolSuccessBg: "FF283228",
+  toolErrorBg: "FF3C2828",
+  toolTitle: "FFD4D4D4",
+  toolOutput: "FF808080",
+  toolMeta: "FF666666",
+  toolDiffAdded: "FFB5BD68",
+  toolDiffRemoved: "FFCC6666",
+};
+for (const [key, value] of Object.entries(nativeToolDark)) {
+  assert.equal(dark[key], value, `native Pi tool color mismatch: ${key}`);
+  assert.ok(key in light, `Light palette missing ${key}`);
+  assert.ok(key in gray, `Gray palette missing ${key}`);
+}
 
 function luminance(argb) {
   const rgb = argb.slice(-6).match(/../g).map(value => Number.parseInt(value, 16) / 255)
