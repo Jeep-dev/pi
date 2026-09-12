@@ -722,6 +722,8 @@ private fun PiScreen(
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
     var showScrollControls by remember { mutableStateOf(false) }
+    // Highest bridge event sequence already rendered by this PiScreen.
+    var lastAppliedEventSeq by remember { mutableLongStateOf(0L) }
     var steeringQueueSize by remember { mutableStateOf(0) }
     var followUpQueueSize by remember { mutableStateOf(0) }
 
@@ -1089,6 +1091,12 @@ private fun PiScreen(
     }
 
     suspend fun applyEvent(event: PiEvent, recovering: Boolean = false) {
+        // Recovery snapshots can overlap live event batches. Drop stale events so an old
+        // message_end can never be appended after a newer user request.
+        if (event.seq > 0L) {
+            if (event.seq <= lastAppliedEventSeq) return
+            lastAppliedEventSeq = event.seq
+        }
         when (event.type) {
             "agent_start" -> {
                 status = "Working"
@@ -1237,6 +1245,8 @@ private fun PiScreen(
 
     suspend fun applyRuntimeReady(ready: PiRuntimeReady) {
         val state = ready.state
+        // A restarted Bridge begins a new sequence epoch from zero.
+        if (ready.snapshot.latest < lastAppliedEventSeq) lastAppliedEventSeq = 0L
         applyRuntimeState(state, ready.runtimeCwd)
         status = "Restoring session"
         restoreHistory(ready.snapshot.history, preservePending = ready.reconnecting)
@@ -1280,6 +1290,7 @@ private fun PiScreen(
                 is PiRuntimeUpdate.Ready -> applyRuntimeReady(update.value)
                 is PiRuntimeUpdate.State -> applyRuntimeState(update.value)
                 is PiRuntimeUpdate.Snapshot -> {
+                    if (update.value.latest < lastAppliedEventSeq) lastAppliedEventSeq = 0L
                     restoreHistory(update.value.history, preservePending = true)
                     update.value.events.forEach { applyEvent(it, recovering = true) }
                     pendingUi = update.value.pendingUi.lastOrNull()
@@ -1481,7 +1492,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.15
+                """Pi Android v5.19.16
+                |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面
+                |• 自动跟随监听完整可见内容；工具参数、输出和状态增长也会持续贴底
                 |• 工具卡片改为接近原生 Pi 的中性终端布局，不再把整条命令染成绿色
                 |• 长命令和长输出默认同时折叠；单行超长命令也限制视觉行数
                 |• 工具执行时间移到底部，不再挤压命令正文宽度
@@ -1643,17 +1656,27 @@ private fun PiScreen(
 
     LaunchedEffect(chatListState) {
         snapshotFlow {
-            Triple(
-                lines.size,
-                lines.sumOf { if (it.streaming) it.text.length.toLong() else 0L },
-                followOutput
-            )
+            // Track every field that can change visible chat height. Tool cards grow via
+            // toolArgs/toolOutput/toolMeta even while line count and line.text stay fixed.
+            val visibleRevision = lines.fold(1L) { acc, line ->
+                var next = acc * 31L + line.role.hashCode()
+                next = next * 31L + line.text.hashCode()
+                next = next * 31L + line.toolArgs.hashCode()
+                next = next * 31L + line.toolOutput.hashCode()
+                next = next * 31L + line.toolMeta.hashCode()
+                next = next * 31L + line.delivery.hashCode()
+                next = next * 31L + if (line.collapsed) 1L else 0L
+                next = next * 31L + if (line.streaming) 1L else 0L
+                next = next * 31L + if (line.toolIsError) 1L else 0L
+                next
+            }
+            Triple(lines.size, visibleRevision, followOutput)
         }
             .distinctUntilChanged()
             .conflate()
             .collect { (lineCount, _, shouldFollow) ->
                 if (shouldFollow && lineCount > 0) {
-                    delay(32)
+                    delay(24)
                     if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom()
                 }
             }
