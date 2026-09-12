@@ -1043,8 +1043,14 @@ private fun PiScreen(
     fun finalizeAssistant(text: String, stopReason: String, errorMessage: String) {
         if (text.isNotBlank()) {
             val index = lines.indexOfLast { it.role == "assistant" && it.streaming }
-            if (index >= 0) lines[index] = lines[index].copy(text = text, streaming = false)
-            else if (lines.lastOrNull { it.role == "assistant" }?.text != text) lines.add(ChatLine("assistant", text))
+            if (index >= 0) {
+                lines[index] = lines[index].copy(text = text, streaming = false)
+            } else {
+                // A normal visible answer always creates a streaming assistant row from
+                // text_delta before message_end. A final-only message_end after history/
+                // recovery has no current owner and used to append stale old answers.
+                Log.w("PiChatEvents", "Dropping orphan assistant message_end")
+            }
         }
         assistantCompletionNotice(stopReason, text, errorMessage)?.let(::addSystem)
     }
