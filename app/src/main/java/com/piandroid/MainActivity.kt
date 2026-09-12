@@ -1336,7 +1336,7 @@ private fun PiScreen(
             }
             "/hotkeys" -> addSystem(
                 """移动端操作
-                |• 从屏幕左边缘右滑：打开 Pi Session 侧栏
+                |• 从屏幕中间区域右滑：打开 Pi Session 侧栏；左边缘保留返回手势
                 |• 输入 /：打开可搜索命令面板
                 |• 工作中仍可直接发送：按 Pi 规则作为 steering message 排队
                 |• 输入 /abort 才会中止当前 Agent
@@ -1347,10 +1347,10 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.17.1
-                |• 修复 Android 手势导航拦截左边缘 Session 侧栏
+                """Pi Android v5.17.2
+                |• Session 侧栏改为从中间区域右滑触发，保留左边缘返回手势
                 |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
-                |• 从左边缘右滑打开 Session 侧栏，切换不会停止后台任务
+                |• 从中间区域右滑打开 Session 侧栏，切换不会停止后台任务
                 |• Session 列表、cwd、端口和恢复文件持久保存
                 |• 恢复 edit 工具的原生 diff 数据，默认折叠且可展开全文
                 |• 重连快照按持久历史边界去重，并保留未完成输出、工具结果和 steering 队列
@@ -1752,7 +1752,8 @@ private fun PiScreen(
             .statusBarsPadding()
             .background(Bg)
             .pointerInput(Unit) {
-                val edgeSlop = with(density) { 32.dp.toPx() }
+                val edgeExclusion = with(density) { 72.dp.toPx() }
+                val contentTop = with(density) { 32.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
                 var accepted = false
                 var startProgress = 0f
@@ -1765,7 +1766,10 @@ private fun PiScreen(
                         // the composer/footer out of this gesture so text input and
                         // attachment scrolling retain their normal behavior.
                         val chatArea = size.height * 0.86f
-                        accepted = startProgress > 0.01f || start.y in (edgeSlop..chatArea)
+                        // Never claim the system/app back edge. The reserved
+                        // strip is deliberately wider than the device's gesture
+                        // navigation inset; Session drags start to its right.
+                        accepted = start.x > edgeExclusion && start.y in (contentTop..chatArea)
                         distance = 0f
                         velocityTracker = if (accepted) VelocityTracker() else null
                     },
