@@ -433,10 +433,11 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         sessionStore.save(updated, activeSessionId)
     }
 
-    fun selectSession(id: String) {
-        if (sessions.none { it.id == id }) return
-        activeSessionId = id
-        sessionStore.save(orderPiSessions(sessions), id)
+    fun selectSession(id: String): Boolean {
+        val selectedId = selectPiSessionId(sessions, id) ?: return false
+        activeSessionId = selectedId
+        sessionStore.save(orderPiSessions(sessions), selectedId)
+        return activeSessionId == selectedId
     }
 
     fun requestSessionManagement(record: PiSessionRecord) {
@@ -638,7 +639,7 @@ private fun PiScreen(
     hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
     onTheme: (PiThemeMode) -> Unit,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (String) -> Boolean,
     onNewSession: () -> Unit,
     onSessionUpdate: (String, (PiSessionRecord) -> PiSessionRecord) -> Unit,
     onManageSession: (PiSessionRecord) -> Unit
@@ -1426,7 +1427,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.4
+                """Pi Android v5.19.5
+                |• Session 条目先提交 activeSession，再关闭侧栏，修复点击无效
                 |• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史
                 |• 选择旧版历史后重启仍保持绑定，不迁移或删除旧文件
                 |• /resume 切换后同步 Activity runtime，恢复的历史不会被旧快照覆盖
@@ -2095,8 +2097,9 @@ private fun PiScreen(
                 .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
                 .zIndex(2f),
             onSelect = {
-                settleDrawer(0f)
-                onSelectSession(it)
+                // Commit the active Android Session first. A failed/unknown
+                // selection must not dismiss the drawer or hide the failure.
+                if (onSelectSession(it)) settleDrawer(0f)
             },
             onNew = {
                 settleDrawer(0f)

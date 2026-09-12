@@ -62,6 +62,16 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
+    fun selectingAnotherSessionCommitsTheRequestedActiveId() {
+        val records = listOf(
+            PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"),
+            PiSessionRecord("b", "B", "/tmp", "pi", 17651, "token-b")
+        )
+        assertEquals("b", selectPiSessionId(records, "b"))
+        assertEquals(null, selectPiSessionId(records, "missing"))
+    }
+
+    @Test
     fun deletingCurrentSessionChoosesOnlyARemainingSession() {
         val records = listOf(
             PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"),

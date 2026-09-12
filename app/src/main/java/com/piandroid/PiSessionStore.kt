@@ -65,6 +65,9 @@ internal fun togglePiSessionPinned(records: List<PiSessionRecord>, id: String): 
 internal fun removePiSession(records: List<PiSessionRecord>, id: String): List<PiSessionRecord> =
     records.filterNot { it.id == id }
 
+internal fun selectPiSessionId(records: List<PiSessionRecord>, requestedId: String): String? =
+    requestedId.takeIf { id -> records.any { it.id == id } }
+
 internal fun nextPiSessionIdAfterDelete(
     recordsAfterDelete: List<PiSessionRecord>,
     deletedId: String,
