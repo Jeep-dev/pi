@@ -76,6 +76,9 @@ internal class PiSessionStore(context: Context) {
             save(loaded, activeId()?.takeIf { id -> loaded.any { it.id == id } })
             return loaded
         }
+        // An explicit [] means the user deleted the last Session. Do not
+        // silently recreate it on the next Activity/process start.
+        if (preferences.contains(KEY_RECORDS)) return emptyList()
         val default = PiSessionRecord(
             id = DEFAULT_ID,
             name = "Pi",

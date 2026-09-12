@@ -329,7 +329,7 @@ internal class PiSessionRuntime(
 
     private suspend fun eventLoop() {
         var failures = 0
-        while (isActive && !isClosed() && isConnected()) {
+        while (currentCoroutineContext().isActive && !isClosed() && isConnected()) {
             val result = bridge.events(eventCursor)
             if (result.isSuccess) {
                 val batch = result.getOrThrow()

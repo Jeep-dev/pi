@@ -407,11 +407,11 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     var sessions by remember { mutableStateOf(initialSessions) }
     var activeSessionId by rememberSaveable {
         val saved = sessionStore.activeId()
-        mutableStateOf(saved?.takeIf { id -> initialSessions.any { it.id == id } } ?: initialSessions.first().id)
+        mutableStateOf(saved?.takeIf { id -> initialSessions.any { it.id == id } } ?: initialSessions.firstOrNull()?.id.orEmpty())
     }
     var createSessionOpen by remember { mutableStateOf(false) }
     var createSessionName by remember { mutableStateOf("") }
-    var createSessionCwd by remember { mutableStateOf(initialSessions.first().cwd) }
+    var createSessionCwd by remember { mutableStateOf(initialSessions.firstOrNull()?.cwd ?: PiSessionStore.DEFAULT_CWD) }
     var createSessionStartupArguments by remember { mutableStateOf("") }
     var managedSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     var renameSession by remember { mutableStateOf<PiSessionRecord?>(null) }
