@@ -18,7 +18,11 @@ internal fun toolResultText(
     return sections.joinToString("\n\n")
 }
 
-internal fun toolOutputPreview(output: String, maxLines: Int = 5, maxChars: Int = 1200): String {
+/**
+ * Tool output follows Pi's compact terminal convention: keep the tail because it
+ * usually contains the result/error, and let the UI reveal the full lossless text.
+ */
+internal fun toolOutputPreview(output: String, maxLines: Int = 5, maxChars: Int = 700): String {
     val clean = output.trimEnd()
     if (clean.isBlank()) return ""
     val lines = clean.lines()
@@ -27,13 +31,39 @@ internal fun toolOutputPreview(output: String, maxLines: Int = 5, maxChars: Int 
     return preview
 }
 
-internal fun toolHiddenHint(output: String, maxLines: Int = 5, maxChars: Int = 1200): String {
+internal fun toolHiddenHint(output: String, maxLines: Int = 5, maxChars: Int = 700): String {
     val clean = output.trimEnd()
     if (clean.isBlank()) return ""
     val lineCount = clean.lines().size
     return when {
-        lineCount > maxLines -> "… (${lineCount - maxLines} earlier lines)"
-        clean.length > maxChars -> "… (${clean.length - maxChars} earlier chars)"
+        lineCount > maxLines -> "… +${lineCount - maxLines} lines"
+        clean.length > maxChars -> "… +${clean.length - maxChars} chars"
+        else -> ""
+    }
+}
+
+/**
+ * Arguments are different from output: the useful part is normally the beginning
+ * (command/path/pattern), so collapsed cards keep the head rather than the tail.
+ * Compose also applies maxLines, which handles a single very long command that
+ * visually wraps on a narrow phone even when it contains no newline characters.
+ */
+internal fun toolArgsPreview(args: String, maxLines: Int = 2, maxChars: Int = 180): String {
+    val clean = args.trimEnd()
+    if (clean.isBlank()) return ""
+    val lines = clean.lines()
+    var preview = if (lines.size > maxLines) lines.take(maxLines).joinToString("\n") else clean
+    if (preview.length > maxChars) preview = preview.take(maxChars).trimEnd() + "…"
+    return preview
+}
+
+internal fun toolArgsHiddenHint(args: String, maxLines: Int = 2, maxChars: Int = 180): String {
+    val clean = args.trimEnd()
+    if (clean.isBlank()) return ""
+    val lineCount = clean.lines().size
+    return when {
+        lineCount > maxLines -> "… +${lineCount - maxLines} arg lines"
+        clean.length > maxChars -> "… +${clean.length - maxChars} arg chars"
         else -> ""
     }
 }
