@@ -2,6 +2,8 @@ package com.piandroid
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -76,5 +78,26 @@ class SessionLaunchPolicyTest {
     fun defaultModelIsRestrictedToFreshEmptySessions() {
         assertTrue(shouldApplyAndroidDefaultModel("pi --mode rpc", 0))
         assertFalse(shouldApplyAndroidDefaultModel("pi --mode rpc", 1))
+    }
+
+    @Test
+    fun startupArgumentsPreserveQuotesAndAppendToThePiCommand() {
+        val base = "pi --mode rpc -e ~/.pi/android/mobile.ts"
+        val args = "--no-tools --system-prompt \"You are a simple chat assistant.\""
+        assertEquals(
+            "pi --mode rpc -e ~/.pi/android/mobile.ts --no-tools --system-prompt 'You are a simple chat assistant.'",
+            appendPiStartupArguments(base, args)
+        )
+        assertEquals(base, appendPiStartupArguments(base, ""))
+        assertNull(startupArgumentsError(args))
+    }
+
+    @Test
+    fun startupArgumentsCannotReplaceAppOwnedSessionOrRpcOptions() {
+        listOf("--mode json", "--session /tmp/other.jsonl", "--no-session", "--api-key secret").forEach {
+            assertNotNull(startupArgumentsError(it))
+        }
+        assertNull(startupArgumentsError("--system-prompt \"--session is text\" --no-tools"))
+        assertNotNull(startupArgumentsError("--system-prompt \"unterminated"))
     }
 }

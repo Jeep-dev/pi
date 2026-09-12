@@ -19,6 +19,7 @@ internal data class PiSessionRecord(
     val launchCommand: String,
     val port: Int,
     val token: String,
+    val startupArguments: String = "",
     val sessionFile: String = "",
     val piSessionId: String = "",
     val status: PiSessionStatus = PiSessionStatus.NOT_STARTED,
@@ -66,6 +67,7 @@ internal class PiSessionStore(context: Context) {
                             launchCommand = item.optString("launchCommand").ifBlank { defaultLaunchCommand(id) },
                             port = port,
                             token = token,
+                            startupArguments = item.optString("startupArguments").trim(),
                             sessionFile = item.optString("sessionFile"),
                             piSessionId = item.optString("piSessionId"),
                             // Process handles are intentionally not persisted. A new App
@@ -94,6 +96,7 @@ internal class PiSessionStore(context: Context) {
                     .put("launchCommand", record.launchCommand)
                     .put("port", record.port)
                     .put("token", record.token)
+                    .put("startupArguments", record.startupArguments)
                     .put("sessionFile", record.sessionFile)
                     .put("piSessionId", record.piSessionId)
                     .put("status", record.status.name)
@@ -107,7 +110,13 @@ internal class PiSessionStore(context: Context) {
             .commit()
     }
 
-    fun create(name: String, cwd: String, launchCommand: String, records: List<PiSessionRecord>): PiSessionRecord {
+    fun create(
+        name: String,
+        cwd: String,
+        launchCommand: String,
+        records: List<PiSessionRecord>,
+        startupArguments: String = ""
+    ): PiSessionRecord {
         val id = UUID.randomUUID().toString()
         val usedPorts = records.map { it.port }.toSet()
         var port = NEW_SESSION_PORT
@@ -125,7 +134,8 @@ internal class PiSessionStore(context: Context) {
                 }
             },
             port = port,
-            token = PiBridge.endpointToken(context = appContext, key = id)
+            token = PiBridge.endpointToken(context = appContext, key = id),
+            startupArguments = startupArguments.trim()
         )
     }
 

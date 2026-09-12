@@ -24,7 +24,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -95,6 +96,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
@@ -125,6 +128,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.io.File
 
@@ -394,6 +398,7 @@ private fun PiTouchApp(baseBridge: PiBridge) {
     var createSessionOpen by remember { mutableStateOf(false) }
     var createSessionName by remember { mutableStateOf("") }
     var createSessionCwd by remember { mutableStateOf(initialSessions.first().cwd) }
+    var createSessionStartupArguments by remember { mutableStateOf("") }
     val latestSessions by rememberUpdatedState(sessions)
     val latestActiveId by rememberUpdatedState(activeSessionId)
 
@@ -414,7 +419,8 @@ private fun PiTouchApp(baseBridge: PiBridge) {
             name = createSessionName,
             cwd = createSessionCwd,
             launchCommand = sessions.firstOrNull { it.id == activeSessionId }?.launchCommand.orEmpty(),
-            records = sessions
+            records = sessions,
+            startupArguments = createSessionStartupArguments
         )
         val updated = sessions + record
         sessions = updated
@@ -446,13 +452,6 @@ private fun PiTouchApp(baseBridge: PiBridge) {
     }
 
     val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.first()
-    val activeBridge = remember(activeSession.id, activeSession.port, activeSession.token) {
-        if (activeSession.id == PiSessionStore.DEFAULT_ID && activeSession.port == PiSessionStore.DEFAULT_PORT) {
-            baseBridge
-        } else {
-            PiBridge(context, activeSession.port, activeSession.token, activeSession.id)
-        }
-    }
 
     var themeKey by rememberSaveable {
         mutableStateOf(context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE).getString("theme", "dark") ?: "dark")
@@ -489,33 +488,51 @@ private fun PiTouchApp(baseBridge: PiBridge) {
     CompositionLocalProvider(LocalPiColors provides colors) {
         MaterialTheme(colorScheme = scheme) {
             Surface(Modifier.fillMaxSize(), color = colors.bg) {
-                key(activeSession.id) {
-                    PiScreen(
-                        bridge = activeBridge,
-                        session = activeSession,
-                        sessions = sessions,
-                        themeMode = themeMode,
-                        onTheme = { selected ->
-                            themeKey = selected.storageKey
-                            context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
-                                .edit().putString("theme", selected.storageKey).apply()
-                        },
-                        onSelectSession = ::selectSession,
-                        onNewSession = {
-                            createSessionName = ""
-                            createSessionCwd = activeSession.cwd
-                            createSessionOpen = true
-                        },
-                        onSessionUpdate = ::updateSession
-                    )
+                // Keep every Session screen composed. Its per-session RPC event
+                // loop then remains alive while another tab is visible; switching
+                // changes only which sized screen is on top and never disposes the
+                // outgoing Pi/Bridge client state.
+                sessions.forEach { record ->
+                    key(record.id) {
+                        val recordBridge = remember(record.id, record.port, record.token) {
+                            if (record.id == PiSessionStore.DEFAULT_ID && record.port == PiSessionStore.DEFAULT_PORT) {
+                                baseBridge
+                            } else {
+                                PiBridge(context, record.port, record.token, record.id)
+                            }
+                        }
+                        PiScreen(
+                            bridge = recordBridge,
+                            session = record,
+                            sessions = sessions,
+                            autoStart = record.id == activeSession.id,
+                            hostModifier = if (record.id == activeSession.id) Modifier.fillMaxSize() else Modifier.size(0.dp),
+                            themeMode = themeMode,
+                            onTheme = { selected ->
+                                themeKey = selected.storageKey
+                                context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                                    .edit().putString("theme", selected.storageKey).apply()
+                            },
+                            onSelectSession = ::selectSession,
+                            onNewSession = {
+                                createSessionName = ""
+                                createSessionCwd = activeSession.cwd
+                                createSessionStartupArguments = ""
+                                createSessionOpen = true
+                            },
+                            onSessionUpdate = ::updateSession
+                        )
+                    }
                 }
             }
             if (createSessionOpen) {
                 SessionCreateDialog(
                     name = createSessionName,
                     cwd = createSessionCwd,
+                    startupArguments = createSessionStartupArguments,
                     onName = { createSessionName = it },
                     onCwd = { createSessionCwd = it },
+                    onStartupArguments = { createSessionStartupArguments = it },
                     onCreate = ::createSession,
                     onDismiss = { createSessionOpen = false }
                 )
@@ -529,6 +546,8 @@ private fun PiScreen(
     bridge: PiBridge,
     session: PiSessionRecord,
     sessions: List<PiSessionRecord>,
+    autoStart: Boolean,
+    hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
     onTheme: (PiThemeMode) -> Unit,
     onSelectSession: (String) -> Unit,
@@ -751,13 +770,15 @@ private fun PiScreen(
         status = "Waiting for bridge"
         bridge.waitForBridge(30_000).getOrThrow()
         status = "Starting Pi"
-        // Keep the editable launchCommand as the user's base command; session
-        // recovery is generated only for this one start operation.
+        // Keep launchCommand as the App's base command. Per-Session startup
+        // arguments are parsed and appended before recovery adds the session
+        // selector, so they cannot replace App-owned RPC/session options.
+        val configuredLaunch = appendPiStartupArguments(launchCommand.trim(), session.startupArguments)
         val launch = if (preserveSession) {
             val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
-            bridge.recoveryLaunchCommand(launchCommand.trim(), knownSessionFile)
+            bridge.recoveryLaunchCommand(configuredLaunch, knownSessionFile)
         } else {
-            bridge.freshLaunchCommand(launchCommand.trim())
+            bridge.freshLaunchCommand(configuredLaunch)
         }
         val started = bridge.start(cwd.trim(), launch).getOrThrow()
         applyRuntimeHealth(bridge.health().getOrThrow())
@@ -1116,11 +1137,11 @@ private fun PiScreen(
                         syncAttachedRuntime()
                         currentState = attached
                         status = "Ready"
-                    } else {
+                    } else if (autoStart) {
                         currentState = restartPi(preserveSession = false)
                         restarted = true
                     }
-                } else {
+                } else if (autoStart) {
                     val knownRuntimeCwd = bridge.health().getOrNull()?.cwd
                         ?.takeIf { it.isNotBlank() }
                         ?: runtimeCwd
@@ -1132,6 +1153,10 @@ private fun PiScreen(
                     currentState = restartPi(preserveSession)
                     restarted = true
                     preservedSessionOnRestart = preserveSession
+                } else {
+                    status = "Disconnected"
+                    updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
+                    return@launch
                 }
                 if (restarted) {
                     val availableModels = bridge.models().getOrDefault(emptyList())
@@ -1139,11 +1164,12 @@ private fun PiScreen(
                     // Pi restores model + thinking level from an existing session.
                     // Android's preference is only for a genuinely new session;
                     // /new applies it for subsequent new conversations.
+                    val configuredLaunch = appendPiStartupArguments(launchCommand.trim(), session.startupArguments)
                     val launch = if (preservedSessionOnRestart) {
                         val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
-                        bridge.recoveryLaunchCommand(launchCommand.trim(), knownSessionFile)
+                        bridge.recoveryLaunchCommand(configuredLaunch, knownSessionFile)
                     } else {
-                        bridge.freshLaunchCommand(launchCommand.trim())
+                        bridge.freshLaunchCommand(configuredLaunch)
                     }
                     if (shouldApplyAndroidDefaultModel(launch, currentState?.messageCount ?: 0)) {
                         bridge.applyDefaultModel(availableModels).onSuccess { selected ->
@@ -1186,8 +1212,8 @@ private fun PiScreen(
         }
     }
 
-    LaunchedEffect(bridge) {
-        connect()
+    LaunchedEffect(bridge, autoStart) {
+        if (!connected) connect()
     }
 
     fun sendExtensionCommand(text: String) {
@@ -1346,7 +1372,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.17.2
+                """Pi Android v5.18.0
+                |• 新建 Session 支持独立启动参数，并在恢复时保留参数
                 |• Session 侧栏改为从中间区域右滑触发，保留左边缘返回手势
                 |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
                 |• 从中间区域右滑打开 Session 侧栏，切换不会停止后台任务
@@ -1746,60 +1773,68 @@ private fun PiScreen(
     }
 
     BoxWithConstraints(
-        Modifier
+        hostModifier
             .fillMaxSize()
             .statusBarsPadding()
             .background(Bg)
             .pointerInput(Unit) {
                 val edgeExclusion = with(density) { 72.dp.toPx() }
                 val contentTop = with(density) { 32.dp.toPx() }
+                val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
-                var accepted = false
-                var startProgress = 0f
-                var distance = 0f
-                var velocityTracker: VelocityTracker? = null
-                detectHorizontalDragGestures(
-                    onDragStart = { start ->
-                        startProgress = currentDrawerProgress.value
-                        // Horizontal drags may begin anywhere in the chat area. Keep
-                        // the composer/footer out of this gesture so text input and
-                        // attachment scrolling retain their normal behavior.
-                        val chatArea = size.height * 0.86f
-                        // Never claim the system/app back edge. The reserved
-                        // strip is deliberately wider than the device's gesture
-                        // navigation inset; Session drags start to its right.
-                        accepted = start.x > edgeExclusion && start.y in (contentTop..chatArea)
-                        distance = 0f
-                        velocityTracker = if (accepted) VelocityTracker() else null
-                    },
-                    onHorizontalDrag = { change, amount ->
-                        if (accepted) {
-                            change.consume()
-                            velocityTracker?.addPosition(change.uptimeMillis, change.position)
-                            distance += amount
-                            drawerProgress = (startProgress + distance / drawerWidthPx).coerceIn(0f, 1f)
-                        }
-                    },
-                    onDragEnd = {
-                        if (accepted) {
-                            val velocityX = velocityTracker?.calculateVelocity()?.x ?: 0f
-                            val target = when {
-                                velocityX > 900f -> 1f
-                                velocityX < -900f -> 0f
-                                drawerProgress >= 0.35f -> 1f
-                                else -> 0f
-                            }
-                            settleDrawer(target)
-                        }
-                        velocityTracker = null
-                        accepted = false
-                    },
-                    onDragCancel = {
-                        if (accepted) settleDrawer(if (drawerProgress >= 0.5f) 1f else 0f)
-                        velocityTracker = null
-                        accepted = false
+                awaitEachGesture {
+                    val down = awaitFirstDown(
+                        requireUnconsumed = false,
+                        pass = PointerEventPass.Initial
+                    )
+                    val startProgress = currentDrawerProgress.value
+                    val chatArea = size.height * 0.86f
+                    val inSessionGestureZone =
+                        startProgress <= 0.01f &&
+                            down.position.x > edgeExclusion &&
+                            down.position.y in (contentTop..chatArea) ||
+                            startProgress > 0.01f && down.position.x > edgeExclusion
+                    val velocityTracker = VelocityTracker().also {
+                        it.addPosition(down.uptimeMillis, down.position)
                     }
-                )
+                    var dragging = false
+                    if (drawerWidthPx <= 0f) return@awaitEachGesture
+
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        velocityTracker.addPosition(change.uptimeMillis, change.position)
+                        val dx = change.position.x - down.position.x
+                        val dy = change.position.y - down.position.y
+                        if (!dragging) {
+                            // Let LazyColumn and the editor handle vertical movement.
+                            if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) {
+                                return@awaitEachGesture
+                            }
+                            if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f) {
+                                if (!inSessionGestureZone) return@awaitEachGesture
+                                dragging = true
+                            }
+                        }
+                        if (dragging) {
+                            change.consume()
+                            drawerProgress = (startProgress + dx / drawerWidthPx).coerceIn(0f, 1f)
+                        }
+                        if (!change.pressed) {
+                            if (dragging) {
+                                val velocityX = velocityTracker.calculateVelocity().x
+                                val target = when {
+                                    velocityX > 900f -> 1f
+                                    velocityX < -900f -> 0f
+                                    drawerProgress >= 0.35f -> 1f
+                                    else -> 0f
+                                }
+                                settleDrawer(target)
+                            }
+                            break
+                        }
+                    }
+                }
             }
     ) {
         val drawerWidth = maxWidth * 0.86f
@@ -2127,7 +2162,7 @@ private fun SessionDrawer(
             }
         }
         Text(
-            "从左边缘右滑关闭",
+            "中间区域右滑打开 · 左边缘保留返回",
             color = TextMuted,
             fontFamily = FontFamily.Monospace,
             fontSize = 10.sp,
@@ -2216,8 +2251,10 @@ private fun SessionDrawer(
 private fun SessionCreateDialog(
     name: String,
     cwd: String,
+    startupArguments: String,
     onName: (String) -> Unit,
     onCwd: (String) -> Unit,
+    onStartupArguments: (String) -> Unit,
     onCreate: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2237,15 +2274,33 @@ private fun SessionCreateDialog(
                 OutlinedTextField(
                     value = cwd,
                     onValueChange = onCwd,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     label = { Text("工作目录 cwd") },
                     singleLine = true,
                     textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                 )
+                OutlinedTextField(
+                    value = startupArguments,
+                    onValueChange = onStartupArguments,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("启动参数（可选）") },
+                    placeholder = { Text("例如：--no-tools") },
+                    singleLine = false,
+                    minLines = 1,
+                    maxLines = 3,
+                    isError = startupArgumentsError(startupArguments) != null,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                )
+                startupArgumentsError(startupArguments)?.let {
+                    Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onCreate, enabled = cwd.trim().isNotBlank()) { Text("创建") }
+            TextButton(
+                onClick = onCreate,
+                enabled = cwd.trim().isNotBlank() && startupArgumentsError(startupArguments) == null
+            ) { Text("创建") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )

@@ -6,7 +6,8 @@
 
 - Pi RPC 聊天和流式事件
 - 多个独立 Pi Session 并行运行，支持后台工作
-- 从左边缘右滑打开 Session 侧栏；每个 Session 独立保存 cwd 和恢复信息
+- 每个 Session 可保存独立 Pi 启动参数，恢复时继续使用
+- 从中间区域右滑打开 Session 侧栏；每个 Session 独立保存 cwd 和恢复信息
 - 输入 `/` 调出命令菜单
 - 浏览 Termux 项目文件
 - 查看和编辑文件并保存

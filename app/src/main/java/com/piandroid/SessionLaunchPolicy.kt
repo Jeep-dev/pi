@@ -14,7 +14,7 @@ internal enum class ReconnectDecision { ATTACH, RESTART }
 internal fun reconnectDecision(configuredCwd: String, runtimeCwd: String): ReconnectDecision =
     if (configuredCwd.trim() == runtimeCwd.trim()) ReconnectDecision.ATTACH else ReconnectDecision.RESTART
 
-private fun splitLaunchArguments(command: String): List<String>? {
+internal fun parseShellArguments(command: String): List<String>? {
     val arguments = mutableListOf<String>()
     val current = StringBuilder()
     var quote: Char? = null
@@ -45,13 +45,50 @@ private fun splitLaunchArguments(command: String): List<String>? {
 }
 
 private val safeLaunchArgument = Regex("[A-Za-z0-9_./~:@%+=,-]+")
+private val protectedStartupOptions = setOf(
+    "--mode", "-p", "--print",
+    "--session", "--session-id", "--continue", "-c", "--resume", "-r", "--fork",
+    "--session-dir", "--no-session", "--api-key"
+)
+private val startupOptionsWithValues = setOf(
+    "--system-prompt", "--append-system-prompt", "--provider", "--model", "--models",
+    "--thinking", "--name", "-n", "--api-key", "--session", "--session-id", "--fork",
+    "--session-dir", "--extension", "-e", "--skill", "--prompt-template", "--theme",
+    "--tools", "-t", "--exclude-tools", "-xt", "--tui-mode", "--use-theme"
+)
+
+/** Return a user-facing error when startup arguments would replace App-owned Pi options. */
+internal fun startupArgumentsError(startupArguments: String): String? {
+    val arguments = parseShellArguments(startupArguments) ?: return "启动参数的引号未闭合"
+    var index = 0
+    while (index < arguments.size) {
+        val argument = arguments[index]
+        val option = argument.substringBefore('=')
+        if (option in protectedStartupOptions) {
+            return "启动参数不能覆盖 App 管理的 $option 参数"
+        }
+        index += if (argument in startupOptionsWithValues && index + 1 < arguments.size) 2 else 1
+    }
+    return null
+}
+
+/** Append validated per-Session options without allowing them to replace App-owned options. */
+internal fun appendPiStartupArguments(baseCommand: String, startupArguments: String): String {
+    val base = baseCommand.trim()
+    if (base.isBlank()) throw IllegalArgumentException("Pi 启动命令不能为空")
+    if (startupArguments.isBlank()) return base
+    startupArgumentsError(startupArguments)?.let { throw IllegalArgumentException(it) }
+    val arguments = parseShellArguments(startupArguments).orEmpty()
+    if (arguments.isEmpty()) return base
+    return "$base ${arguments.joinToString(" ", transform = ::quoteLaunchArgument)}"
+}
 
 private fun quoteLaunchArgument(value: String): String =
     if (value.isNotEmpty() && safeLaunchArgument.matches(value)) value
     else "'${value.replace("'", "'\\''")}'"
 
 private fun withoutPiSessionArguments(command: String): List<String>? {
-    val arguments = splitLaunchArguments(command) ?: return null
+    val arguments = parseShellArguments(command) ?: return null
     if (arguments.isEmpty() || arguments.first().substringAfterLast('/') != "pi") return null
 
     val retained = mutableListOf<String>()
