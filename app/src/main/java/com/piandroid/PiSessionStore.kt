@@ -52,9 +52,11 @@ internal fun samePiConversationFile(left: String, right: String): Boolean =
     left.isNotBlank() && right.isNotBlank() && conversationFileKey(left) == conversationFileKey(right)
 
 /**
- * A Pi conversation file has exactly one Android owner. Legacy files remain in
- * place and discoverable, but an old contaminated registry cannot bind the
- * same JSONL file to several Android Sessions.
+ * A Pi conversation has exactly one Android owner. Old buggy builds could
+ * duplicate either the JSONL pointer or the Pi conversation id across several
+ * Android Sessions, including copies stored under different private paths.
+ * Keep the active owner when possible and reset only the contaminated bindings;
+ * no history file is moved or deleted.
  */
 internal fun isolatePiConversationOwnership(
     records: List<PiSessionRecord>,
@@ -76,13 +78,23 @@ internal fun isolatePiConversationOwnership(
             owners.firstOrNull { it.androidSessionId == preferredAndroidSessionId }?.androidSessionId
                 ?: owners.first().androidSessionId
         }
+    val winnerByConversationId = prepared
+        .filter { it.piConversationId.isNotBlank() }
+        .groupBy { it.piConversationId.trim() }
+        .mapValues { (_, owners) ->
+            owners.firstOrNull { it.androidSessionId == preferredAndroidSessionId }?.androidSessionId
+                ?: owners.first().androidSessionId
+        }
     return prepared.map { record ->
         val file = conversationFileKey(record.sessionFile)
+        val conversationId = record.piConversationId.trim()
         val privateForOwner = file.isBlank() || isPrivatePiSessionFile(record.androidSessionId, file)
         val pointsIntoAnotherPrivateNamespace = file.isNotBlank() && isAnyPrivatePiSessionFile(file) && !privateForOwner
         val untrustedLegacyPointer = file.isNotBlank() && !privateForOwner && !record.legacySessionFile
-        val duplicateOwner = file.isNotBlank() && winnerByFile[file] != record.androidSessionId
-        if (pointsIntoAnotherPrivateNamespace || untrustedLegacyPointer || duplicateOwner) {
+        val duplicateFileOwner = file.isNotBlank() && winnerByFile[file] != record.androidSessionId
+        val duplicateConversationOwner = conversationId.isNotBlank() &&
+            winnerByConversationId[conversationId] != record.androidSessionId
+        if (pointsIntoAnotherPrivateNamespace || untrustedLegacyPointer || duplicateFileOwner || duplicateConversationOwner) {
             record.copy(
                 sessionFile = "",
                 ownedSessionFile = "",
@@ -259,8 +271,8 @@ internal class PiSessionStore(context: Context) {
                             piConversationId = item.optString("piConversationId")
                                 .ifBlank { item.optString("piSessionId") }
                                 .trim().ifBlank {
-                                if (sessionFile.isBlank()) id else ""
-                            },
+                                    if (sessionFile.isBlank()) id else ""
+                                },
                             // Process handles are intentionally not persisted. A new App
                             // instance probes each endpoint and replaces this transient value.
                             status = PiSessionStatus.NOT_STARTED,
@@ -275,9 +287,9 @@ internal class PiSessionStore(context: Context) {
                     )
                 }
             }
-            // Preserve the active owner's selected legacy conversation when an
-            // old registry contains duplicate pointers. Other records are reset
-            // to their own private identity; no legacy file is moved or deleted.
+            // Preserve the active owner's selected conversation when an old
+            // registry contains duplicate file pointers or duplicate Pi ids.
+            // Other Android Sessions are reset to their own private identities.
             orderPiSessions(isolatePiConversationOwnership(loaded, activeId()))
         }.getOrDefault(emptyList())
     }
