@@ -72,4 +72,28 @@ class SessionRegistryPolicyTest {
         assertEquals("b", nextPiSessionIdAfterDelete(remaining, "b", "b"))
         assertEquals(null, nextPiSessionIdAfterDelete(emptyList(), "a", "a"))
     }
+
+    @Test
+    fun deletingLastSessionClearsActiveIdAndKeepsEmptyDrawerAvailable() {
+        val result = deletePiSessionState(
+            records = listOf(PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a")),
+            deletedId = "a",
+            activeId = "a"
+        )
+        assertTrue(result.remaining.isEmpty())
+        assertEquals(null, result.activeId)
+        assertTrue(result.keepDrawerOpen)
+
+        val withRemaining = deletePiSessionState(
+            records = listOf(
+                PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"),
+                PiSessionRecord("b", "B", "/tmp", "pi", 17651, "token-b")
+            ),
+            deletedId = "a",
+            activeId = "a"
+        )
+        assertEquals(listOf("b"), withRemaining.remaining.map { it.id })
+        assertEquals("b", withRemaining.activeId)
+        assertFalse(withRemaining.keepDrawerOpen)
+    }
 }

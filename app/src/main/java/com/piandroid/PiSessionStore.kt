@@ -63,6 +63,27 @@ internal fun nextPiSessionIdAfterDelete(
     activeId: String?
 ): String? = if (activeId == deletedId) recordsAfterDelete.firstOrNull()?.id else activeId
 
+internal data class PiSessionDeleteResult(
+    val remaining: List<PiSessionRecord>,
+    val activeId: String?,
+    val keepDrawerOpen: Boolean
+)
+
+internal fun deletePiSessionState(
+    records: List<PiSessionRecord>,
+    deletedId: String,
+    activeId: String?
+): PiSessionDeleteResult {
+    val remaining = orderPiSessions(removePiSession(records, deletedId))
+    return PiSessionDeleteResult(
+        remaining = remaining,
+        activeId = nextPiSessionIdAfterDelete(remaining, deletedId, activeId),
+        // The empty drawer is the only remaining way to reach the existing
+        // top “+” action after the last record has been removed.
+        keepDrawerOpen = remaining.isEmpty()
+    )
+}
+
 /** Small durable registry for Android's terminal-like Pi tabs. */
 internal class PiSessionStore(context: Context) {
     private val appContext = context.applicationContext
@@ -237,10 +258,9 @@ internal class PiSessionStore(context: Context) {
     }
 
     fun delete(records: List<PiSessionRecord>, id: String, activeId: String?): List<PiSessionRecord> {
-        val remaining = removePiSession(records, id)
-        val nextActive = nextPiSessionIdAfterDelete(remaining, id, activeId)
-        save(remaining, nextActive)
-        return remaining
+        val result = deletePiSessionState(records, id, activeId)
+        save(result.remaining, result.activeId)
+        return result.remaining
     }
 
     private fun nextAvailablePort(usedPorts: Set<Int>): Int {

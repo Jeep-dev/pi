@@ -413,6 +413,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     var createSessionName by remember { mutableStateOf("") }
     var createSessionCwd by remember { mutableStateOf(initialSessions.firstOrNull()?.cwd ?: PiSessionStore.DEFAULT_CWD) }
     var createSessionStartupArguments by remember { mutableStateOf("") }
+    var emptySessionDrawerOpen by remember { mutableStateOf(false) }
     var managedSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     var renameSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     var renameSessionText by remember { mutableStateOf("") }
@@ -438,17 +439,18 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     }
 
     fun confirmDeleteSession(record: PiSessionRecord) {
-        val remaining = orderPiSessions(removePiSession(sessions, record.id))
-        val nextActive = nextPiSessionIdAfterDelete(remaining, record.id, activeSessionId)
-        sessions = remaining
-        activeSessionId = nextActive.orEmpty()
-        sessionStore.save(remaining, nextActive)
+        val deletion = deletePiSessionState(sessions, record.id, activeSessionId)
+        sessions = deletion.remaining
+        activeSessionId = deletion.activeId.orEmpty()
+        emptySessionDrawerOpen = deletion.keepDrawerOpen
+        sessionStore.save(deletion.remaining, deletion.activeId)
         runtimeManager.remove(record)
         managedSession = null
         deleteSession = null
     }
 
     fun createSession() {
+        emptySessionDrawerOpen = false
         val record = sessionStore.create(
             name = createSessionName,
             cwd = createSessionCwd,
@@ -524,7 +526,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
             Surface(Modifier.fillMaxSize(), color = colors.bg) {
                 if (activeSession == null) {
                     EmptySessionHost(
+                        initiallyOpen = emptySessionDrawerOpen,
                         onNew = {
+                            emptySessionDrawerOpen = false
                             createSessionName = ""
                             createSessionCwd = PiSessionStore.DEFAULT_CWD
                             createSessionStartupArguments = ""
@@ -1411,7 +1415,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.0
+                """Pi Android v5.19.1
+                |• 删除最后一个 Session 后保留打开的侧栏，可直接新建第一个 Session
                 |• 新建 Session 支持独立启动参数，并在恢复时保留参数
                 |• Session 长按支持重命名、置顶和确认删除
                 |• Stop 会清空 Pi 队列并取消当前任务，阻止后续操作继续执行
@@ -2338,10 +2343,15 @@ private fun SessionDeleteDialog(
 }
 
 @Composable
-private fun EmptySessionHost(onNew: () -> Unit) {
+private fun EmptySessionHost(
+    initiallyOpen: Boolean = false,
+    onNew: () -> Unit
+) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    var drawerProgress by remember { mutableFloatStateOf(0f) }
+    var drawerProgress by remember(initiallyOpen) {
+        mutableFloatStateOf(if (initiallyOpen) 1f else 0f)
+    }
     val currentProgress = rememberUpdatedState(drawerProgress)
     fun settle(target: Float) {
         scope.launch {
