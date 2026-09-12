@@ -1,0 +1,77 @@
+name: One-shot gesture and default model fix
+on:
+  push:
+    branches: [fix/security-lifecycle-build]
+    paths:
+      - ".github/workflows/one-shot-gesture-model-default-fix.yml"
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+          fetch-depth: 0
+      - name: Patch gesture zone and fresh-session default model
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main = Path('app/src/main/java/com/piandroid/MainActivity.kt')
+          text = main.read_text()
+          old = 'val edgeExclusion = with(density) { 72.dp.toPx() }'
+          count = text.count(old)
+          if count != 2:
+              raise SystemExit(f'expected 2 edge exclusion sites, found {count}')
+          text = text.replace(old, 'val edgeExclusion = with(density) { 24.dp.toPx() }')
+          main.write_text(text)
+
+          runtime = Path('app/src/main/java/com/piandroid/PiSessionRuntime.kt')
+          text = runtime.read_text()
+          old_start = '        val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()\n'
+          new_start = '''        val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()
+        // The app-level default model is global for every newly created Android
+        // Session. Recovery keeps the model already stored in that Pi conversation.
+        val startedState = if (!preserveSession && bridge.defaultModelKey().isNotBlank()) {
+            val availableModels = bridge.models().getOrThrow()
+            bridge.applyDefaultModel(availableModels).getOrThrow()
+            bridge.state(timeoutMs = 8_000).getOrThrow()
+        } else {
+            started
+        }
+'''
+          if old_start not in text:
+              raise SystemExit('runtime start site not found')
+          text = text.replace(old_start, new_start, 1)
+          text = text.replace(
+              'check(runtimeConversationMatches(configuredRecord, started)) {',
+              'check(runtimeConversationMatches(configuredRecord, startedState)) {',
+              1,
+          )
+          text = text.replace(
+              '"actual=${started.piConversationId}/${started.sessionFile}"',
+              '"actual=${startedState.piConversationId}/${startedState.sessionFile}"',
+              1,
+          )
+          text = text.replace('            state = started,\n', '            state = startedState,\n', 1)
+          runtime.write_text(text)
+
+          gradle = Path('app/build.gradle.kts')
+          text = gradle.read_text()
+          if 'versionCode = 111' not in text or 'versionName = "5.19.12"' not in text:
+              raise SystemExit('unexpected current app version')
+          text = text.replace('versionCode = 111', 'versionCode = 112', 1)
+          text = text.replace('versionName = "5.19.12"', 'versionName = "5.19.13"', 1)
+          gradle.write_text(text)
+          PY
+      - name: Commit source fix
+        shell: bash
+        run: |
+          git config user.name "Jeep-dev"
+          git config user.email "213277512+Jeep-dev@users.noreply.github.com"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/PiSessionRuntime.kt app/build.gradle.kts
+          git commit -m "Fix session swipe edge and global default model"
+          git push origin HEAD:fix/security-lifecycle-build
