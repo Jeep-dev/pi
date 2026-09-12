@@ -820,7 +820,14 @@ async function stopCurrentAgent() {
       // Pi's abort response completes only after the active run reaches idle.
       rpc({ type: "abort" }, 60_000),
     ]);
-    if (abortResult.status === "rejected") throw abortResult.reason;
+    if (abortResult.status === "rejected") {
+      // If the runtime cannot acknowledge abort, terminate only this Pi child;
+      // leaving it alive would violate the no-actions-after-Stop contract.
+      if (child && child.exitCode == null) {
+        try { child.kill("SIGTERM"); } catch {}
+      }
+      throw abortResult.reason;
+    }
     return {
       cleared,
       aborted: true,
@@ -976,8 +983,12 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, ...result });
     }
     if (req.method === "POST" && url.pathname === "/clear-queue") return rpcResponse(res, { type: "clear_queue" }, 8_000);
-    if (req.method === "POST" && url.pathname === "/new-session") return rpcResponse(res, { type: "new_session" });
+    if (req.method === "POST" && url.pathname === "/new-session") {
+      if (stopFence) throw new Error("Stop in progress; new session rejected");
+      return rpcResponse(res, { type: "new_session" });
+    }
     if (req.method === "POST" && url.pathname === "/compact") {
+      if (stopFence) throw new Error("Stop in progress; compact rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       return rpcResponse(
         res,
@@ -985,7 +996,10 @@ const server = http.createServer(async (req, res) => {
         4 * 60 * 60 * 1000,
       );
     }
-    if (req.method === "POST" && url.pathname === "/clone") return rpcResponse(res, { type: "clone" });
+    if (req.method === "POST" && url.pathname === "/clone") {
+      if (stopFence) throw new Error("Stop in progress; clone rejected");
+      return rpcResponse(res, { type: "clone" });
+    }
 
     if (req.method === "GET" && url.pathname === "/state") return rpcResponse(res, { type: "get_state" });
     if (req.method === "GET" && url.pathname === "/stats") return send(res, 200, await sessionStats());
@@ -1019,6 +1033,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/switch-session") {
+      if (stopFence) throw new Error("Stop in progress; session switch rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       const target = path.resolve(String(input.path || ""));
       const dir = path.resolve(sessionDirForCwd(cwd));
@@ -1036,18 +1051,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/model") {
+      if (stopFence) throw new Error("Stop in progress; model change rejected");
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") });
     }
     if (req.method === "POST" && url.pathname === "/cycle-model") return rpcResponse(res, { type: "cycle_model" });
 
     if (req.method === "POST" && url.pathname === "/thinking") {
+      if (stopFence) throw new Error("Stop in progress; thinking change rejected");
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") });
     }
     if (req.method === "POST" && url.pathname === "/cycle-thinking") return rpcResponse(res, { type: "cycle_thinking_level" });
 
     if (req.method === "POST" && url.pathname === "/auto-compaction") {
+      if (stopFence) throw new Error("Stop in progress; compaction setting rejected");
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, { type: "set_auto_compaction", enabled: Boolean(input.enabled) });
     }
