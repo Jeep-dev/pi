@@ -364,6 +364,15 @@ function sessionDirForRuntime() {
   return sessionDirForCwd(cwd);
 }
 
+/** Discover both current isolated history and the legacy cwd-wide Pi store. */
+function sessionDiscoveryDirectories() {
+  return [...new Set(
+    [sessionDirForRuntime(), sessionDirForCwd(cwd)]
+      .filter(Boolean)
+      .map(directory => path.resolve(directory)),
+  )];
+}
+
 function visibleText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -661,13 +670,27 @@ async function summarizeSession(file, currentFile) {
 }
 
 async function listSessions() {
-  const dir = sessionDirForRuntime();
-  if (!dir) return [];
-  let names;
-  try { names = await readdir(dir); }
-  catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
+  const directories = sessionDiscoveryDirectories();
+  const seen = new Set();
+  const files = [];
+  for (const dir of directories) {
+    let names;
+    try { names = await readdir(dir); }
+    catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const file = path.resolve(dir, name);
+      try {
+        const info = await lstat(file);
+        if (!info.isFile()) continue;
+        if (seen.has(file)) continue;
+        seen.add(file);
+        files.push({ file, modified: info.mtimeMs });
+      } catch {}
+    }
   }
 
   let currentFile = "";
@@ -676,17 +699,7 @@ async function listSessions() {
     currentFile = String(state?.data?.sessionFile || "");
   } catch {}
 
-  const files = [];
-  for (const name of names) {
-    if (!name.endsWith(".jsonl")) continue;
-    const file = path.join(dir, name);
-    try {
-      const info = await lstat(file);
-      if (info.isFile()) files.push({ file, modified: info.mtimeMs });
-    } catch {}
-  }
   files.sort((a, b) => b.modified - a.modified);
-
   const summaries = [];
   for (const item of files.slice(0, 80)) {
     try { summaries.push(await summarizeSession(item.file, currentFile)); }
@@ -1064,13 +1077,16 @@ const server = http.createServer(async (req, res) => {
       if (stopFence) throw new Error("Stop in progress; session switch rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       const target = path.resolve(String(input.path || ""));
-      const dir = sessionDirForRuntime();
-      if (!dir) throw new Error("Pi session persistence is disabled");
-      const sessionRoot = await realpath(path.resolve(dir));
+      const sessionRoots = [];
+      for (const directory of sessionDiscoveryDirectories()) {
+        try { sessionRoots.push(await realpath(directory)); } catch {}
+      }
+      if (sessionRoots.length === 0) throw new Error("Pi session persistence is disabled");
       const canonicalTarget = await realpath(target);
-      if (!canonicalTarget.endsWith(".jsonl") ||
-          (canonicalTarget !== sessionRoot && !canonicalTarget.startsWith(`${sessionRoot}${path.sep}`))) {
-        throw new Error("session path outside current project");
+      if (!canonicalTarget.endsWith(".jsonl") || !sessionRoots.some(root =>
+        canonicalTarget === root || canonicalTarget.startsWith(`${root}${path.sep}`)
+      )) {
+        throw new Error("session path outside trusted Pi session directories");
       }
       if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
       const result = await rpc({ type: "switch_session", sessionPath: canonicalTarget }, 30000);

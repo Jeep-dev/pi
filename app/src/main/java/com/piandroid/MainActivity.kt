@@ -393,6 +393,9 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
         cwd = health.cwd.ifBlank { record.cwd },
         sessionFile = state.sessionFile.ifBlank { record.sessionFile },
         piSessionId = state.sessionId.ifBlank { record.piSessionId },
+        legacySessionFile = state.sessionFile
+            .ifBlank { record.sessionFile }
+            .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
         status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
         lastActivity = record.lastActivity,
         lastError = ""
@@ -834,6 +837,9 @@ private fun PiScreen(
                     sessionFile = it.sessionFile.ifBlank { record.sessionFile },
                     ownedSessionFile = record.ownedSessionFile.ifBlank { it.sessionFile },
                     piSessionId = it.sessionId.ifBlank { record.piSessionId },
+                    legacySessionFile = it.sessionFile
+                        .ifBlank { record.sessionFile }
+                        .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
                     sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
                     status = if (it.streaming || it.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
                     lastActivity = if (it.streaming || it.compacting) System.currentTimeMillis() else record.lastActivity,
@@ -1169,6 +1175,9 @@ private fun PiScreen(
                 sessionFile = state.sessionFile.ifBlank { record.sessionFile },
                 ownedSessionFile = record.ownedSessionFile.ifBlank { state.sessionFile },
                 piSessionId = state.sessionId.ifBlank { record.piSessionId },
+                legacySessionFile = state.sessionFile
+                    .ifBlank { record.sessionFile }
+                    .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
                 sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
                 status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
                 lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
@@ -1417,7 +1426,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.3
+                """Pi Android v5.19.4
+                |• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史
+                |• 选择旧版历史后重启仍保持绑定，不迁移或删除旧文件
                 |• /resume 切换后同步 Activity runtime，恢复的历史不会被旧快照覆盖
                 |• /resume 只切换 Pi conversation，不改变 Android Session 隔离身份
                 |• 无 Session 启动时自动展开侧栏，删除最后一个后可立即新建

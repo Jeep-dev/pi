@@ -32,13 +32,17 @@ internal fun bindPiConversation(
     record: PiSessionRecord,
     state: PiState,
     fallbackSessionFile: String
-): PiSessionRecord = record.copy(
-    sessionFile = state.sessionFile.ifBlank { fallbackSessionFile },
-    piSessionId = state.sessionId.ifBlank { record.piSessionId },
-    status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
-    lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
-    lastError = ""
-)
+): PiSessionRecord {
+    val selectedFile = state.sessionFile.ifBlank { fallbackSessionFile }
+    return record.copy(
+        sessionFile = selectedFile,
+        piSessionId = state.sessionId.ifBlank { record.piSessionId },
+        legacySessionFile = selectedFile.isNotBlank() && !isPrivatePiSessionFile(record.id, selectedFile),
+        status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
+        lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
+        lastError = ""
+    )
+}
 
 internal sealed class PiRuntimeUpdate {
     data class Ready(val value: PiRuntimeReady) : PiRuntimeUpdate()

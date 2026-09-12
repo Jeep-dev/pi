@@ -31,8 +31,16 @@ internal data class PiSessionRecord(
     val ownedSessionFile: String = "",
     /** Private Pi session directory; never derived from cwd alone. */
     val sessionDirectory: String = "",
-    val pinned: Boolean = false
+    val pinned: Boolean = false,
+    /** True when the current Pi conversation is a legacy cwd-wide history file. */
+    val legacySessionFile: Boolean = false
 )
+
+internal fun isPrivatePiSessionFile(androidSessionId: String, sessionFile: String): Boolean {
+    val normalized = sessionFile.replace('\\', '/')
+    if (normalized.isBlank()) return false
+    return normalized.contains("/.pi/android/sessions/$androidSessionId/pi-sessions/")
+}
 
 internal fun sessionDisplayName(record: PiSessionRecord): String =
     record.displayName.trim().ifBlank { record.name.trim().ifBlank { "Pi" } }
@@ -165,7 +173,8 @@ internal class PiSessionStore(context: Context) {
                             displayName = item.optString("displayName").trim(),
                             ownedSessionFile = item.optString("ownedSessionFile").trim().ifBlank { sessionFile },
                             sessionDirectory = directory,
-                            pinned = item.optBoolean("pinned", false)
+                            pinned = item.optBoolean("pinned", false),
+                            legacySessionFile = item.optBoolean("legacySessionFile", false)
                         )
                     )
                 }
@@ -176,7 +185,7 @@ internal class PiSessionStore(context: Context) {
                 val privateMarker = "/.pi/android/sessions/${record.id}/pi-sessions/"
                 val isPrivate = file.isBlank() || file.contains(privateMarker)
                 val duplicate = file.isNotBlank() && isPrivate && !claimedFiles.add(file)
-                val unsafeLegacyPointer = file.isNotBlank() && !isPrivate && record.id != DEFAULT_ID
+                val unsafeLegacyPointer = file.isNotBlank() && !isPrivate && !record.legacySessionFile && record.id != DEFAULT_ID
                 if ((unsafeLegacyPointer || duplicate) && file.isNotBlank()) {
                     // Old registries could point several Android records at Pi's
                     // cwd-wide latest session. Drop only the unsafe pointer; the
@@ -211,6 +220,7 @@ internal class PiSessionStore(context: Context) {
                     .put("sessionDirectory", record.sessionDirectory)
                     .put("piSessionId", record.piSessionId)
                     .put("pinned", record.pinned)
+                    .put("legacySessionFile", record.legacySessionFile)
                     .put("status", record.status.name)
                     .put("lastActivity", record.lastActivity)
                     .put("lastError", record.lastError)

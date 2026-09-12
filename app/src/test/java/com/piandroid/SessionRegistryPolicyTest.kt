@@ -98,8 +98,16 @@ class SessionRegistryPolicyTest {
         assertEquals("token-a", resumed.token)
         assertEquals("A1", resumed.piSessionId)
         assertEquals("/tmp/A1.jsonl", resumed.sessionFile)
+        assertTrue(resumed.legacySessionFile)
         assertEquals(original.ownedSessionFile, resumed.ownedSessionFile)
         assertEquals(original.sessionDirectory, resumed.sessionDirectory)
+    }
+
+    @Test
+    fun privateConversationFilesRemainScopedToTheirAndroidSession() {
+        assertTrue(isPrivatePiSessionFile("android-a", "/data/data/com.termux/files/home/.pi/android/sessions/android-a/pi-sessions/A1.jsonl"))
+        assertFalse(isPrivatePiSessionFile("android-a", "/data/data/com.termux/files/home/.pi/android/sessions/android-b/pi-sessions/B1.jsonl"))
+        assertFalse(isPrivatePiSessionFile("android-a", "/data/data/com.termux/files/home/.pi/agent/sessions/--project--/legacy.jsonl"))
     }
 
     @Test

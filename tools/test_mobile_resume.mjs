@@ -10,8 +10,30 @@ const home = await mkdtemp(path.join(tmpdir(), "pi-android-resume-"));
 const prefix = path.join(home, "prefix");
 const bin = path.join(prefix, "bin");
 const cwd = path.join(home, "same-project");
+const legacySafeCwd = `--${cwd.replace(/^[/\\\\]/, "").replace(/[/\\\\:]/g, "-")}--`;
+const legacyDir = path.join(home, ".pi", "agent", "sessions", legacySafeCwd);
+const legacyPath = path.join(legacyDir, "legacy.jsonl");
 await mkdir(bin, { recursive: true });
 await mkdir(cwd, { recursive: true });
+await mkdir(legacyDir, { recursive: true });
+const legacyTimestamp = new Date().toISOString();
+await writeFile(legacyPath, [
+  { type: "session", version: 3, id: "LEGACY", timestamp: legacyTimestamp, cwd },
+  {
+    type: "message",
+    id: "legacy-user",
+    parentId: null,
+    timestamp: legacyTimestamp,
+    message: { role: "user", content: "LEGACY" },
+  },
+  {
+    type: "message",
+    id: "legacy-assistant",
+    parentId: "legacy-user",
+    timestamp: legacyTimestamp,
+    message: { role: "assistant", content: [{ type: "text", text: "reply-LEGACY" }] },
+  },
+].map(entry => JSON.stringify(entry)).join("\n") + "\n");
 
 const fakePi = path.join(bin, "pi");
 await writeFile(fakePi, `
@@ -234,11 +256,13 @@ try {
   const listed = await request(records[0], "/sessions").then(response => response.json());
   assert.deepEqual(
     listed.sessions.map(session => path.basename(session.path)).sort(),
-    ["A1.jsonl", "A2.jsonl"],
-    "/resume must list conversations from the Android Session's private --session-dir",
+    ["A1.jsonl", "A2.jsonl", "legacy.jsonl"],
+    "/resume must list both private and legacy Pi sessions",
   );
   const a1Path = listed.sessions.find(session => path.basename(session.path) === "A1.jsonl").path;
   const a2Path = listed.sessions.find(session => path.basename(session.path) === "A2.jsonl").path;
+  const listedLegacyPath = listed.sessions.find(session => path.basename(session.path) === "legacy.jsonl").path;
+  assert.equal(listedLegacyPath, legacyPath);
   const aHealthBefore = await request(records[0], "/health").then(response => response.json());
   const bHealthBefore = await request(records[1], "/health").then(response => response.json());
 
@@ -273,28 +297,36 @@ try {
   assert.equal(switchedA2.state.sessionId, "A2");
   assert.deepEqual(userTexts(await history(records[0])), ["BBB"], "A2 history must not contain A1 messages");
 
+  const switchedLegacy = await request(records[0], "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({ path: listedLegacyPath }),
+  }).then(async response => {
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return JSON.parse(text);
+  });
+  assert.equal(switchedLegacy.state.sessionId, "LEGACY");
+  assert.deepEqual(userTexts(await history(records[0])), ["LEGACY"], "legacy history must replace the private conversation");
+  await request(records[0], "/prompt", { method: "POST", body: JSON.stringify({ message: "after-legacy" }) });
+  assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"]);
+
   const bHealthAfterSwitch = await request(records[1], "/health").then(response => response.json());
   assert.equal(bHealthAfterSwitch.bridgePid, bHealthBefore.bridgePid, "switching A must not replace B's Bridge");
   assert.equal(bHealthAfterSwitch.piPid, bHealthBefore.piPid, "switching A must not replace B's Pi");
   assert.deepEqual(userTexts(await history(records[1])), ["BBB"], "B remains independent while A resumes");
 
-  // Reopen A1, then recreate only A's bridge with a launch selector for A1.
-  await request(records[0], "/switch-session", {
-    method: "POST",
-    body: JSON.stringify({ path: a1Path }),
-  });
-  assert.deepEqual(userTexts(await history(records[0])), ["AAA", "after-A1"]);
+  // Recreate only A's bridge with a launch selector for the selected legacy file.
   await stopBridge(a);
   a = { record: records[0], ...startBridge(records[0]) };
   await waitForHealth(records[0]);
-  const recoveryLaunch = `--session ${a1Path}`;
+  const recoveryLaunch = `--session ${listedLegacyPath}`;
   const restarted = await startPi(records[0], recoveryLaunch);
-  assert.equal(restarted.state.sessionId, "A1", "runtime restart must reopen the selected Pi conversation");
-  assert.equal(restarted.state.sessionFile, a1Path);
+  assert.equal(restarted.state.sessionId, "LEGACY", "runtime restart must reopen the selected legacy conversation");
+  assert.equal(restarted.state.sessionFile, listedLegacyPath);
   const aHealthAfterRestart = await request(records[0], "/health").then(response => response.json());
   assert.equal(aHealthAfterRestart.port, records[0].port);
   assert.notEqual(aHealthAfterRestart.bridgePid, aHealthBefore.bridgePid);
-  assert.deepEqual(userTexts(await history(records[0])), ["AAA", "after-A1"]);
+  assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"]);
   assert.deepEqual(userTexts(await history(records[1])), ["BBB"], "B must remain unaffected by A restart and resume");
 
   console.log("Mobile /resume conversation switching test passed");
