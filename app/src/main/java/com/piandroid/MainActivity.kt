@@ -96,6 +96,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -147,6 +148,7 @@ class MainActivity : ComponentActivity() {
         }
         requestTermuxPermissionIfNeeded()
         setContent { PiTouchApp(bridge) }
+    }
     }
 
     private fun requestTermuxPermissionIfNeeded() {
@@ -1345,7 +1347,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.17.0
+                """Pi Android v5.17.1
+                |• 修复 Android 手势导航拦截左边缘 Session 侧栏
                 |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
                 |• 从左边缘右滑打开 Session 侧栏，切换不会停止后台任务
                 |• Session 列表、cwd、端口和恢复文件持久保存
@@ -1754,25 +1757,43 @@ private fun PiScreen(
                 var accepted = false
                 var startProgress = 0f
                 var distance = 0f
+                var velocityTracker: VelocityTracker? = null
                 detectHorizontalDragGestures(
                     onDragStart = { start ->
                         startProgress = currentDrawerProgress.value
-                        accepted = startProgress > 0.01f || start.x <= edgeSlop
+                        // Horizontal drags may begin anywhere in the chat area. Keep
+                        // the composer/footer out of this gesture so text input and
+                        // attachment scrolling retain their normal behavior.
+                        val chatArea = size.height * 0.86f
+                        accepted = startProgress > 0.01f || start.y in (edgeSlop..chatArea)
                         distance = 0f
+                        velocityTracker = if (accepted) VelocityTracker() else null
                     },
                     onHorizontalDrag = { change, amount ->
                         if (accepted) {
                             change.consume()
+                            velocityTracker?.addPosition(change.uptimeMillis, change.position)
                             distance += amount
                             drawerProgress = (startProgress + distance / drawerWidthPx).coerceIn(0f, 1f)
                         }
                     },
                     onDragEnd = {
-                        if (accepted) settleDrawer(if (drawerProgress >= 0.35f) 1f else 0f)
+                        if (accepted) {
+                            val velocityX = velocityTracker?.calculateVelocity()?.x ?: 0f
+                            val target = when {
+                                velocityX > 900f -> 1f
+                                velocityX < -900f -> 0f
+                                drawerProgress >= 0.35f -> 1f
+                                else -> 0f
+                            }
+                            settleDrawer(target)
+                        }
+                        velocityTracker = null
                         accepted = false
                     },
                     onDragCancel = {
                         if (accepted) settleDrawer(if (drawerProgress >= 0.5f) 1f else 0f)
+                        velocityTracker = null
                         accepted = false
                     }
                 )
