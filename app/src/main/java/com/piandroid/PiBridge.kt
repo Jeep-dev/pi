@@ -14,22 +14,44 @@ import java.net.URL
 import java.net.URLEncoder
 import java.security.SecureRandom
 
-class PiBridge(context: Context) {
+class PiBridge(
+    context: Context,
+    private val endpointPort: Int = DEFAULT_PORT,
+    private val endpointToken: String? = null,
+    private val endpointKey: String = DEFAULT_ENDPOINT_KEY
+) {
     private val context = context.applicationContext
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
-    private val port = 17649
-    private val expectedBridgeVersion = "2026-09-11.16"
+    private val port = endpointPort
+    private val expectedBridgeVersion = "2026-09-12.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
         "recovery-snapshot-v1",
         "persistent-widgets-v1",
+        "multi-session-v1",
         "consistent-recovery-v1",
         "bounded-event-cache-v1"
     )
-    private val authToken: String by lazy(::loadOrCreateAuthToken)
+    private val authToken: String by lazy {
+        endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, endpointKey)
+    }
     private var nextId = 3000
+    private val remoteBridgeDir = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+        "~/.pi/android"
+    } else {
+        "~/.pi/android/sessions/$endpointKey"
+    }
+    private val remoteBridgeScript = "$remoteBridgeDir/bridge.mjs"
+    private val remoteExtensionScript = "$remoteBridgeDir/pi-android-mobile.ts"
+    private val remotePidFile = "$remoteBridgeDir/bridge.pid"
+    private val remoteLogFile = "$remoteBridgeDir/bridge.log"
+    private val lastSessionPreferenceKey = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+        "last_session_file"
+    } else {
+        "last_session_file_$endpointKey"
+    }
 
     fun applicationContext(): Context = context
 
@@ -49,14 +71,14 @@ class PiBridge(context: Context) {
                 Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
             }
             val command = """
-                mkdir -p ~/.pi/android &&
-                printf '%s' '$bridge' | base64 -d > ~/.pi/android/bridge.mjs &&
-                printf '%s' '$extension' | base64 -d > ~/.pi/android/pi-android-mobile.ts &&
-                chmod 700 ~/.pi/android/bridge.mjs &&
-                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="${'$'}(cat ~/.pi/android/bridge.pid)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
-                rm -f ~/.pi/android/bridge.pid &&
-                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port &&
-                exec /data/data/com.termux/files/usr/bin/node ~/.pi/android/bridge.mjs >> ~/.pi/android/bridge.log 2>&1
+                mkdir -p $remoteBridgeDir &&
+                printf '%s' '$bridge' | base64 -d > $remoteBridgeScript &&
+                printf '%s' '$extension' | base64 -d > $remoteExtensionScript &&
+                chmod 700 $remoteBridgeScript &&
+                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
+                rm -f $remotePidFile &&
+                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_PID_FILE=$remotePidFile &&
+                exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
         }
@@ -85,7 +107,7 @@ class PiBridge(context: Context) {
         } else {
             "检测到旧 bridge：$lastSeenVersion，期望：$expectedBridgeVersion"
         }
-        return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 ~/.pi/android/bridge.log"))
+        return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 $remoteLogFile"))
     }
 
     suspend fun attachToRunningBridge(): Result<PiState> = runCatching {
@@ -241,7 +263,7 @@ class PiBridge(context: Context) {
     fun recoveryLaunchCommand(baseCommand: String, activeSessionFile: String? = null): String {
         val sessionFile = activeSessionFile
             ?.takeIf { it.isNotBlank() }
-            ?: runtimePreferences().getString("last_session_file", "").orEmpty()
+            ?: runtimePreferences().getString(lastSessionPreferenceKey, "").orEmpty()
         return pinPiLaunchToSession(baseCommand, sessionFile)
     }
 
@@ -392,11 +414,11 @@ class PiBridge(context: Context) {
         )
         if (state.sessionFile.isNotBlank()) {
             val preferences = runtimePreferences()
-            if (preferences.getString("last_session_file", "") != state.sessionFile) {
+            if (preferences.getString(lastSessionPreferenceKey, "") != state.sessionFile) {
                 // Recovery correctness is more important than an asynchronous
                 // write here: a process death immediately after /resume must not
                 // fall back to the previously active conversation.
-                preferences.edit().putString("last_session_file", state.sessionFile).commit()
+                preferences.edit().putString(lastSessionPreferenceKey, state.sessionFile).commit()
             }
         }
         return state
@@ -637,16 +659,22 @@ class PiBridge(context: Context) {
         }
     }
 
-    private fun loadOrCreateAuthToken(): String {
-        val preferences = context.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
-        preferences.getString("auth_token", null)?.takeIf { it.length >= 32 }?.let { return it }
-        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val token = Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)
-        check(preferences.edit().putString("auth_token", token).commit()) { "无法保存 Bridge 认证信息" }
-        return token
-    }
-
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
+
+    companion object {
+        const val DEFAULT_PORT = 17649
+        const val DEFAULT_ENDPOINT_KEY = "default"
+
+        internal fun endpointToken(context: Context, key: String): String {
+            val preferences = context.applicationContext.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
+            val preferenceKey = if (key == DEFAULT_ENDPOINT_KEY) "auth_token" else "auth_token_$key"
+            preferences.getString(preferenceKey, null)?.takeIf { it.length >= 32 }?.let { return it }
+            val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            val token = Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)
+            check(preferences.edit().putString(preferenceKey, token).commit()) { "无法保存 Bridge 认证信息" }
+            return token
+        }
+    }
 }
 
 data class PiHealth(

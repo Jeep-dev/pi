@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-11.16";
+const bridgeVersion = "2026-09-12.1";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -18,6 +18,7 @@ const bridgeCapabilities = [
   "durable-history-v1",
   "recovery-snapshot-v1",
   "persistent-widgets-v1",
+  "multi-session-v1",
   "consistent-recovery-v1",
   "bounded-event-cache-v1",
 ];
@@ -30,7 +31,7 @@ const termuxBin = path.join(termuxPrefix, "bin");
 const termuxBash = path.join(termuxBin, "bash");
 const termuxPi = path.join(termuxBin, "pi");
 const nodeExecutable = process.execPath || path.join(termuxBin, "node");
-const pidFile = path.join(termuxHome, ".pi", "android", "bridge.pid");
+const pidFile = process.env.PI_ANDROID_PID_FILE || path.join(termuxHome, ".pi", "android", "bridge.pid");
 const maxRequestBytes = 4_000_000;
 const maxUploadBytes = 128 * 1024 * 1024;
 let child = null;

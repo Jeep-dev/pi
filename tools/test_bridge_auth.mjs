@@ -169,11 +169,12 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-11.16");
+  assert.equal(health.bridgeVersion, "2026-09-12.1");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
   assert.ok(health.capabilities.includes("persistent-widgets-v1"));
+  assert.ok(health.capabilities.includes("multi-session-v1"));
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
   assert.ok(health.capabilities.includes("bounded-event-cache-v1"));
 

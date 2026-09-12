@@ -14,6 +14,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -47,21 +49,35 @@ class AgentKeepAliveService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
             .apply { acquire(MAX_WAKE_TIME_MS) }
         monitorJob = scope.launch {
-            val bridge = PiBridge(applicationContext)
             var failures = 0
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
-                bridge.health().fold(
-                    onSuccess = { health ->
-                        failures = 0
-                        val state = if (health.piRunning) "Agent 正在运行" else "Bridge 在线，Agent 已停止"
-                        updateNotification("$state · ${health.cwd.substringAfterLast('/').ifBlank { "home" }}")
-                    },
-                    onFailure = {
-                        failures++
-                        updateNotification("连接中断，等待 App 恢复 · $failures")
+                val records = PiSessionStore(applicationContext).loadOrCreateDefault()
+                val probes = records.map { record ->
+                    async {
+                        val endpoint = PiBridge(applicationContext, record.port, record.token, record.id)
+                        val health = endpoint.health(timeoutMs = 2_500).getOrNull()
+                        val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
+                        record to (health to state)
                     }
-                )
+                }.awaitAll()
+                val working = probes.count { (_, result) ->
+                    val state = result.second
+                    state?.streaming == true || state?.compacting == true
+                }
+                val running = probes.count { (_, result) -> result.first?.piRunning == true }
+                if (running > 0) {
+                    failures = 0
+                    updateNotification(
+                        when {
+                            working > 0 -> "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
+                            else -> "$running 个 Pi Session 在线，当前空闲"
+                        }
+                    )
+                } else {
+                    failures++
+                    updateNotification("没有在线 Pi，等待 App 恢复 · $failures")
+                }
                 delay(15_000)
             }
         }

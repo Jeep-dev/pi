@@ -13,6 +13,7 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
@@ -21,6 +22,9 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,11 +74,14 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -87,6 +94,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.consume
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -101,16 +110,21 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -341,9 +355,104 @@ private fun directDocumentPath(context: Context, uri: Uri): String? {
     }
 }
 
+private suspend fun pollPiSession(context: Context, record: PiSessionRecord): PiSessionRecord {
+    val bridge = PiBridge(context, record.port, record.token, record.id)
+    val health = bridge.health(timeoutMs = 2_500).getOrNull()
+        ?: return record.copy(
+            status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
+        )
+    if (!health.piRunning) {
+        return record.copy(
+            cwd = health.cwd.ifBlank { record.cwd },
+            status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
+        )
+    }
+    val state = bridge.state(timeoutMs = 4_000).getOrNull()
+        ?: return record.copy(status = PiSessionStatus.ERROR, lastError = "无法读取 Pi 状态")
+    return record.copy(
+        name = state.sessionName.ifBlank { record.name },
+        cwd = health.cwd.ifBlank { record.cwd },
+        sessionFile = state.sessionFile.ifBlank { record.sessionFile },
+        piSessionId = state.sessionId.ifBlank { record.piSessionId },
+        status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
+        lastActivity = record.lastActivity,
+        lastError = ""
+    )
+}
+
 @Composable
-private fun PiTouchApp(bridge: PiBridge) {
+private fun PiTouchApp(baseBridge: PiBridge) {
     val context = LocalContext.current
+    val sessionStore = remember { PiSessionStore(context) }
+    val initialSessions = remember { sessionStore.loadOrCreateDefault() }
+    var sessions by remember { mutableStateOf(initialSessions) }
+    var activeSessionId by rememberSaveable {
+        val saved = sessionStore.activeId()
+        mutableStateOf(saved?.takeIf { id -> initialSessions.any { it.id == id } } ?: initialSessions.first().id)
+    }
+    var createSessionOpen by remember { mutableStateOf(false) }
+    var createSessionName by remember { mutableStateOf("") }
+    var createSessionCwd by remember { mutableStateOf(initialSessions.first().cwd) }
+    val latestSessions by rememberUpdatedState(sessions)
+    val latestActiveId by rememberUpdatedState(activeSessionId)
+
+    fun updateSession(id: String, transform: (PiSessionRecord) -> PiSessionRecord) {
+        val updated = sessions.map { if (it.id == id) transform(it) else it }
+        sessions = updated
+        sessionStore.save(updated, activeSessionId)
+    }
+
+    fun selectSession(id: String) {
+        if (sessions.none { it.id == id }) return
+        activeSessionId = id
+        sessionStore.save(sessions, id)
+    }
+
+    fun createSession() {
+        val record = sessionStore.create(
+            name = createSessionName,
+            cwd = createSessionCwd,
+            launchCommand = sessions.firstOrNull { it.id == activeSessionId }?.launchCommand.orEmpty(),
+            records = sessions
+        )
+        val updated = sessions + record
+        sessions = updated
+        activeSessionId = record.id
+        sessionStore.save(updated, record.id)
+        createSessionOpen = false
+    }
+
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            val snapshot = latestSessions
+            val refreshed = snapshot.map { record ->
+                async(Dispatchers.IO) { pollPiSession(context, record) }
+            }.awaitAll()
+            val current = latestSessions
+            val byId = refreshed.associateBy { it.id }
+            val merged = current.map { byId[it.id] ?: it }
+            if (merged != current) {
+                sessions = merged
+                sessionStore.save(merged, latestActiveId)
+            }
+            if (merged.any { it.status == PiSessionStatus.WORKING }) {
+                AgentKeepAliveService.start(context)
+            } else {
+                AgentKeepAliveService.stop(context)
+            }
+            delay(3_000)
+        }
+    }
+
+    val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.first()
+    val activeBridge = remember(activeSession.id, activeSession.port, activeSession.token) {
+        if (activeSession.id == PiSessionStore.DEFAULT_ID && activeSession.port == PiSessionStore.DEFAULT_PORT) {
+            baseBridge
+        } else {
+            PiBridge(context, activeSession.port, activeSession.token, activeSession.id)
+        }
+    }
+
     var themeKey by rememberSaveable {
         mutableStateOf(context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE).getString("theme", "dark") ?: "dark")
     }
@@ -379,14 +488,35 @@ private fun PiTouchApp(bridge: PiBridge) {
     CompositionLocalProvider(LocalPiColors provides colors) {
         MaterialTheme(colorScheme = scheme) {
             Surface(Modifier.fillMaxSize(), color = colors.bg) {
-                PiScreen(
-                    bridge = bridge,
-                    themeMode = themeMode,
-                    onTheme = { selected ->
-                        themeKey = selected.storageKey
-                        context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
-                            .edit().putString("theme", selected.storageKey).apply()
-                    }
+                key(activeSession.id) {
+                    PiScreen(
+                        bridge = activeBridge,
+                        session = activeSession,
+                        sessions = sessions,
+                        themeMode = themeMode,
+                        onTheme = { selected ->
+                            themeKey = selected.storageKey
+                            context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                                .edit().putString("theme", selected.storageKey).apply()
+                        },
+                        onSelectSession = ::selectSession,
+                        onNewSession = {
+                            createSessionName = ""
+                            createSessionCwd = activeSession.cwd
+                            createSessionOpen = true
+                        },
+                        onSessionUpdate = ::updateSession
+                    )
+                }
+            }
+            if (createSessionOpen) {
+                SessionCreateDialog(
+                    name = createSessionName,
+                    cwd = createSessionCwd,
+                    onName = { createSessionName = it },
+                    onCwd = { createSessionCwd = it },
+                    onCreate = ::createSession,
+                    onDismiss = { createSessionOpen = false }
                 )
             }
         }
@@ -394,12 +524,21 @@ private fun PiTouchApp(bridge: PiBridge) {
 }
 
 @Composable
-private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiThemeMode) -> Unit) {
-    var cwd by rememberSaveable { mutableStateOf("/data/data/com.termux/files/home") }
-    var runtimeCwd by rememberSaveable { mutableStateOf("") }
-    var cwdEdited by rememberSaveable { mutableStateOf(false) }
-    var launchCommand by rememberSaveable { mutableStateOf("pi --mode rpc -e ~/.pi/android/pi-android-mobile.ts") }
-    var input by rememberSaveable { mutableStateOf("") }
+private fun PiScreen(
+    bridge: PiBridge,
+    session: PiSessionRecord,
+    sessions: List<PiSessionRecord>,
+    themeMode: PiThemeMode,
+    onTheme: (PiThemeMode) -> Unit,
+    onSelectSession: (String) -> Unit,
+    onNewSession: () -> Unit,
+    onSessionUpdate: (String, (PiSessionRecord) -> PiSessionRecord) -> Unit
+) {
+    var cwd by rememberSaveable(session.id) { mutableStateOf(session.cwd) }
+    var runtimeCwd by rememberSaveable(session.id) { mutableStateOf("") }
+    var cwdEdited by rememberSaveable(session.id) { mutableStateOf(false) }
+    var launchCommand by rememberSaveable(session.id) { mutableStateOf(session.launchCommand) }
+    var input by rememberSaveable(session.id) { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
@@ -452,6 +591,11 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
     val pendingAttachments = remember { mutableStateListOf<PiAttachment>() }
     var attachmentNotice by remember { mutableStateOf("") }
+
+    fun updateSessionRecord(transform: (PiSessionRecord) -> PiSessionRecord) {
+        onSessionUpdate(session.id, transform)
+    }
+
     LaunchedEffect(Unit) {
         delay(100)
         focusManager.clearFocus(force = true)
@@ -579,6 +723,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             runtimeCwd = health.cwd
             cwd = health.cwd
             cwdEdited = false
+            updateSessionRecord { it.copy(cwd = health.cwd, status = PiSessionStatus.IDLE, lastError = "") }
         }
     }
 
@@ -608,7 +753,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         // Keep the editable launchCommand as the user's base command; session
         // recovery is generated only for this one start operation.
         val launch = if (preserveSession) {
-            bridge.recoveryLaunchCommand(launchCommand.trim(), currentState?.sessionFile)
+            val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
+            bridge.recoveryLaunchCommand(launchCommand.trim(), knownSessionFile)
         } else {
             bridge.freshLaunchCommand(launchCommand.trim())
         }
@@ -622,7 +768,19 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         val stats = async { bridge.stats().getOrNull() }
         val availableModels = async { bridge.models().getOrNull() }
         val availableCommands = async { bridge.commands().getOrNull() }
-        state.await()?.let { currentState = it }
+        state.await()?.let {
+            currentState = it
+            updateSessionRecord { record ->
+                record.copy(
+                    name = it.sessionName.ifBlank { record.name },
+                    sessionFile = it.sessionFile.ifBlank { record.sessionFile },
+                    piSessionId = it.sessionId.ifBlank { record.piSessionId },
+                    status = if (it.streaming || it.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
+                    lastActivity = if (it.streaming || it.compacting) System.currentTimeMillis() else record.lastActivity,
+                    lastError = ""
+                )
+            }
+        }
         stats.await()?.let { currentStats = it }
         availableModels.await()?.let { models = it }
         availableCommands.await()?.let { remoteCommands = it }
@@ -813,6 +971,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         when (event.type) {
             "agent_start" -> {
                 status = "Working"
+                updateSessionRecord { it.copy(status = PiSessionStatus.WORKING, lastActivity = System.currentTimeMillis(), lastError = "") }
                 AgentKeepAliveService.start(bridge.applicationContext())
             }
             "agent_end" -> Unit
@@ -829,7 +988,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 currentState = currentState?.copy(streaming = false, compacting = false)
                 reconcileSteeringQueue(0)
                 status = "Ready"
-                AgentKeepAliveService.stop(bridge.applicationContext())
+                updateSessionRecord { it.copy(status = PiSessionStatus.IDLE, lastError = "") }
                 refreshMeta()
             }
             "message_update" -> when (event.subtype) {
@@ -864,14 +1023,15 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             "process_exit" -> {
                 settleStreams()
                 currentState = currentState?.copy(streaming = false, compacting = false)
-                AgentKeepAliveService.stop(bridge.applicationContext())
                 addSystem(event.text)
                 if (intentionalQuit) {
                     intentionalQuit = false
                     connected = false
                     status = "Disconnected"
+                    updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
                 } else {
                     status = "RECONNECTING"
+                    updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
                 }
             }
             "compaction_start" -> {
@@ -885,7 +1045,6 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     loadHistory(preservePending = true)
                 }
                 status = if (currentState?.streaming == true) "Working" else "Ready"
-                if (currentState?.streaming != true) AgentKeepAliveService.stop(bridge.applicationContext())
             }
             "extension_ui_request" -> {
                 val req = event.uiRequest
@@ -980,7 +1139,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     // Android's preference is only for a genuinely new session;
                     // /new applies it for subsequent new conversations.
                     val launch = if (preservedSessionOnRestart) {
-                        bridge.recoveryLaunchCommand(launchCommand.trim(), currentState?.sessionFile)
+                        val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
+                        bridge.recoveryLaunchCommand(launchCommand.trim(), knownSessionFile)
                     } else {
                         bridge.freshLaunchCommand(launchCommand.trim())
                     }
@@ -1017,6 +1177,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             } catch (error: Exception) {
                 AgentKeepAliveService.stop(bridge.applicationContext())
                 status = "Connection failed"
+                updateSessionRecord { it.copy(status = PiSessionStatus.ERROR, lastError = error.message.orEmpty()) }
                 addSystem("连接失败：${error.message}")
             } finally {
                 connecting = false
@@ -1173,6 +1334,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             }
             "/hotkeys" -> addSystem(
                 """移动端操作
+                |• 从屏幕左边缘右滑：打开 Pi Session 侧栏
                 |• 输入 /：打开可搜索命令面板
                 |• 工作中仍可直接发送：按 Pi 规则作为 steering message 排队
                 |• 输入 /abort 才会中止当前 Agent
@@ -1183,7 +1345,10 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.16.12
+                """Pi Android v5.17.0
+                |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
+                |• 从左边缘右滑打开 Session 侧栏，切换不会停止后台任务
+                |• Session 列表、cwd、端口和恢复文件持久保存
                 |• 恢复 edit 工具的原生 diff 数据，默认折叠且可展开全文
                 |• 重连快照按持久历史边界去重，并保留未完成输出、工具结果和 steering 队列
                 |• 显示真实工具失败和模型错误；限制 Bridge 事件缓存内存
@@ -1569,14 +1734,55 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         else -> status
     }
 
-    Column(
+    var drawerProgress by remember { mutableFloatStateOf(0f) }
+    val currentDrawerProgress = rememberUpdatedState(drawerProgress)
+    fun settleDrawer(target: Float) {
+        scope.launch {
+            val animation = Animatable(drawerProgress)
+            animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { value -> drawerProgress = value }
+        }
+    }
+
+    BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .imePadding()
             .background(Bg)
+            .pointerInput(Unit) {
+                val edgeSlop = with(density) { 32.dp.toPx() }
+                val drawerWidthPx = size.width * 0.86f
+                var accepted = false
+                var startProgress = 0f
+                var distance = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { start ->
+                        startProgress = currentDrawerProgress.value
+                        accepted = startProgress > 0.01f || start.x <= edgeSlop
+                        distance = 0f
+                    },
+                    onHorizontalDrag = { change, amount ->
+                        if (accepted) {
+                            change.consume()
+                            distance += amount
+                            drawerProgress = (startProgress + distance / drawerWidthPx).coerceIn(0f, 1f)
+                        }
+                    },
+                    onDragEnd = {
+                        if (accepted) settleDrawer(if (drawerProgress >= 0.35f) 1f else 0f)
+                        accepted = false
+                    },
+                    onDragCancel = {
+                        if (accepted) settleDrawer(if (drawerProgress >= 0.5f) 1f else 0f)
+                        accepted = false
+                    }
+                )
+            }
     ) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        val drawerWidth = maxWidth * 0.86f
+        val drawerWidthPx = with(density) { drawerWidth.toPx() }
+        BackHandler(enabled = drawerProgress > 0.01f) { settleDrawer(0f) }
+        Column(Modifier.fillMaxSize().imePadding()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             when (panel) {
                 Panel.Chat -> ChatPanel(
                     lines = lines,
@@ -1727,8 +1933,12 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     onCwd = {
                         cwd = it
                         cwdEdited = true
+                        updateSessionRecord { record -> record.copy(cwd = it) }
                     },
-                    onLaunch = { launchCommand = it },
+                    onLaunch = {
+                        launchCommand = it
+                        updateSessionRecord { record -> record.copy(launchCommand = it) }
+                    },
                     onConnect = connect,
                     onAutoCompaction = { enabled ->
                         scope.launch {
@@ -1830,7 +2040,191 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             panel = Panel.Chat
             composerFocusRequest++
         }
+        }
+
+        if (drawerProgress > 0.001f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.34f))
+                    .clickable { settleDrawer(0f) }
+                    .zIndex(1f)
+            )
+        }
+        SessionDrawer(
+            sessions = sessions,
+            activeSessionId = session.id,
+            modifier = Modifier
+                .width(drawerWidth)
+                .fillMaxHeight()
+                .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
+                .zIndex(2f),
+            onSelect = {
+                settleDrawer(0f)
+                onSelectSession(it)
+            },
+            onNew = {
+                settleDrawer(0f)
+                onNewSession()
+            }
+        )
     }
+}
+
+private fun sessionStatusLabel(record: PiSessionRecord): String = when (record.status) {
+    PiSessionStatus.WORKING -> "Working"
+    PiSessionStatus.IDLE -> "Idle"
+    PiSessionStatus.NOT_STARTED -> "未启动"
+    PiSessionStatus.ERROR -> "Error"
+}
+
+@Composable
+private fun SessionDrawer(
+    sessions: List<PiSessionRecord>,
+    activeSessionId: String,
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit,
+    onNew: () -> Unit
+) {
+    Column(
+        modifier
+            .background(PanelBg)
+            .border(1.dp, Border)
+            .navigationBarsPadding()
+            .padding(top = 8.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Pi Sessions", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                Text("＋", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
+            }
+        }
+        Text(
+            "从左边缘右滑关闭",
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+        )
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
+            contentPadding = PaddingValues(bottom = 12.dp)
+        ) {
+            items(sessions) { record ->
+                val selected = record.id == activeSessionId
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(if (selected) CardBg else Color.Transparent)
+                        .clickable { onSelect(record.id) }
+                        .padding(horizontal = 14.dp, vertical = 11.dp)
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (selected) "◆" else "○",
+                            color = if (selected) Accent else TextMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            record.name.ifBlank { "Pi" },
+                            color = if (selected) Accent else TextMain,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Text(
+                        record.cwd,
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 19.dp, top = 4.dp)
+                    )
+                    Row(Modifier.fillMaxWidth().padding(start = 19.dp, top = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            sessionStatusLabel(record),
+                            color = when (record.status) {
+                                PiSessionStatus.WORKING -> Blue
+                                PiSessionStatus.ERROR -> Danger
+                                PiSessionStatus.IDLE -> Accent
+                                PiSessionStatus.NOT_STARTED -> TextMuted
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                        if (record.lastActivity > 0) {
+                            Text(
+                                " · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                                    .format(java.util.Date(record.lastActivity)),
+                                color = TextMuted,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    if (record.status == PiSessionStatus.ERROR && record.lastError.isNotBlank()) {
+                        Text(
+                            record.lastError,
+                            color = Danger,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 19.dp, top = 3.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionCreateDialog(
+    name: String,
+    cwd: String,
+    onName: (String) -> Unit,
+    onCwd: (String) -> Unit,
+    onCreate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建 Pi Session") },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = onName,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    label = { Text("名称（可选）") },
+                    singleLine = true,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                )
+                OutlinedTextField(
+                    value = cwd,
+                    onValueChange = onCwd,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("工作目录 cwd") },
+                    singleLine = true,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onCreate, enabled = cwd.trim().isNotBlank()) { Text("创建") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @Composable
