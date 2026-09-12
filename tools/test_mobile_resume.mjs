@@ -249,6 +249,15 @@ async function history(record) {
 function userTexts(items) {
   return items.filter(item => item.role === "user").map(item => item.text);
 }
+async function switchPath(record, androidSessionId, targetPath) {
+  const response = await request(record, "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({ androidSessionId, path: targetPath }),
+  });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  return JSON.parse(text);
+}
 
 let a = { record: records[0], ...startBridge(records[0]) };
 let b = { record: records[1], ...startBridge(records[1]) };
@@ -340,7 +349,9 @@ try {
   const bSessions = await request(records[1], "/sessions").then(response => response.json());
   const cSessions = await request(records[2], "/sessions").then(response => response.json());
   const b1Path = bSessions.sessions.find(session => path.basename(session.path) === "B1.jsonl").path;
+  const b2Path = bSessions.sessions.find(session => path.basename(session.path) === "B2.jsonl").path;
   const c1Path = cSessions.sessions.find(session => path.basename(session.path) === "C1.jsonl").path;
+  const c2Path = cSessions.sessions.find(session => path.basename(session.path) === "C2.jsonl").path;
   const switchedB1 = await request(records[1], "/switch-session", {
     method: "POST",
     body: JSON.stringify({ androidSessionId: "B", path: b1Path }),
@@ -369,6 +380,28 @@ try {
   assert.deepEqual(userTexts(await history(records[2])), ["C-first"]);
   assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"], "B/C resume must not change A");
 
+  const repeatedTargets = [
+    [records[0], "A", a1Path, a2Path, aHealthBefore],
+    [records[1], "B", b1Path, b2Path, bHealthBefore],
+    [records[2], "C", c1Path, c2Path, cHealthBefore],
+  ];
+  for (let cycle = 0; cycle < 20; cycle++) {
+    for (const [record, ownerId, firstPath, secondPath, baselineHealth] of repeatedTargets) {
+      const targetPath = cycle % 2 === 0 ? firstPath : secondPath;
+      const expectedConversationId = path.basename(targetPath, ".jsonl");
+      const switched = await switchPath(record, ownerId, targetPath);
+      assert.equal(switched.state.sessionId, expectedConversationId);
+      assert.equal(switched.state.sessionFile, targetPath);
+      const health = await request(record, "/health").then(response => response.json());
+      assert.equal(health.port, baselineHealth.port);
+      assert.equal(health.bridgePid, baselineHealth.bridgePid);
+      assert.equal(health.piPid, baselineHealth.piPid);
+    }
+  }
+  assert.deepEqual(userTexts(await history(records[0])), ["BBB"], "A repeated resume must stay on A's selected conversation");
+  assert.deepEqual(userTexts(await history(records[1])), ["B-current"], "B repeated resume must stay isolated");
+  assert.deepEqual(userTexts(await history(records[2])), ["C-current"], "C repeated resume must stay isolated");
+
   // Recreate only A's bridge with a launch selector for the selected legacy file.
   await stopBridge(a);
   a = { record: records[0], ...startBridge(records[0]) };
@@ -389,8 +422,8 @@ try {
   assert.equal(cHealthAfterARebuild.port, cHealthBefore.port);
   assert.equal(cHealthAfterARebuild.bridgePid, cHealthBefore.bridgePid);
   assert.equal(cHealthAfterARebuild.piPid, cHealthBefore.piPid);
-  assert.deepEqual(userTexts(await history(records[1])), ["B-first"], "B must remain unaffected by A restart and resume");
-  assert.deepEqual(userTexts(await history(records[2])), ["C-first"], "C must remain unaffected by A restart and resume");
+  assert.deepEqual(userTexts(await history(records[1])), ["B-current"], "B must remain unaffected by A restart and resume");
+  assert.deepEqual(userTexts(await history(records[2])), ["C-current"], "C must remain unaffected by A restart and resume");
 
   console.log("Mobile /resume conversation switching test passed");
 } finally {

@@ -1,6 +1,7 @@
 package com.piandroid
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +19,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+
+private const val PI_SESSION_IDENTITY_TAG = "PiSessionIdentity"
 
 /** A snapshot delivered to a UI client without making that client own the runtime. */
 internal data class PiRuntimeReady(
@@ -215,7 +218,20 @@ internal class PiSessionRuntime(
     }
 
     /** Switch only the conversation owned by the initiating Android Session. */
-    suspend fun switchPiConversation(androidSessionId: String, sessionPath: String): Result<PiRuntimeReady> = runCatching {
+    suspend fun switchPiConversation(
+        androidSessionId: String,
+        targetPiConversationId: String,
+        sessionPath: String
+    ): Result<PiRuntimeReady> = runCatching {
+        val currentPiConversationId = synchronized(stateLock) {
+            lastState?.sessionId.orEmpty().ifBlank { record.piSessionId }
+        }
+        Log.d(
+            PI_SESSION_IDENTITY_TAG,
+            "RESUME_IDENTITY targetAndroidSessionId=$androidSessionId activeAndroidSessionId=$id " +
+                "runtimeOwnerSessionId=$id currentPiConversationId=$currentPiConversationId " +
+                "targetPiConversationId=$targetPiConversationId"
+        )
         check(id == androidSessionId) { "Pi Session identity mismatch" }
         connectMutex.withLock {
             synchronized(stateLock) {
