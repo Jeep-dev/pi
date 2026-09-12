@@ -19,7 +19,8 @@ class ToolPresentationTest {
             diff = diff
         )
 
-        assertTrue(text.startsWith("工具完成：edit\n\n 1 unchanged"))
+        assertTrue(text.startsWith(" 1 unchanged"))
+        assertFalse(text.contains("工具完成"))
         assertTrue(text.contains(" 24 unchanged"))
         assertTrue(text.contains("+added line 12"))
         assertTrue(text.endsWith("Successfully applied 1 edit"))
@@ -42,9 +43,27 @@ class ToolPresentationTest {
             diff = "+must not appear"
         )
 
-        assertTrue(text.contains("工具执行失败：edit"))
-        assertTrue(text.contains("oldText did not match"))
+        assertEquals("oldText did not match", text)
+        assertFalse(text.contains("工具执行失败"))
         assertFalse(text.contains("must not appear"))
+    }
+
+    @Test
+    fun collapsedToolPreviewShowsTailAndExplicitHiddenCount() {
+        val output = (1..12).joinToString("\n") { "line $it" }
+
+        assertEquals(
+            (8..12).joinToString("\n") { "line $it" },
+            toolOutputPreview(output)
+        )
+        assertEquals("… (7 earlier lines)", toolHiddenHint(output))
+    }
+
+    @Test
+    fun toolDurationMatchesNativePiTenthsFormat() {
+        assertEquals("0.0s", formatToolDuration(0))
+        assertEquals("1.2s", formatToolDuration(1_249))
+        assertEquals("12.3s", formatToolDuration(12_345))
     }
 
     @Test
