@@ -13,6 +13,11 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
+        <provider
+            android:name=".SessionOwnershipRepairProvider"
+            android:authorities="${applicationId}.session-ownership-repair"
+            android:exported="false"
+            android:initOrder="100" />
         <service
             android:name=".AgentKeepAliveService"
             android:exported="false"
