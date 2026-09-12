@@ -18,10 +18,11 @@ assert.equal(Object.keys(dark).length, 39);
 assert.equal(Object.keys(light).length, 39);
 assert.equal(Object.keys(gray).length, 39);
 
-// Preserve every established dark color while allowing the native-Pi tool palette additions.
-const originalDark = {
+// Preserve the established dark UI outside the tool renderer. Tool surfaces are
+// intentionally neutral now so semantic colors belong to paths/diffs/errors.
+const establishedDark = {
   bg: "FF000000", headerBg: "FF05080A", panelBg: "FF0D1116", cardBg: "FF171B21",
-  toolBg: "FF263229", userBg: "FF30313A", border: "FF284864", accent: "FF70E69A",
+  userBg: "FF30313A", border: "FF284864", accent: "FF70E69A",
   blue: "FF79C5FF", textMain: "FFE8EAF0", textMuted: "FF858C96", thinkingText: "FF9A9A9A",
   danger: "FFFF8D8D", scrollBg: "DD41464C", scrollBorder: "FF626970", scrollText: "FFD2D5D8",
   scrollDivider: "FF686E74", headerDivider: "FF151B21", composerBg: "FF050607",
@@ -30,19 +31,20 @@ const originalDark = {
   markdownBorder: "FF77738E", markdownCodeBg: "FF171620", markdownStrong: "FFF0EEF7",
   markdownInlineCodeBg: "FF252432", markdownCodeText: "FFC9E6E2", markdownQuoteBg: "FF1C1B27",
 };
-for (const [key, value] of Object.entries(originalDark)) {
+for (const [key, value] of Object.entries(establishedDark)) {
   assert.equal(dark[key], value, `established dark color changed: ${key}`);
 }
 
 const nativeToolDark = {
-  toolPendingBg: "FF282832",
-  toolSuccessBg: "FF283228",
-  toolErrorBg: "FF3C2828",
-  toolTitle: "FFD4D4D4",
-  toolOutput: "FF808080",
-  toolMeta: "FF666666",
-  toolDiffAdded: "FFB5BD68",
-  toolDiffRemoved: "FFCC6666",
+  toolBg: "FF20242A",
+  toolPendingBg: "FF22262D",
+  toolSuccessBg: "FF20242A",
+  toolErrorBg: "FF342428",
+  toolTitle: "FFE2E4E8",
+  toolOutput: "FFA4A9B0",
+  toolMeta: "FF747A83",
+  toolDiffAdded: "FF9FD0AA",
+  toolDiffRemoved: "FFE09A9A",
 };
 for (const [key, value] of Object.entries(nativeToolDark)) {
   assert.equal(dark[key], value, `native Pi tool color mismatch: ${key}`);
