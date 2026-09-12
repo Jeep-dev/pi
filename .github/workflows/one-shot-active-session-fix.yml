@@ -21,9 +21,8 @@ jobs:
         run: |
           git rm app/src/main/java/com/piandroid/SessionOwnershipRepairProvider.kt
           git rm tools/apply_active_session_fix.py
-          git rm .github/workflows/one-shot-active-session-fix.yml
           git config user.name "Jeep-dev"
           git config user.email "213277512+Jeep-dev@users.noreply.github.com"
-          git add app tools .github/workflows/android.yml
+          git add app tools
           git commit -m "Bind chat UI to the active Pi runtime"
           git push origin HEAD:fix/security-lifecycle-build
