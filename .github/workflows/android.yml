@@ -7,6 +7,7 @@ on:
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
       - "tools/test_mobile_fork.mjs"
+      - "tools/test_mobile_resources.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
@@ -18,6 +19,7 @@ on:
       - "tools/test_bridge_auth.mjs"
       - "tools/test_mobile_tree.mjs"
       - "tools/test_mobile_fork.mjs"
+      - "tools/test_mobile_resources.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
@@ -44,6 +46,7 @@ jobs:
           node tools/test_themes.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_fork.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_resources.mjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

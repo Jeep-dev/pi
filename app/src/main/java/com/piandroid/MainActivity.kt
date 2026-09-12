@@ -150,8 +150,46 @@ class MainActivity : ComponentActivity() {
 }
 
 private const val ANDROID_EXTENSIONS_WIDGET = "__android_loaded_extensions"
+private const val ANDROID_RESOURCES_WIDGET = "__android_loaded_resources"
+private const val ANDROID_RESOURCES_COMMAND = "__android_loaded_resources"
 
 private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes }
+internal data class LoadedResourceSection(val title: String, val items: List<String>)
+
+internal fun parseLoadedResourceWidget(lines: List<String>): List<LoadedResourceSection> {
+    val sections = mutableListOf<LoadedResourceSection>()
+    var title: String? = null
+    val rawItems = mutableListOf<String>()
+
+    fun flush() {
+        val currentTitle = title ?: return
+        val items = rawItems
+            .flatMap { it.removePrefix("  ").split(",") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (items.isNotEmpty()) sections += LoadedResourceSection(currentTitle, items)
+        rawItems.clear()
+    }
+
+    lines.forEach { rawLine ->
+        val line = rawLine.trim()
+        val header = if (line.startsWith("[") && line.endsWith("]") && line.length > 2) {
+            line.substring(1, line.length - 1).trim()
+        } else {
+            ""
+        }
+        if (header.isNotBlank()) {
+            flush()
+            title = header
+        } else if (title != null && line.isNotBlank()) {
+            rawItems += line
+        }
+    }
+    flush()
+    return sections
+}
+
 private data class ChatLine(
     val role: String,
     val text: String,
@@ -372,6 +410,8 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
     var models by remember { mutableStateOf<List<PiModel>>(emptyList()) }
     var remoteCommands by remember { mutableStateOf<List<PiCommand>>(emptyList()) }
     var loadedExtensions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loadedResourceSections by remember { mutableStateOf<List<LoadedResourceSection>>(emptyList()) }
+    var categorizedResourcesReceived by remember { mutableStateOf(false) }
     var cursor by remember { mutableLongStateOf(0L) }
     var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
@@ -586,6 +626,18 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
         stats.await()?.let { currentStats = it }
         availableModels.await()?.let { models = it }
         availableCommands.await()?.let { remoteCommands = it }
+    }
+
+    fun requestLoadedResources(delayMillis: Long = 0L) {
+        // This is an extension command, so older Pi runtimes simply do not
+        // advertise it. Keep the legacy widget untouched in that case.
+        if (remoteCommands.none { it.name == ANDROID_RESOURCES_COMMAND }) return
+        scope.launch {
+            if (delayMillis > 0) delay(delayMillis)
+            // The categorized widget is fire-and-forget; a transient failure
+            // must not erase the last authoritative snapshot.
+            bridge.command("/$ANDROID_RESOURCES_COMMAND")
+        }
     }
 
     fun addSystem(text: String) {
@@ -842,17 +894,38 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                         if (req.message == "ANDROID_SESSION_SWITCHED") {
                             loadHistory()
                             refreshMeta()
+                            requestLoadedResources()
                             status = "Ready"
                         } else if (req.message == "ANDROID_PI_QUIT") {
                             intentionalQuit = true
                             status = "Stopping"
+                        } else if (req.message == "资源已重新加载") {
+                            addSystem(req.message)
+                            // session_start precedes resources_discover in Pi;
+                            // query after the reload settles to include contributed resources.
+                            requestLoadedResources(delayMillis = 250)
                         } else {
                             addSystem(req.message)
                         }
                     }
                     "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
-                    "setWidget" -> if (req.title == ANDROID_EXTENSIONS_WIDGET) {
-                        loadedExtensions = req.options.distinct()
+                    "setWidget" -> when (req.title) {
+                        ANDROID_RESOURCES_WIDGET -> {
+                            categorizedResourcesReceived = true
+                            loadedResourceSections = parseLoadedResourceWidget(req.options)
+                        }
+                        ANDROID_EXTENSIONS_WIDGET -> {
+                            loadedExtensions = req.options.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                            // Old Pi/bridge versions only know the legacy widget.
+                            // Do not let it overwrite a categorized snapshot.
+                            if (!categorizedResourcesReceived) {
+                                loadedResourceSections = if (loadedExtensions.isEmpty()) {
+                                    emptyList()
+                                } else {
+                                    listOf(LoadedResourceSection("Extensions", loadedExtensions))
+                                }
+                            }
+                        }
                     }
                     "set_editor_text" -> if (req.message.isNotBlank()) input = req.message
                     "select", "confirm", "input", "editor" -> {
@@ -935,6 +1008,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 }
                 panel = Panel.Chat
                 refreshMeta()
+                requestLoadedResources()
                 if (currentState?.streaming == true || currentState?.compacting == true) {
                     AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
                 } else {
@@ -1167,6 +1241,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                         bridge.applyDefaultModel(models).onFailure { addSystem(it.message.orEmpty()) }
                         addSystem("已使用默认模型创建新的 Pi session")
                         refreshMeta()
+                        requestLoadedResources()
                     },
                     onFailure = { addSystem("/new 失败：${it.message}") }
                 )
@@ -1190,7 +1265,12 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             }
             "/clone" -> scope.launch {
                 bridge.cloneSession().fold(
-                    onSuccess = { addSystem("当前 active branch 已克隆"); refreshMeta(); loadHistory() },
+                    onSuccess = {
+                        addSystem("当前 active branch 已克隆")
+                        refreshMeta()
+                        loadHistory()
+                        requestLoadedResources()
+                    },
                     onFailure = { addSystem("/clone 失败：${it.message}") }
                 )
             }
@@ -1269,6 +1349,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
             pendingUi = snapshot.pendingUi.lastOrNull()
             snapshot.editorText?.let { input = it }
         }
+        requestLoadedResources()
     }
 
     LaunchedEffect(connected) {
@@ -1298,7 +1379,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 if (processExited && connected) {
                     when (recoverBridge()) {
                         "restarted" -> restoreAfterReconnect()
-                        "attached" -> Unit
+                        "attached" -> requestLoadedResources()
                     }
                     status = if (currentState?.streaming == true) "Working" else "Ready"
                 }
@@ -1309,6 +1390,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                 if (eventFailures >= 3) {
                     when (recoverBridge()) {
                         "attached" -> {
+                            requestLoadedResources()
                             eventFailures = 0
                             status = if (currentState?.streaming == true) "Working" else "Ready"
                         }
@@ -1435,6 +1517,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                                                     currentState = switchedState
                                                     loadHistory()
                                                     refreshMeta()
+                                                    requestLoadedResources()
                                                     status = "Ready"
                                                 },
                                                 onFailure = {
@@ -1501,7 +1584,7 @@ private fun PiScreen(bridge: PiBridge, themeMode: PiThemeMode, onTheme: (PiTheme
                     cwd = cwd,
                     model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
                     status = chatStatus,
-                    extensions = loadedExtensions,
+                    resourceSections = loadedResourceSections,
                     connected = connected,
                     onConnect = connect,
                     onSettings = { panel = Panel.Settings },
@@ -1809,7 +1892,7 @@ private fun ChatPanel(
     cwd: String,
     model: String,
     status: String,
-    extensions: List<String>,
+    resourceSections: List<LoadedResourceSection>,
     connected: Boolean,
     onConnect: () -> Unit,
     onSettings: () -> Unit,
@@ -1889,9 +1972,9 @@ private fun ChatPanel(
                         fontSize = 11.sp
                     )
                 }
-                if (extensions.isNotEmpty()) {
+                resourceSections.forEach { section ->
                     Text(
-                        "[Extensions]",
+                        "[${section.title}]",
                         color = Blue,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
@@ -1899,7 +1982,7 @@ private fun ChatPanel(
                         modifier = Modifier.padding(top = 8.dp)
                     )
                     Text(
-                        "  ${extensions.joinToString(", ")}",
+                        "  ${section.items.joinToString(", ")}",
                         color = TextMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,

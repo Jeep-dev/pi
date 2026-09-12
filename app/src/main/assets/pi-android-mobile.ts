@@ -258,8 +258,26 @@ export default function (pi: any) {
     return points.find((point: any) => point.label === selected);
   }
 
-  function loadedExtensionLabels(): string[] {
-    const resources = [...pi.getCommands(), ...pi.getAllTools()];
+  type LoadedResourceSection = { title: string; items: string[] };
+
+  function uniqueValues(values: any[]): string[] {
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+  }
+
+  function uniqueSorted(values: any[]): string[] {
+    return uniqueValues(values).sort((left, right) => left.localeCompare(right));
+  }
+
+  function loadedExtensionLabels(commands = typeof pi.getCommands === "function" ? pi.getCommands() : [], tools = typeof pi.getAllTools === "function" ? pi.getAllTools() : []): string[] {
+    // getCommands() also contains prompt and skill commands. Only its extension
+    // entries belong in [Extensions]; the other entries are rendered separately.
+    const commandList = Array.isArray(commands) ? commands : [];
+    const hasCommandSource = commandList.some((resource: any) => typeof resource?.source === "string");
+    const extensionCommands = commandList.filter(
+      (resource: any) => resource?.source === "extension" || (!hasCommandSource && resource?.sourceInfo),
+    );
+    const configuredTools = Array.isArray(tools) ? tools : [];
+    const resources = [...extensionCommands, ...configuredTools];
     const byPath = new Map<string, any>();
     for (const resource of resources) {
       const sourceInfo = resource?.sourceInfo;
@@ -294,12 +312,97 @@ export default function (pi: any) {
       }
       return item.segments.join("/");
     });
-    return [...new Set(labels)].sort((left, right) => left.localeCompare(right));
+    return uniqueSorted(labels);
   }
 
-  function publishLoadedExtensions(ctx: any) {
-    ctx.ui.setWidget("__android_loaded_extensions", loadedExtensionLabels(), { placement: "aboveEditor" });
+  function compactContextPath(value: string, cwd: string): string {
+    const resourcePath = value.replace(/\\/g, "/");
+    const normalizedCwd = cwd.replace(/\\/g, "/").replace(/\/$/, "");
+    if (resourcePath === normalizedCwd) return ".";
+    if (resourcePath.startsWith(`${normalizedCwd}/`)) return resourcePath.slice(normalizedCwd.length + 1);
+    const homePath = homedir().replace(/\\/g, "/").replace(/\/$/, "");
+    if (resourcePath === homePath) return "~";
+    if (resourcePath.startsWith(`${homePath}/`)) return `~${resourcePath.slice(homePath.length)}`;
+    return resourcePath;
   }
+
+  function loadedResourceSections(ctx: any, includeContext: boolean): LoadedResourceSection[] {
+    const commandsResult = typeof pi.getCommands === "function" ? pi.getCommands() : [];
+    const toolsResult = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];
+    const commands = Array.isArray(commandsResult) ? commandsResult : [];
+    const tools = Array.isArray(toolsResult) ? toolsResult : [];
+    const sections: LoadedResourceSection[] = [];
+
+    if (includeContext && typeof ctx?.getSystemPromptOptions === "function") {
+      try {
+        const options = ctx.getSystemPromptOptions();
+        const contextItems = Array.isArray(options?.contextFiles)
+          ? uniqueValues(options.contextFiles.map((file: any) => compactContextPath(String(file?.path || ""), String(ctx.cwd || ""))))
+          : [];
+        if (contextItems.length > 0) sections.push({ title: "Context", items: contextItems });
+      } catch {
+        // Older Pi runtimes do not expose command system-prompt options.
+      }
+    }
+
+    const skills = uniqueSorted(
+      commands
+        .filter((command: any) => command?.source === "skill")
+        .map((command: any) => String(command.name || "").replace(/^skill:/, "")),
+    );
+    if (skills.length > 0) sections.push({ title: "Skills", items: skills });
+
+    const prompts = uniqueSorted(
+      commands
+        .filter((command: any) => command?.source === "prompt")
+        .map((command: any) => {
+          const name = String(command.name || "").trim();
+          return name.startsWith("/") ? name : `/${name}`;
+        }),
+    );
+    if (prompts.length > 0) sections.push({ title: "Prompts", items: prompts });
+
+    const extensions = loadedExtensionLabels(commands, tools);
+    if (extensions.length > 0) sections.push({ title: "Extensions", items: extensions });
+
+    // RPC mode currently returns [] here by design. If a newer Pi runtime
+    // exposes custom themes through the RPC UI context, only themes with a
+    // source path are shown, matching native Pi's built-in-theme exclusion.
+    let themes: string[] = [];
+    try {
+      const available = typeof ctx?.ui?.getAllThemes === "function" ? ctx.ui.getAllThemes() : [];
+      const builtInThemeNames = new Set(["dark", "light"]);
+      themes = uniqueSorted(
+        (Array.isArray(available) ? available : [])
+          .filter((theme: any) => String(theme?.path || "").trim())
+          .map((theme: any) => String(theme.name || basename(String(theme.path || ""))))
+          .filter((name) => !builtInThemeNames.has(name)),
+      );
+    } catch {}
+    if (themes.length > 0) sections.push({ title: "Themes", items: themes });
+
+    return sections;
+  }
+
+  function resourceWidgetLines(sections: LoadedResourceSection[]): string[] {
+    return sections.flatMap((section) => [`[${section.title}]`, `  ${section.items.join(", ")}`]);
+  }
+
+  function publishLoadedResources(ctx: any, includeContext = false) {
+    const sections = loadedResourceSections(ctx, includeContext);
+    ctx.ui.setWidget("__android_loaded_resources", resourceWidgetLines(sections), { placement: "aboveEditor" });
+    // Keep the original widget and its payload for older Android clients.
+    ctx.ui.setWidget(
+      "__android_loaded_extensions",
+      sections.find((section) => section.title === "Extensions")?.items || [],
+      { placement: "aboveEditor" },
+    );
+  }
+
+  pi.registerCommand("__android_loaded_resources", {
+    description: "Publish Pi's loaded resources to Android",
+    handler: async (_args: string, ctx: any) => publishLoadedResources(ctx, true),
+  });
 
   pi.registerCommand("tree", {
     description: "Navigate the user-message session tree",
@@ -548,11 +651,12 @@ export default function (pi: any) {
     },
   });
 
-  // RPC has no built-in loaded-resource query. Publish the runtime's real
-  // extension source metadata through a persistent widget so Android can render
-  // the same compact [Extensions] startup section as Pi's terminal UI.
+  // RPC has no complete built-in loaded-resource query. Publish the resource
+  // categories available through the runtime API immediately; Android follows
+  // up with __android_loaded_resources once command context is available so
+  // Context can be included too. The legacy widget remains for old clients.
   pi.on("session_start", (event: any, ctx: any) => {
-    publishLoadedExtensions(ctx);
+    publishLoadedResources(ctx);
     if (event?.reason === "reload") ctx.ui.notify("资源已重新加载", "info");
   });
 }

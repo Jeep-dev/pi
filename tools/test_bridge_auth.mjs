@@ -125,6 +125,7 @@ process.stdin.on("data", chunk => {
     }
     if (command.type === "prompt" && command.message === "__widget_test__") {
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "extensions-widget", method: "setWidget", widgetKey: "__android_loaded_extensions", widgetLines: ["mobile.ts", "project.ts"] }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "resources-widget", method: "setWidget", widgetKey: "__android_loaded_resources", widgetLines: ["[Context]", "  AGENTS.md", "[Prompts]", "  /review"] }) + "\\n");
     }
     const isAttachmentTest = command.type === "prompt" && command.message.startsWith("__attachment_test__");
     const attachmentValid = !isAttachmentTest || command.message.includes(".pi-android-uploads/");
@@ -347,6 +348,10 @@ try {
   assert.ok(
     snapshot.events.some(item => item.value?.widgetKey === "__android_loaded_extensions" && item.value?.widgetLines?.length === 2),
     "persistent extension widgets must survive Android UI reconnects",
+  );
+  assert.ok(
+    snapshot.events.some(item => item.value?.widgetKey === "__android_loaded_resources" && item.value?.widgetLines?.includes("[Context]")),
+    "categorized resource widgets must survive Android UI reconnects",
   );
 
   const closeTree = await fetch(`http://127.0.0.1:${port}/extension-ui`, {
