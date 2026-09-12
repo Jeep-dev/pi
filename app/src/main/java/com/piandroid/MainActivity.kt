@@ -835,7 +835,7 @@ private fun PiScreen(
             LocalCommand("hotkeys", "查看移动端手势与操作"),
             LocalCommand("changelog", "查看此 Android 版本更新内容"),
             LocalCommand("quit", "保存并停止当前 Pi 进程"),
-            LocalCommand("themes", "切换暗色、亮色或灰色主题"),
+            LocalCommand("themes", "切换暗色、亮色或灰色主题并持久化"),
             LocalCommand("settings", "连接与运行设置"),
             LocalCommand("run", "通过 Pi RPC 执行 bash（也支持 ! / !!）"),
             LocalCommand("files", "浏览及编辑当前项目文件"),
@@ -1477,11 +1477,15 @@ private fun PiScreen(
                 |• 滑动离开底部：暂停跟随；回到底部自动恢复
                 |• 右侧 ↑/↓：直接跳到消息顶部/底部
                 |• 长按消息：选择并复制文本
-                |• 工具卡片：默认 10 行，可展开全部实时输出
+                |• 工具卡片：默认紧凑折叠，Show all 展开完整参数与输出
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.9
+                """Pi Android v5.19.15
+                |• 工具卡片改为接近原生 Pi 的中性终端布局，不再把整条命令染成绿色
+                |• 长命令和长输出默认同时折叠；单行超长命令也限制视觉行数
+                |• 工具执行时间移到底部，不再挤压命令正文宽度
+                |• Show all 同时展开完整参数和完整输出，不丢失工具结果
                 |• 重建 Android Session / Runtime owner / Pi conversation 三层状态模型
                 |• 修复重复 legacy conversation 所有权与仅按 cwd 重连造成的串会话
                 |• Runtime 独占 history/state 提交并隔离重建客户端与过期事件
@@ -1519,7 +1523,6 @@ private fun PiScreen(
                 |• 底栏工作状态固定为简洁的 WORKING / RECONNECTING
                 |• 修复 /tree 对话框等待导致的 timeout，并自动定位最新当前消息
                 |• 恢复旧 session 时严格保留该会话的模型与 thinking level
-                |• 工具输出默认最多显示 10 个视觉行，只有手动展开才显示全文
                 |• 补齐原版 Pi 核心斜杠命令入口
                 |• /tree 只显示用户消息分支点，不显示工具执行过程
                 |• /export、/import、/share、/copy、/trust、/reload、/quit
@@ -1569,8 +1572,6 @@ private fun PiScreen(
                 status = "Compacting"
                 bridge.compact(args).fold(
                     onSuccess = {
-                        // get_entries is append-only; reload its compaction-aware
-                        // projection so summarized originals disappear at once.
                         loadHistory(preservePending = true)
                         addSystem("上下文压缩完成 · 点击 [compaction] 可查看摘要")
                         refreshMeta()
@@ -1595,8 +1596,6 @@ private fun PiScreen(
             }
             "/abort" -> {
                 status = "Stopping"
-                // Create the Activity-owned stop job before using the UI scope;
-                // a disappearing Composable cannot cancel the remote emergency stop.
                 val stop = runtime.stopCurrentAgent()
                 scope.launch {
                     stop.await().fold(
@@ -1654,7 +1653,6 @@ private fun PiScreen(
             .conflate()
             .collect { (lineCount, _, shouldFollow) ->
                 if (shouldFollow && lineCount > 0) {
-                    // Coalesce rapid token events into one layout/scroll update.
                     delay(32)
                     if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom()
                 }
@@ -1671,9 +1669,6 @@ private fun PiScreen(
     LaunchedEffect(followOutput) {
         if (followOutput) showScrollControls = false
     }
-
-    // Conversation state/history is published only by PiSessionRuntime. A
-    // second Compose-owned poll previously raced /resume and restored stale data.
 
     if (autoStart) pendingUi?.let { request ->
         fun sendUiResponse(action: suspend () -> Result<Unit>) {
@@ -1695,7 +1690,6 @@ private fun PiScreen(
             onDismiss = { sendUiResponse { bridge.extensionUiResponse(request.id, cancelled = true) } }
         )
     }
-
 
     if (autoStart && resumeOpen) {
         AlertDialog(
@@ -1737,11 +1731,7 @@ private fun PiScreen(
                                                     session.piConversationId,
                                                     session.path
                                                 ).fold(
-                                                    onSuccess = {
-                                                        // Runtime publishes the authoritative snapshot
-                                                        // without changing its Android owner.
-                                                        status = "Ready"
-                                                    },
+                                                    onSuccess = { status = "Ready" },
                                                     onFailure = {
                                                         addSystem("切换 session 失败：${it.message}")
                                                         status = "Ready"
@@ -1812,23 +1802,15 @@ private fun PiScreen(
                 val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
                 awaitEachGesture {
-                    val down = awaitFirstDown(
-                        requireUnconsumed = false,
-                        pass = PointerEventPass.Initial
-                    )
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     val startProgress = currentDrawerProgress.value
                     val chatArea = size.height * 0.86f
                     val inSessionGestureZone =
-                        startProgress <= 0.01f &&
-                            down.position.x > edgeExclusion &&
-                            down.position.y in (contentTop..chatArea) ||
+                        startProgress <= 0.01f && down.position.x > edgeExclusion && down.position.y in (contentTop..chatArea) ||
                             startProgress > 0.01f && down.position.x > edgeExclusion
-                    val velocityTracker = VelocityTracker().also {
-                        it.addPosition(down.uptimeMillis, down.position)
-                    }
+                    val velocityTracker = VelocityTracker().also { it.addPosition(down.uptimeMillis, down.position) }
                     var dragging = false
                     if (drawerWidthPx <= 0f) return@awaitEachGesture
-
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -1836,10 +1818,7 @@ private fun PiScreen(
                         val dx = change.position.x - down.position.x
                         val dy = change.position.y - down.position.y
                         if (!dragging) {
-                            // Let LazyColumn and the editor handle vertical movement.
-                            if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) {
-                                return@awaitEachGesture
-                            }
+                            if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) return@awaitEachGesture
                             if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f) {
                                 if (!inSessionGestureZone) return@awaitEachGesture
                                 dragging = true
@@ -1871,299 +1850,61 @@ private fun PiScreen(
         BackHandler(enabled = drawerProgress > 0.01f) { settleDrawer(0f) }
         Column(Modifier.fillMaxSize().imePadding()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
-            when (panel) {
-                Panel.Chat -> ChatPanel(
-                    lines = lines,
-                    listState = chatListState,
-                    cwd = cwd,
-                    model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
-                    status = chatStatus,
-                    resourceSections = loadedResourceSections,
-                    connected = connected,
-                    onConnect = connect,
-                    onSettings = { panel = Panel.Settings },
-                    onFollowChange = { followOutput = it },
-                    onUserScrollActivity = { showScrollControls = true },
-                    onToggleLine = ::toggleLine
-                )
-                Panel.Models -> ModelsPanel(
-                    models = models,
-                    state = currentState,
-                    initialSearch = modelInitialSearch,
-                    defaultModelKey = defaultModelKey,
-                    onBack = { panel = Panel.Chat },
-                    onSetDefault = { model ->
-                        bridge.saveDefaultModel(model)
-                        defaultModelKey = "${model.provider}/${model.id}"
-                        addSystem("新对话默认模型：$defaultModelKey")
-                    },
-                    onPick = { model ->
-                        runtime.launchTask {
-                            bridge.setModel(model).fold(
-                                onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") },
-                                onFailure = { addSystem("切换模型失败：${it.message}") }
-                            )
-                        }
-                    },
-                    onEffort = { level ->
-                        runtime.launchTask {
-                            bridge.setThinking(level).fold(
-                                onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") },
-                                onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }
-                            )
-                        }
-                    }
-                )
-                Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), onBack = { panel = Panel.Chat }) { level ->
-                    runtime.launchTask {
-                        bridge.setThinking(level).fold(
-                            onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") },
-                            onFailure = { addSystem("Thinking 设置失败：${it.message}") }
-                        )
+                when (panel) {
+                    Panel.Chat -> ChatPanel(
+                        lines = lines,
+                        listState = chatListState,
+                        cwd = cwd,
+                        model = currentState?.let { it.modelName.ifBlank { it.modelId } }.orEmpty(),
+                        status = chatStatus,
+                        resourceSections = loadedResourceSections,
+                        connected = connected,
+                        onConnect = connect,
+                        onSettings = { panel = Panel.Settings },
+                        onFollowChange = { followOutput = it },
+                        onUserScrollActivity = { showScrollControls = true },
+                        onToggleLine = ::toggleLine
+                    )
+                    Panel.Models -> ModelsPanel(models, currentState, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
+                        bridge.saveDefaultModel(model); defaultModelKey = "${model.provider}/${model.id}"; addSystem("新对话默认模型：$defaultModelKey")
+                    }, { model -> runtime.launchTask { bridge.setModel(model).fold(onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") }, onFailure = { addSystem("切换模型失败：${it.message}") }) } }, { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") }, onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }) } })
+                    Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
+                    Panel.Bash -> BashPanel(bashInput, bashOutput, bashRunning, { bashInput = it }, { panel = Panel.Chat }, {
+                        val command = bashInput.trim(); if (command.isNotBlank()) runtime.launchTask { bashRunning = true; bashOutput = "$ $command\n"; bridge.bash(command).fold(onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]" }, onFailure = { bashOutput += "ERROR: ${it.message}" }); bashRunning = false; refreshMeta() }
+                    }, { val stop = runtime.stopCurrentAgent(); scope.launch { stop.await(); bashRunning = false } })
+                    Panel.Files -> FilesPanel(currentPath, files, selectedFile, fileText, fileLoading, fileTruncated, { panel = Panel.Chat }, { item ->
+                        if (item.type == "directory") { currentPath = item.path; selectedFile = ""; fileText = ""; fileLoading = false; fileTruncated = false; runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } } }
+                        else { val requested = item.path; selectedFile = requested; fileText = ""; fileLoading = true; fileTruncated = false; runtime.launchTask { bridge.file(requested).fold(onSuccess = { loaded -> if (selectedFile == requested) { fileText = loaded.content; fileTruncated = loaded.truncated; fileLoading = false } }, onFailure = { if (selectedFile == requested) { selectedFile = ""; fileText = ""; fileLoading = false }; addSystem(it.message.orEmpty()) }) } }
+                    }, { currentPath = currentPath.substringBeforeLast('/', ""); selectedFile = ""; fileText = ""; fileLoading = false; fileTruncated = false; runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } } }, { fileText = it }, {
+                        if (fileTruncated) addSystem("文件超过 2 MB，只显示了只读预览；为防止数据丢失，不能从这里覆盖保存") else if (!fileLoading && selectedFile.isNotBlank()) runtime.launchTask { bridge.writeFile(selectedFile, fileText).fold(onSuccess = { addSystem("已保存 $selectedFile") }, onFailure = { addSystem("保存失败：${it.message}") }) }
+                    })
+                    Panel.Diff -> TextPanel("/diff", diffText) { panel = Panel.Chat }
+                    Panel.Stats -> StatsPanel(currentStats, currentState) { panel = Panel.Chat }
+                    Panel.Themes -> ThemesPanel(themeMode, { panel = Panel.Chat }, onTheme)
+                    Panel.Settings -> SettingsPanel(cwd, launchCommand, connected, currentState?.autoCompactionEnabled ?: true, { cwd = it; updateSessionRecord { record -> record.copy(cwd = it) } }, { launchCommand = it; updateSessionRecord { record -> record.copy(launchCommand = it) } }, connect, { enabled -> runtime.launchTask { bridge.setAutoCompaction(enabled).fold(onSuccess = { refreshMeta(); addSystem("自动压缩：${if (enabled) "开启" else "关闭"}") }, onFailure = { addSystem("自动压缩设置失败：${it.message}") }) } }, { panel = Panel.Chat })
+                }
+
+                if (panel == Panel.Chat && showScrollControls) {
+                    Column(Modifier.align(Alignment.BottomEnd).offset(y = (-108).dp).padding(end = 4.dp, bottom = 6.dp).width(40.dp)) {
+                        Box(Modifier.fillMaxWidth().height(36.dp).clickable { followOutput = false; showScrollControls = false; scope.launch { chatListState.scrollToItem(0) } }, contentAlignment = Alignment.Center) { Text("↑", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.fillMaxWidth().height(36.dp).clickable { showScrollControls = false; followOutput = true; scope.launch { if (lines.isNotEmpty()) chatListState.scrollToRealBottom() } }, contentAlignment = Alignment.Center) { Text("↓", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
                     }
                 }
-                Panel.Bash -> BashPanel(
-                    input = bashInput,
-                    output = bashOutput,
-                    running = bashRunning,
-                    onInput = { bashInput = it },
-                    onBack = { panel = Panel.Chat },
-                    onRun = {
-                        val command = bashInput.trim()
-                        if (command.isNotBlank()) runtime.launchTask {
-                            bashRunning = true
-                            bashOutput = "$ $command\n"
-                            bridge.bash(command).fold(
-                                onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]" },
-                                onFailure = { bashOutput += "ERROR: ${it.message}" }
-                            )
-                            bashRunning = false
-                            refreshMeta()
-                        }
-                    },
-                    onAbort = {
-                        val stop = runtime.stopCurrentAgent()
-                        scope.launch {
-                            stop.await()
-                            bashRunning = false
-                        }
-                    }
-                )
-                Panel.Files -> FilesPanel(
-                    path = currentPath,
-                    files = files,
-                    selectedFile = selectedFile,
-                    fileText = fileText,
-                    fileLoading = fileLoading,
-                    fileTruncated = fileTruncated,
-                    onBack = { panel = Panel.Chat },
-                    onOpen = { item ->
-                        if (item.type == "directory") {
-                            currentPath = item.path
-                            selectedFile = ""
-                            fileText = ""
-                            fileLoading = false
-                            fileTruncated = false
-                            runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } }
-                        } else {
-                            val requested = item.path
-                            selectedFile = requested
-                            fileText = ""
-                            fileLoading = true
-                            fileTruncated = false
-                            runtime.launchTask {
-                                bridge.file(requested).fold(
-                                    onSuccess = { loaded ->
-                                        if (selectedFile == requested) {
-                                            fileText = loaded.content
-                                            fileTruncated = loaded.truncated
-                                            fileLoading = false
-                                        }
-                                    },
-                                    onFailure = {
-                                        if (selectedFile == requested) {
-                                            selectedFile = ""
-                                            fileText = ""
-                                            fileLoading = false
-                                        }
-                                        addSystem(it.message.orEmpty())
-                                    }
-                                )
-                            }
-                        }
-                    },
-                    onUp = {
-                        currentPath = currentPath.substringBeforeLast('/', "")
-                        selectedFile = ""
-                        fileText = ""
-                        fileLoading = false
-                        fileTruncated = false
-                        runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } }
-                    },
-                    onText = { fileText = it },
-                    onSave = {
-                        if (fileTruncated) {
-                            addSystem("文件超过 2 MB，只显示了只读预览；为防止数据丢失，不能从这里覆盖保存")
-                        } else if (!fileLoading && selectedFile.isNotBlank()) runtime.launchTask {
-                            bridge.writeFile(selectedFile, fileText).fold(
-                                onSuccess = { addSystem("已保存 $selectedFile") },
-                                onFailure = { addSystem("保存失败：${it.message}") }
-                            )
-                        }
-                    }
-                )
-                Panel.Diff -> TextPanel("/diff", diffText, onBack = { panel = Panel.Chat })
-                Panel.Stats -> StatsPanel(currentStats, currentState, onBack = { panel = Panel.Chat })
-                Panel.Themes -> ThemesPanel(
-                    selected = themeMode,
-                    onBack = { panel = Panel.Chat },
-                    onSelect = onTheme
-                )
-                Panel.Settings -> SettingsPanel(
-                    cwd = cwd,
-                    launchCommand = launchCommand,
-                    connected = connected,
-                    autoCompaction = currentState?.autoCompactionEnabled ?: true,
-                    onCwd = {
-                        cwd = it
-                        updateSessionRecord { record -> record.copy(cwd = it) }
-                    },
-                    onLaunch = {
-                        launchCommand = it
-                        updateSessionRecord { record -> record.copy(launchCommand = it) }
-                    },
-                    onConnect = connect,
-                    onAutoCompaction = { enabled ->
-                        runtime.launchTask {
-                            bridge.setAutoCompaction(enabled).fold(
-                                onSuccess = { refreshMeta(); addSystem("自动压缩：${if (enabled) "开启" else "关闭"}") },
-                                onFailure = { addSystem("自动压缩设置失败：${it.message}") }
-                            )
-                        }
-                    },
-                    onBack = { panel = Panel.Chat }
-                )
-            }
-
-            if (panel == Panel.Chat && showScrollControls) {
-                Column(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .offset(y = (-108).dp)
-                        .padding(end = 4.dp, bottom = 6.dp)
-                        .width(40.dp)
-                ) {
-                    Box(
-                        Modifier.fillMaxWidth().height(36.dp).clickable {
-                            followOutput = false
-                            showScrollControls = false
-                            scope.launch { chatListState.scrollToItem(0) }
-                        },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("↑", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Box(
-                        Modifier.fillMaxWidth().height(36.dp).clickable {
-                            showScrollControls = false
-                            followOutput = true
-                            scope.launch {
-                                if (lines.isNotEmpty()) chatListState.scrollToRealBottom()
-                            }
-                        },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("↓", color = LocalPiColors.current.scrollText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
+                if (panel == Panel.Chat && input.startsWith("/")) {
+                    CommandPalette(input, localCommands, remoteCommands, Modifier.align(Alignment.BottomCenter)) { name, remote -> input = ""; if (remote || name == "import") input = "/$name " else { keyboardController?.hide(); focusManager.clearFocus(); executeInput("/$name") } }
                 }
             }
-
-            if (panel == Panel.Chat && input.startsWith("/")) {
-                CommandPalette(
-                    query = input,
-                    local = localCommands,
-                    remote = remoteCommands,
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                    onPick = { name, remote ->
-                        input = ""
-                        if (remote || name == "import") {
-                            input = "/$name "
-                        } else {
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
-                            executeInput("/$name")
-                        }
-                    }
-                )
+            if (panel == Panel.Chat) {
+                Composer(input, busy, pendingAttachments, attachmentNotice, composerFocusRequester, { input = it }, { attachmentNotice = ""; filePicker.launch(arrayOf("*/*")) }, { attachment -> pendingAttachments.remove(attachment) }, {
+                    val value = input; if (value.trimStart().startsWith("/")) { keyboardController?.hide(); focusManager.clearFocus() }; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments)
+                })
             }
+            Footer(currentState, currentStats, chatStatus) { panel = Panel.Chat; composerFocusRequest++ }
         }
-
-        if (panel == Panel.Chat) {
-            Composer(
-                value = input,
-                busy = busy,
-                attachments = pendingAttachments,
-                attachmentNotice = attachmentNotice,
-                focusRequester = composerFocusRequester,
-                onValue = { input = it },
-                onAttach = {
-                    attachmentNotice = ""
-                    filePicker.launch(arrayOf("*/*"))
-                },
-                onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
-                onPrimary = {
-                    // Sending is never abort. During a run executeInput() sends a
-                    // steering message, matching Pi's Enter behavior. Abort is the
-                    // explicit /abort command.
-                    val value = input
-                    if (value.trimStart().startsWith("/")) {
-                        keyboardController?.hide()
-                        focusManager.clearFocus()
-                    }
-                    val attachments = pendingAttachments.toList()
-                    input = ""
-                    pendingAttachments.clear()
-                    attachmentNotice = ""
-                    executeInput(value, attachments)
-                }
-            )
-        }
-
-        Footer(currentState, currentStats, chatStatus) {
-            panel = Panel.Chat
-            composerFocusRequest++
-        }
-        }
-
-        if (drawerProgress > 0.001f) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.34f))
-                    .clickable { settleDrawer(0f) }
-                    .zIndex(1f)
-            )
-        }
-        SessionDrawer(
-            sessions = sessions,
-            activeAndroidSessionId = activeAndroidSessionId,
-            modifier = Modifier
-                .width(drawerWidth)
-                .fillMaxHeight()
-                .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
-                .zIndex(2f),
-            onSelect = {
-                Log.d(SESSION_SELECTION_TAG, "DRAWER_ITEM_CLICK target=$it ACTIVE_BEFORE=$activeAndroidSessionId")
-                // Commit the active Android Session first. A failed/unknown
-                // selection must not dismiss the drawer or hide the failure.
-                if (onSelectSession(it)) settleDrawer(0f)
-            },
-            onNew = {
-                settleDrawer(0f)
-                onNewSession()
-            },
-            onManage = onManageSession
-        )
+        if (drawerProgress > 0.001f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.34f)).clickable { settleDrawer(0f) }.zIndex(1f))
+        SessionDrawer(sessions, activeAndroidSessionId, Modifier.width(drawerWidth).fillMaxHeight().offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }.zIndex(2f), {
+            Log.d(SESSION_SELECTION_TAG, "DRAWER_ITEM_CLICK target=$it ACTIVE_BEFORE=$activeAndroidSessionId"); if (onSelectSession(it)) settleDrawer(0f)
+        }, { settleDrawer(0f); onNewSession() }, onManageSession)
     }
 }
 
@@ -2176,113 +1917,28 @@ private fun sessionStatusLabel(record: PiSessionRecord): String = when (record.s
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionDrawer(
-    sessions: List<PiSessionRecord>,
-    activeAndroidSessionId: String,
-    modifier: Modifier = Modifier,
-    onSelect: (String) -> Unit,
-    onNew: () -> Unit,
-    onManage: (PiSessionRecord) -> Unit = {}
-) {
-    Column(
-        modifier
-            .background(PanelBg)
-            .border(1.dp, Border)
-            .navigationBarsPadding()
-            .padding(top = 8.dp)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionId: String, modifier: Modifier = Modifier, onSelect: (String) -> Unit, onNew: () -> Unit, onManage: (PiSessionRecord) -> Unit = {}) {
+    Column(modifier.background(PanelBg).border(1.dp, Border).navigationBarsPadding().padding(top = 8.dp)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Pi Sessions", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 15.sp, modifier = Modifier.weight(1f))
-            TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                Text("＋", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
-            }
+            TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text("＋", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp) }
         }
-        Text(
-            "中间区域右滑打开 · 左边缘保留返回",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
-        )
-        LazyColumn(
-            Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
-            contentPadding = PaddingValues(bottom = 12.dp)
-        ) {
+        Text("中间区域右滑打开 · 左边缘保留返回", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
+        LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
             items(sessions, key = { it.androidSessionId }) { record ->
                 val selected = record.androidSessionId == activeAndroidSessionId
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(if (selected) CardBg else Color.Transparent)
-                        .combinedClickable(
-                            onClick = { onSelect(record.androidSessionId) },
-                            onLongClick = { onManage(record) }
-                        )
-                        .padding(horizontal = 14.dp, vertical = 11.dp)
-                ) {
+                Column(Modifier.fillMaxWidth().background(if (selected) CardBg else Color.Transparent).combinedClickable(onClick = { onSelect(record.androidSessionId) }, onLongClick = { onManage(record) }).padding(horizontal = 14.dp, vertical = 11.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            if (selected) "◆" else if (record.pinned) "★" else "○",
-                            color = if (selected || record.pinned) Accent else TextMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
-                        )
+                        Text(if (selected) "◆" else if (record.pinned) "★" else "○", color = if (selected || record.pinned) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                         Spacer(Modifier.width(7.dp))
-                        Text(
-                            sessionDisplayName(record),
-                            color = if (selected) Accent else TextMain,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Text(sessionDisplayName(record), color = if (selected) Accent else TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     }
-                    Text(
-                        record.cwd,
-                        color = TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 19.dp, top = 4.dp)
-                    )
+                    Text(record.cwd, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 19.dp, top = 4.dp))
                     Row(Modifier.fillMaxWidth().padding(start = 19.dp, top = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            sessionStatusLabel(record),
-                            color = when (record.status) {
-                                PiSessionStatus.WORKING -> Blue
-                                PiSessionStatus.ERROR -> Danger
-                                PiSessionStatus.IDLE -> Accent
-                                PiSessionStatus.NOT_STARTED -> TextMuted
-                            },
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp
-                        )
-                        if (record.lastActivity > 0) {
-                            Text(
-                                " · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
-                                    .format(java.util.Date(record.lastActivity)),
-                                color = TextMuted,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp
-                            )
-                        }
+                        Text(sessionStatusLabel(record), color = when (record.status) { PiSessionStatus.WORKING -> Blue; PiSessionStatus.ERROR -> Danger; PiSessionStatus.IDLE -> Accent; PiSessionStatus.NOT_STARTED -> TextMuted }, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        if (record.lastActivity > 0) Text(" · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(record.lastActivity)), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                     }
-                    if (record.status == PiSessionStatus.ERROR && record.lastError.isNotBlank()) {
-                        Text(
-                            record.lastError,
-                            color = Danger,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 19.dp, top = 3.dp)
-                        )
-                    }
+                    if (record.status == PiSessionStatus.ERROR && record.lastError.isNotBlank()) Text(record.lastError, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 19.dp, top = 3.dp))
                 }
             }
         }
@@ -2290,608 +1946,120 @@ private fun SessionDrawer(
 }
 
 @Composable
-private fun SessionCreateDialog(
-    name: String,
-    cwd: String,
-    startupArguments: String,
-    onName: (String) -> Unit,
-    onCwd: (String) -> Unit,
-    onStartupArguments: (String) -> Unit,
-    onCreate: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("新建 Pi Session") },
-        text = {
-            Column(Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = onName,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    label = { Text("名称（可选）") },
-                    singleLine = true,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                )
-                OutlinedTextField(
-                    value = cwd,
-                    onValueChange = onCwd,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    label = { Text("工作目录 cwd") },
-                    singleLine = true,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                )
-                OutlinedTextField(
-                    value = startupArguments,
-                    onValueChange = onStartupArguments,
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("启动参数（可选）") },
-                    placeholder = { Text("例如：--no-tools") },
-                    singleLine = false,
-                    minLines = 1,
-                    maxLines = 3,
-                    isError = startupArgumentsError(startupArguments) != null,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                )
-                startupArgumentsError(startupArguments)?.let {
-                    Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onCreate,
-                enabled = cwd.trim().isNotBlank() && startupArgumentsError(startupArguments) == null
-            ) { Text("创建") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+private fun SessionCreateDialog(name: String, cwd: String, startupArguments: String, onName: (String) -> Unit, onCwd: (String) -> Unit, onStartupArguments: (String) -> Unit, onCreate: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("新建 Pi Session") }, text = { Column(Modifier.fillMaxWidth()) {
+        OutlinedTextField(name, onName, Modifier.fillMaxWidth().padding(bottom = 8.dp), label = { Text("名称（可选）") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+        OutlinedTextField(cwd, onCwd, Modifier.fillMaxWidth().padding(bottom = 8.dp), label = { Text("工作目录 cwd") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+        OutlinedTextField(startupArguments, onStartupArguments, Modifier.fillMaxWidth(), label = { Text("启动参数（可选）") }, placeholder = { Text("例如：--no-tools") }, singleLine = false, minLines = 1, maxLines = 3, isError = startupArgumentsError(startupArguments) != null, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+        startupArgumentsError(startupArguments)?.let { Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp)) }
+    } }, confirmButton = { TextButton(onClick = onCreate, enabled = cwd.trim().isNotBlank() && startupArgumentsError(startupArguments) == null) { Text("创建") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
-private fun SessionManageDialog(
-    record: PiSessionRecord,
-    onDismiss: () -> Unit,
-    onRename: () -> Unit,
-    onTogglePinned: () -> Unit,
-    onDelete: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(sessionDisplayName(record)) },
-        text = {
-            Column(Modifier.fillMaxWidth()) {
-                TextButton(onClick = onRename, modifier = Modifier.fillMaxWidth()) { Text("重命名") }
-                TextButton(onClick = onTogglePinned, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (record.pinned) "取消置顶" else "置顶")
-                }
-                TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) { Text("删除", color = Danger) }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+private fun SessionManageDialog(record: PiSessionRecord, onDismiss: () -> Unit, onRename: () -> Unit, onTogglePinned: () -> Unit, onDelete: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(sessionDisplayName(record)) }, text = { Column(Modifier.fillMaxWidth()) { TextButton(onClick = onRename, modifier = Modifier.fillMaxWidth()) { Text("重命名") }; TextButton(onClick = onTogglePinned, modifier = Modifier.fillMaxWidth()) { Text(if (record.pinned) "取消置顶" else "置顶") }; TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) { Text("删除", color = Danger) } } }, confirmButton = {}, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
-private fun SessionRenameDialog(
-    currentName: String,
-    onName: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("重命名 Pi Session") },
-        text = {
-            OutlinedTextField(
-                value = currentName,
-                onValueChange = onName,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("显示名称") },
-                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            )
-        },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+private fun SessionRenameDialog(currentName: String, onName: (String) -> Unit, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("重命名 Pi Session") }, text = { OutlinedTextField(currentName, onName, Modifier.fillMaxWidth(), singleLine = true, label = { Text("显示名称") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)) }, confirmButton = { TextButton(onClick = onConfirm) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
-private fun SessionDeleteDialog(
-    record: PiSessionRecord,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("删除 Pi Session？") },
-        text = { Text("将停止并清理“${sessionDisplayName(record)}”自己的 Pi、Bridge 和会话配置；不会删除项目文件或其他 Session。") },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("确认删除", color = Danger) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+private fun SessionDeleteDialog(record: PiSessionRecord, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("删除 Pi Session？") }, text = { Text("将停止并清理“${sessionDisplayName(record)}”自己的 Pi、Bridge 和会话配置；不会删除项目文件或其他 Session。") }, confirmButton = { TextButton(onClick = onConfirm) { Text("确认删除", color = Danger) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
-private fun EmptySessionHost(
-    initiallyOpen: Boolean = false,
-    onNew: () -> Unit
-) {
-    val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
-    var drawerProgress by remember(initiallyOpen) {
-        mutableFloatStateOf(if (initiallyOpen) 1f else 0f)
-    }
-    val currentProgress = rememberUpdatedState(drawerProgress)
-    fun settle(target: Float) {
-        scope.launch {
-            val animation = Animatable(drawerProgress)
-            animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { drawerProgress = value }
+private fun EmptySessionHost(initiallyOpen: Boolean = false, onNew: () -> Unit) {
+    val density = LocalDensity.current; val scope = rememberCoroutineScope(); var drawerProgress by remember(initiallyOpen) { mutableFloatStateOf(if (initiallyOpen) 1f else 0f) }; val currentProgress = rememberUpdatedState(drawerProgress)
+    fun settle(target: Float) { scope.launch { val animation = Animatable(drawerProgress); animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { drawerProgress = value } } }
+    BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().background(Bg).pointerInput(Unit) {
+        val edgeExclusion = with(density) { 24.dp.toPx() }; val contentTop = with(density) { 32.dp.toPx() }; val touchSlop = with(density) { 18.dp.toPx() }; val drawerWidthPx = size.width * 0.86f
+        awaitEachGesture { val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial); val startProgress = currentProgress.value; val chatArea = size.height * 0.86f; val inZone = startProgress <= 0.01f && down.position.x > edgeExclusion && down.position.y in (contentTop..chatArea) || startProgress > 0.01f && down.position.x > edgeExclusion; var dragging = false
+            while (true) { val event = awaitPointerEvent(PointerEventPass.Initial); val change = event.changes.firstOrNull { it.id == down.id } ?: break; val dx = change.position.x - down.position.x; val dy = change.position.y - down.position.y; if (!dragging) { if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) return@awaitEachGesture; if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f) { if (!inZone) return@awaitEachGesture; dragging = true } }; if (dragging) { change.consume(); drawerProgress = (startProgress + dx / drawerWidthPx).coerceIn(0f, 1f) }; if (!change.pressed) { if (dragging) settle(if (drawerProgress >= 0.35f) 1f else 0f); break } }
         }
-    }
-    BoxWithConstraints(
-        Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .background(Bg)
-            .pointerInput(Unit) {
-                val edgeExclusion = with(density) { 24.dp.toPx() }
-                val contentTop = with(density) { 32.dp.toPx() }
-                val touchSlop = with(density) { 18.dp.toPx() }
-                val drawerWidthPx = size.width * 0.86f
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    val startProgress = currentProgress.value
-                    val chatArea = size.height * 0.86f
-                    val inZone = startProgress <= 0.01f && down.position.x > edgeExclusion &&
-                        down.position.y in (contentTop..chatArea) || startProgress > 0.01f && down.position.x > edgeExclusion
-                    var dragging = false
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        val dx = change.position.x - down.position.x
-                        val dy = change.position.y - down.position.y
-                        if (!dragging) {
-                            if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) return@awaitEachGesture
-                            if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f) {
-                                if (!inZone) return@awaitEachGesture
-                                dragging = true
-                            }
-                        }
-                        if (dragging) {
-                            change.consume()
-                            drawerProgress = (startProgress + dx / drawerWidthPx).coerceIn(0f, 1f)
-                        }
-                        if (!change.pressed) {
-                            if (dragging) settle(if (drawerProgress >= 0.35f) 1f else 0f)
-                            break
-                        }
-                    }
-                }
-            }
-    ) {
-        val drawerWidth = maxWidth * 0.86f
-        val drawerWidthPx = with(density) { drawerWidth.toPx() }
-        BackHandler(enabled = drawerProgress > 0.01f) { settle(0f) }
-        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("没有 Pi Session", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
-        }
-        if (drawerProgress > 0.001f) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.34f)).clickable { settle(0f) }.zIndex(1f))
-        }
-        SessionDrawer(
-            sessions = emptyList(),
-            activeAndroidSessionId = "",
-            modifier = Modifier
-                .width(drawerWidth)
-                .fillMaxHeight()
-                .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
-                .zIndex(2f),
-            onSelect = {},
-            onNew = {
-                settle(0f)
-                onNew()
-            }
-        )
+    }) {
+        val drawerWidth = maxWidth * 0.86f; val drawerWidthPx = with(density) { drawerWidth.toPx() }; BackHandler(enabled = drawerProgress > 0.01f) { settle(0f) }
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) { Text("没有 Pi Session", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp) }
+        if (drawerProgress > 0.001f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.34f)).clickable { settle(0f) }.zIndex(1f))
+        SessionDrawer(emptyList(), "", Modifier.width(drawerWidth).fillMaxHeight().offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }.zIndex(2f), {}, { settle(0f); onNew() })
     }
 }
 
 @Composable
-private fun TerminalHeader(
-    cwd: String,
-    model: String,
-    status: String,
-    connected: Boolean,
-    onConnect: () -> Unit,
-    onSettings: () -> Unit
-) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(HeaderBg)
-            .border(1.dp, LocalPiColors.current.headerDivider)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-            Text(cwd.substringAfterLast('/').ifBlank { "home" }, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-            Spacer(Modifier.width(8.dp))
-            Text("$", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = if (connected) onSettings else onConnect) {
-                Text(if (connected) "⋮" else "Connect", color = if (connected) TextMuted else Accent)
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Model: ${model.ifBlank { "—" }}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        }
+private fun TerminalHeader(cwd: String, model: String, status: String, connected: Boolean, onConnect: () -> Unit, onSettings: () -> Unit) {
+    Column(Modifier.fillMaxWidth().background(HeaderBg).border(1.dp, LocalPiColors.current.headerDivider).padding(horizontal = 14.dp, vertical = 10.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 16.sp); Text(cwd.substringAfterLast('/').ifBlank { "home" }, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 16.sp); Spacer(Modifier.width(8.dp)); Text("$", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 16.sp); Spacer(Modifier.weight(1f)); TextButton(onClick = if (connected) onSettings else onConnect) { Text(if (connected) "⋮" else "Connect", color = if (connected) TextMuted else Accent) } }
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) { Text("Model: ${model.ifBlank { "—" }}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp); Text(status, color = if (status == "Ready") Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
     }
 }
 
 private suspend fun LazyListState.scrollToRealBottom() {
-    repeat(3) {
-        // Wait for the latest streamed text to be measured. Never snap an
-        // already-visible growing item back to its top; that caused flicker.
-        withFrameNanos { }
-        val count = layoutInfo.totalItemsCount
-        if (count == 0) return
-        val target = count - 1
-        val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        if (lastVisible < target - 1) {
-            scrollToItem(target)
-            withFrameNanos { }
-        }
-        if (!canScrollForward) return
-        val moved = scrollBy(1_000_000f)
-        if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return
-    }
+    repeat(3) { withFrameNanos { }; val count = layoutInfo.totalItemsCount; if (count == 0) return; val target = count - 1; val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1; if (lastVisible < target - 1) { scrollToItem(target); withFrameNanos { } }; if (!canScrollForward) return; val moved = scrollBy(1_000_000f); if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return }
 }
 
 @Composable
-private fun ChatPanel(
-    lines: List<ChatLine>,
-    listState: LazyListState,
-    cwd: String,
-    model: String,
-    status: String,
-    resourceSections: List<LoadedResourceSection>,
-    connected: Boolean,
-    onConnect: () -> Unit,
-    onSettings: () -> Unit,
-    onFollowChange: (Boolean) -> Unit,
-    onUserScrollActivity: () -> Unit,
-    onToggleLine: (Int) -> Unit
-) {
+private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, status: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, onConnect: () -> Unit, onSettings: () -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
-
-    val userScrollLock = remember(listState) {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput) {
-                    onFollowChange(false)
-                    onUserScrollActivity()
-                }
-                return Offset.Zero
-            }
-
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && isAtBottom()) onFollowChange(true)
-                return Offset.Zero
-            }
-        }
-    }
-
-    LaunchedEffect(listState) {
-        snapshotFlow { isAtBottom() }
-            .distinctUntilChanged()
-            .collect { atBottom -> if (atBottom) onFollowChange(true) }
-    }
-    LazyColumn(
-        state = listState,
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 3.dp)
-            .nestedScroll(userScrollLock),
-        contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
+    val userScrollLock = remember(listState) { object : NestedScrollConnection { override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset { if (source == NestedScrollSource.UserInput) { onFollowChange(false); onUserScrollActivity() }; return Offset.Zero }; override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset { if (source == NestedScrollSource.UserInput && isAtBottom()) onFollowChange(true); return Offset.Zero } } }
+    LaunchedEffect(listState) { snapshotFlow { isAtBottom() }.distinctUntilChanged().collect { atBottom -> if (atBottom) onFollowChange(true) } }
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 3.dp).nestedScroll(userScrollLock), contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item(key = "session-meta") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 2.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                    Text(
-                        cwd.substringAfterLast('/').ifBlank { "home" },
-                        color = Blue,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("$", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        if (connected) "⋮" else if (status == "Disconnected" || status.endsWith("failed")) "Connect" else "Connecting…",
-                        color = if (connected) TextMuted else Accent,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        modifier = Modifier.clickable { if (connected) onSettings() else onConnect() }.padding(8.dp)
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "Model: ${model.ifBlank { "—" }}",
-                        color = TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-                    Text(
-                        status,
-                        color = when {
-                            status == "Ready" -> Accent
-                            status.startsWith("WORKING") || status.startsWith("RECONNECTING") -> Blue
-                            else -> TextMuted
-                        },
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-                }
-                resourceSections.forEach { section ->
-                    Text(
-                        "[${section.title}]",
-                        color = Blue,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                    Text(
-                        "  ${section.items.joinToString(", ")}",
-                        color = TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp
-                    )
-                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text("~/", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp); Text(cwd.substringAfterLast('/').ifBlank { "home" }, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp); Spacer(Modifier.width(6.dp)); Text("$", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 13.sp); Spacer(Modifier.weight(1f)); Text(if (connected) "⋮" else if (status == "Disconnected" || status.endsWith("failed")) "Connect" else "Connecting…", color = if (connected) TextMuted else Accent, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.clickable { if (connected) onSettings() else onConnect() }.padding(8.dp)) }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { Text("Model: ${model.ifBlank { "—" }}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp); Text(status, color = when { status == "Ready" -> Accent; status.startsWith("WORKING") || status.startsWith("RECONNECTING") -> Blue; else -> TextMuted }, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                resourceSections.forEach { section -> Text("[${section.title}]", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp)); Text("  ${section.items.joinToString(", ")}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp) }
             }
         }
-
-        if (lines.isEmpty()) {
-            item {
-                Text(
-                    "Pi Touch GUI\n输入 / 调出真实命令。",
-                    color = TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(6.dp)
-                )
-            }
-        }
+        if (lines.isEmpty()) item { Text("Pi Touch GUI\n输入 / 调出真实命令。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.padding(6.dp)) }
         itemsIndexed(lines) { lineIndex, line ->
-            val fullText = line.text.trimEnd()
-            val isTool = line.role.startsWith("tool")
-            // A single logical line (JSON/source maps, escaped output) may wrap into
-            // hundreds of visual lines. Clamp rendered lines as well as detecting
-            // long character-only output.
-            val visibleText = fullText
+            val fullText = line.text.trimEnd(); val visibleText = fullText
             SelectionContainer {
                 when (line.role) {
-                "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent" || line.delivery == "steering_failed") {
-                    Column(
-                        Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            when (line.delivery) {
-                                "steering_sent" -> "↳ STEERING · 已送达"
-                                "steering_failed" -> "↳ STEERING · 发送失败"
-                                else -> "↳ STEERING · 排队中"
-                            },
-                            color = Blue,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        )
-                        Text(
-                            visibleText,
-                            color = TextMain,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 15.sp,
-                            lineHeight = 22.sp
-                        )
-                    }
-                } else Text(
-                    visibleText,
-                    color = TextMain,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
-                    modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 12.dp)
-                )
-                "assistant" -> if (line.streaming) {
-                    Text(
-                        visibleText,
-                        color = LocalPiColors.current.markdownText,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
-                    )
-                } else {
-                    PiMarkdown(
-                        visibleText,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)
-                    )
-                }
-                "thinking" -> Text(
-                    visibleText,
-                    color = ThinkingText,
-                    fontFamily = FontFamily.Monospace,
-                    fontStyle = FontStyle.Italic,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 3.dp)
-                )
-                "compaction" -> Column(
-                    Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 9.dp)
-                ) {
-                    Text(
-                        "[compaction]",
-                        color = Blue,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        if (line.tokensBefore > 0) {
-                            "已从 ${java.text.NumberFormat.getIntegerInstance().format(line.tokensBefore)} tokens 压缩"
-                        } else {
-                            "上下文已压缩"
-                        },
-                        color = TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(top = 3.dp)
-                    )
-                    if (!line.collapsed) {
-                        PiMarkdown(
-                            fullText,
-                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-                        )
-                    }
-                    TextButton(
-                        onClick = { onToggleLine(lineIndex) },
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            if (line.collapsed) "展开摘要 ↓" else "收起摘要 ↑",
-                            color = Blue,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-                "tool", "tool-draft" -> {
-                    val colors = LocalPiColors.current
-                    var toolNow by remember(line.toolCallId, line.toolStartedAt) {
-                        mutableLongStateOf(android.os.SystemClock.uptimeMillis())
-                    }
-                    LaunchedEffect(line.streaming, line.toolStartedAt) {
-                        while (line.streaming && line.toolStartedAt > 0L) {
-                            toolNow = android.os.SystemClock.uptimeMillis()
-                            delay(250)
-                        }
-                    }
-                    val toolOutput = line.toolOutput.ifBlank { fullText }
-                    val hiddenHint = toolHiddenHint(toolOutput)
-                    val renderedOutput = if (line.collapsed && hiddenHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
-                    val duration = if (line.toolStartedAt > 0L) {
-                        val end = if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow
-                        formatToolDuration(end - line.toolStartedAt)
-                    } else ""
-                    val background = when {
-                        line.toolIsError -> colors.toolErrorBg
-                        line.streaming -> colors.toolPendingBg
-                        else -> colors.toolSuccessBg
-                    }
-                    Column(
-                        Modifier.fillMaxWidth().background(background, RoundedCornerShape(3.dp)).padding(horizontal = 8.dp, vertical = 9.dp)
-                    ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                buildAnnotatedString {
-                                    val name = line.toolName.ifBlank { if (line.role == "tool-draft") "tool" else "tool" }
-                                    pushStyle(SpanStyle(color = colors.toolTitle, fontWeight = FontWeight.Bold))
-                                    append(if (name == "bash") "$ " else name)
-                                    if (name != "bash" && line.toolArgs.isNotBlank()) append(" ")
-                                    pop()
-                                    if (line.toolArgs.isNotBlank()) {
-                                        pushStyle(SpanStyle(color = Accent))
-                                        append(line.toolArgs)
-                                        pop()
-                                    }
-                                },
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.sp,
-                                lineHeight = 18.sp,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (duration.isNotBlank()) {
-                                Text(
-                                    (if (line.streaming) "Elapsed " else "Took ") + duration,
-                                    color = colors.toolMeta,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp,
-                                    modifier = Modifier.padding(start = 8.dp)
-                                )
+                    "user" -> if (line.delivery in setOf("steering", "steering_queued", "steering_sent", "steering_failed")) Column(Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 10.dp)) { Text(when (line.delivery) { "steering_sent" -> "↳ STEERING · 已送达"; "steering_failed" -> "↳ STEERING · 发送失败"; else -> "↳ STEERING · 排队中" }, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 4.dp)); Text(visibleText, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 15.sp, lineHeight = 22.sp) } else Text(visibleText, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 15.sp, lineHeight = 22.sp, modifier = Modifier.fillMaxWidth().background(UserBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 12.dp))
+                    "assistant" -> if (line.streaming) Text(visibleText, color = LocalPiColors.current.markdownText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp)) else PiMarkdown(visibleText, modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 4.dp))
+                    "thinking" -> Text(visibleText, color = ThinkingText, fontFamily = FontFamily.Monospace, fontStyle = FontStyle.Italic, fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 3.dp))
+                    "compaction" -> Column(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 9.dp)) { Text("[compaction]", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold); Text(if (line.tokensBefore > 0) "已从 ${java.text.NumberFormat.getIntegerInstance().format(line.tokensBefore)} tokens 压缩" else "上下文已压缩", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp)); if (!line.collapsed) PiMarkdown(fullText, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)); TextButton(onClick = { onToggleLine(lineIndex) }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) { Text(if (line.collapsed) "展开摘要 ↓" else "收起摘要 ↑", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } }
+                    "tool", "tool-draft" -> {
+                        val colors = LocalPiColors.current
+                        var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
+                        LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(250) } }
+                        val toolOutput = line.toolOutput.ifBlank { fullText }
+                        val outputHint = toolHiddenHint(toolOutput)
+                        val argsHint = toolArgsHiddenHint(line.toolArgs)
+                        val renderedOutput = if (line.collapsed && outputHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
+                        val renderedArgs = if (line.collapsed && argsHint.isNotBlank()) toolArgsPreview(line.toolArgs) else line.toolArgs
+                        val duration = if (line.toolStartedAt > 0L) formatToolDuration((if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt) else ""
+                        val name = line.toolName.ifBlank { "tool" }
+                        val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; else -> colors.toolSuccessBg }
+                        val expandable = argsHint.isNotBlank() || outputHint.isNotBlank()
+                        Column(Modifier.fillMaxWidth().background(background, RoundedCornerShape(3.dp)).padding(horizontal = 9.dp, vertical = 8.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (name == "bash") "$ bash" else name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                if (line.toolIsError) Text("error", color = Danger, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
                             }
-                        }
-                        if (line.toolMeta.isNotBlank()) {
-                            Text(
-                                line.toolMeta,
-                                color = if (line.toolIsError) Danger else colors.toolMeta,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp,
-                                lineHeight = 15.sp,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-                        if (renderedOutput.isNotBlank()) {
-                            val styledOutput = buildAnnotatedString {
-                                renderedOutput.lines().forEachIndexed { index, outputLine ->
-                                    val color = when {
-                                        outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded
-                                        outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved
-                                        else -> colors.toolOutput
-                                    }
-                                    pushStyle(SpanStyle(color = color))
-                                    append(outputLine)
-                                    pop()
-                                    if (index != renderedOutput.lines().lastIndex) append('\n')
+                            if (renderedArgs.isNotBlank()) {
+                                Text(renderedArgs, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, maxLines = if (line.collapsed) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+                            }
+                            if (line.toolMeta.isNotBlank()) Text(line.toolMeta, color = if (line.toolIsError) Danger else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp))
+                            if (renderedOutput.isNotBlank()) {
+                                val outputLines = renderedOutput.lines()
+                                val styledOutput = buildAnnotatedString { outputLines.forEachIndexed { index, outputLine -> val color = when { outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded; outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved; else -> colors.toolOutput }; pushStyle(SpanStyle(color = color)); append(outputLine); pop(); if (index != outputLines.lastIndex) append('\n') } }
+                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 7.dp))
+                            }
+                            if (expandable) {
+                                Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(onClick = { onToggleLine(lineIndex) }, contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)) { Text(if (line.collapsed) "Show all" else "Collapse", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+                                    Spacer(Modifier.weight(1f))
+                                    if (duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
                                 }
-                            }
-                            Text(
-                                styledOutput,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.5.sp,
-                                lineHeight = 17.sp,
-                                modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
-                            )
-                        }
-                        if (hiddenHint.isNotBlank()) {
-                            if (line.collapsed) {
-                                Text(
-                                    hiddenHint,
-                                    color = colors.toolMeta,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp,
-                                    modifier = Modifier.padding(top = 4.dp)
-                                )
-                            }
-                            TextButton(
-                                onClick = { onToggleLine(lineIndex) },
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 1.dp)
-                            ) {
-                                Text(
-                                    if (line.collapsed) "Show all" else "Collapse",
-                                    color = Blue,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp
-                                )
+                            } else if (duration.isNotBlank()) {
+                                Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp, modifier = Modifier.align(Alignment.End).padding(top = 4.dp))
                             }
                         }
                     }
-                }
-                    else -> Text(
-                        visibleText,
-                        color = if (line.text.contains("失败") || line.text.contains("错误") || line.text.contains("ERROR")) Danger else TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
+                    else -> Text(visibleText, color = if (line.text.contains("失败") || line.text.contains("错误") || line.text.contains("ERROR")) Danger else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp))
                 }
             }
         }
@@ -2899,645 +2067,69 @@ private fun ChatPanel(
 }
 
 @Composable
-private fun CommandPalette(
-    query: String,
-    local: List<LocalCommand>,
-    remote: List<PiCommand>,
-    modifier: Modifier = Modifier,
-    onPick: (String, Boolean) -> Unit
-) {
-    val needle = query.removePrefix("/").trim().lowercase()
-    val localNames = local.map { it.name }.toSet()
-    val choices = buildList<Pair<LocalCommand, Boolean>> {
-        local.filter { it.name.contains(needle) }.forEach { add(it to false) }
-        remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach {
-            add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true)
-        }
-    }.take(64)
-    if (choices.isEmpty()) return
-    val paletteState = rememberLazyListState()
-    BoxWithConstraints(modifier.fillMaxWidth()) {
-        val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp))
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-                .fillMaxWidth()
-                .heightIn(max = allowedHeight)
-                .background(PanelBg, RoundedCornerShape(10.dp))
-                .border(1.dp, Border, RoundedCornerShape(10.dp))
-                .padding(vertical = 3.dp)
-        ) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text("${choices.size} · 上下滑动", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-            }
-            LazyColumn(
-                state = paletteState,
-                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                contentPadding = PaddingValues(bottom = 3.dp)
-            ) {
-                items(choices) { choice ->
-                    val cmd = choice.first
-                    val remote = choice.second
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onPick(cmd.name, remote) }.padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(112.dp))
-                        Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    }
-                }
-            }
-        }
-    }
+private fun CommandPalette(query: String, local: List<LocalCommand>, remote: List<PiCommand>, modifier: Modifier = Modifier, onPick: (String, Boolean) -> Unit) {
+    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
+    BoxWithConstraints(modifier.fillMaxWidth()) { val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp)); Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth().heightIn(max = allowedHeight).background(PanelBg, RoundedCornerShape(10.dp)).border(1.dp, Border, RoundedCornerShape(10.dp)).padding(vertical = 3.dp)) { Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) { Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f)); Text("${choices.size} · 上下滑动", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }; LazyColumn(state = paletteState, modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 3.dp)) { items(choices) { choice -> val cmd = choice.first; val remoteChoice = choice.second; Row(Modifier.fillMaxWidth().clickable { onPick(cmd.name, remoteChoice) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(112.dp)); Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f)) } } } } }
 }
 
 @Composable
-private fun Composer(
-    value: String,
-    busy: Boolean,
-    attachments: List<PiAttachment>,
-    attachmentNotice: String,
-    focusRequester: FocusRequester,
-    onValue: (String) -> Unit,
-    onAttach: () -> Unit,
-    onRemoveAttachment: (PiAttachment) -> Unit,
-    onPrimary: () -> Unit
-) {
+private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachment>, attachmentNotice: String, focusRequester: FocusRequester, onValue: (String) -> Unit, onAttach: () -> Unit, onRemoveAttachment: (PiAttachment) -> Unit, onPrimary: () -> Unit) {
     Column(Modifier.fillMaxWidth().background(LocalPiColors.current.composerBg)) {
-        if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 3.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                attachments.forEach { attachment ->
-                    Text(
-                        "${attachment.name}${if (attachment.byteCount >= 0) " · ${compactCount(attachment.byteCount)}B" else ""}  ×",
-                        color = Blue,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        modifier = Modifier.background(CardBg, RoundedCornerShape(5.dp))
-                            .clickable { onRemoveAttachment(attachment) }
-                            .padding(horizontal = 7.dp, vertical = 5.dp)
-                    )
-                }
-                if (attachmentNotice.isNotBlank()) Text(attachmentNotice, color = Danger, fontSize = 10.sp)
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 5.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-        TextButton(
-            onClick = onAttach,
-            modifier = Modifier.width(44.dp).height(52.dp),
-            contentPadding = PaddingValues(0.dp),
-            enabled = true,
-            colors = ButtonDefaults.textButtonColors(contentColor = Blue, disabledContentColor = TextMuted)
-        ) {
-            Text("＋", fontFamily = FontFamily.Monospace, fontSize = 22.sp)
-        }
-        OutlinedTextField(
-            value = value,
-            onValueChange = onValue,
-            modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 132.dp).focusRequester(focusRequester),
-            textStyle = TextStyle(
-                color = TextMain,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp,
-                lineHeight = 20.sp
-            ),
-            placeholder = { Text("输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1) },
-            singleLine = false,
-            minLines = 1,
-            maxLines = 5,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onPrimary() }),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color.Transparent,
-                unfocusedBorderColor = Color.Transparent,
-                disabledBorderColor = Color.Transparent,
-                errorBorderColor = Color.Transparent,
-                focusedContainerColor = Color.Transparent,
-                unfocusedContainerColor = Color.Transparent,
-                disabledContainerColor = Color.Transparent
-            )
-        )
-        TextButton(
-            onClick = onPrimary,
-            modifier = Modifier.width(52.dp).height(52.dp),
-            contentPadding = PaddingValues(0.dp),
-            enabled = busy || value.isNotBlank() || attachments.isNotEmpty(),
-            colors = ButtonDefaults.textButtonColors(
-                contentColor = Blue,
-                disabledContentColor = LocalPiColors.current.disabledAction
-            )
-        ) {
-            Text("↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp)
-        }
+        if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) { attachments.forEach { attachment -> Text("${attachment.name}${if (attachment.byteCount >= 0) " · ${compactCount(attachment.byteCount)}B" else ""}  ×", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.background(CardBg, RoundedCornerShape(5.dp)).clickable { onRemoveAttachment(attachment) }.padding(horizontal = 7.dp, vertical = 5.dp)) }; if (attachmentNotice.isNotBlank()) Text(attachmentNotice, color = Danger, fontSize = 10.sp) }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 5.dp, vertical = 4.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            TextButton(onClick = onAttach, modifier = Modifier.width(44.dp).height(52.dp), contentPadding = PaddingValues(0.dp), enabled = true, colors = ButtonDefaults.textButtonColors(contentColor = Blue, disabledContentColor = TextMuted)) { Text("＋", fontFamily = FontFamily.Monospace, fontSize = 22.sp) }
+            OutlinedTextField(value = value, onValueChange = onValue, modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 132.dp).focusRequester(focusRequester), textStyle = TextStyle(color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 20.sp), placeholder = { Text("输入消息或 / 命令…", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1) }, singleLine = false, minLines = 1, maxLines = 5, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { onPrimary() }), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, disabledBorderColor = Color.Transparent, errorBorderColor = Color.Transparent, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent))
+            TextButton(onClick = onPrimary, modifier = Modifier.width(52.dp).height(52.dp), contentPadding = PaddingValues(0.dp), enabled = busy || value.isNotBlank() || attachments.isNotEmpty(), colors = ButtonDefaults.textButtonColors(contentColor = Blue, disabledContentColor = LocalPiColors.current.disabledAction)) { Text("↵", fontFamily = FontFamily.Monospace, fontSize = 20.sp) }
         }
     }
 }
 
-private fun compactCount(value: Long): String = when {
-    value >= 1_000_000_000 -> "${(value / 1_000_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}B"
-    value >= 1_000_000 -> "${(value / 1_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}M"
-    value >= 1_000 -> "${(value / 1_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}k"
-    else -> value.toString()
-}
+private fun compactCount(value: Long): String = when { value >= 1_000_000_000 -> "${(value / 1_000_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}B"; value >= 1_000_000 -> "${(value / 1_000_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}M"; value >= 1_000 -> "${(value / 1_000.0).let { if (it >= 10) "%.0f".format(java.util.Locale.US, it) else "%.1f".format(java.util.Locale.US, it) }}k"; else -> value.toString() }
 
 @Composable
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
-    // Keep the narrow bottom line terse even if a richer status is useful in
-    // the conversation header.
-    val compactStatus = when {
-        status.startsWith("WORKING") -> "WORKING"
-        status.startsWith("RECONNECTING") -> "RECONNECTING"
-        else -> ""
-    }
-    val parts = if (stats == null) {
-        buildList {
-            if (compactStatus.isNotBlank()) add(compactStatus)
-            add("—/—")
-        }
-    } else {
-        buildList {
-            if (compactStatus.isNotBlank()) add(compactStatus)
-            if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}")
-            if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}")
-            if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}")
-            if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}")
-            if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) {
-                add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%")
-            }
-            val subscription = state?.provider == "openai-codex" ||
-                state?.provider == "kimi-coding" ||
-                state?.provider?.contains("copilot", ignoreCase = true) == true
-            if (stats.cost > 0 || subscription) {
-                add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}")
-            }
-            val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) {
-                "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}"
-            } else {
-                "—/—"
-            }
-            add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "")
-        }
-    }
-    val scroll = rememberScrollState()
-    Box(
-        Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer)
-            .navigationBarsPadding().padding(horizontal = 10.dp, vertical = 4.dp)
-    ) {
-        Text(
-            parts.joinToString(" "),
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            maxLines = 1,
-            softWrap = false,
-            modifier = Modifier.horizontalScroll(scroll)
-        )
-    }
+    val compactStatus = when { status.startsWith("WORKING") -> "WORKING"; status.startsWith("RECONNECTING") -> "RECONNECTING"; else -> "" }
+    val parts = if (stats == null) buildList { if (compactStatus.isNotBlank()) add(compactStatus); add("—/—") } else buildList { if (compactStatus.isNotBlank()) add(compactStatus); if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}"); val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—"; add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "") }
+    val scroll = rememberScrollState(); Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 10.dp, vertical = 4.dp)) { Text(parts.joinToString(" "), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, softWrap = false, modifier = Modifier.horizontalScroll(scroll)) }
 }
 
 @Composable
-private fun PanelHeader(title: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, color = Blue, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-        TextButton(onClick = onBack) { Text("返回", color = TextMuted) }
-    }
+private fun PanelHeader(title: String, onBack: () -> Unit) { Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Text(title, color = Blue, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); TextButton(onClick = onBack) { Text("返回", color = TextMuted) } } }
+
+@Composable
+private fun ModelsPanel(models: List<PiModel>, state: PiState?, initialSearch: String, defaultModelKey: String, onBack: () -> Unit, onSetDefault: (PiModel) -> Unit, onPick: (PiModel) -> Unit, onEffort: (String) -> Unit) {
+    val effortLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"); var search by remember(initialSearch) { mutableStateOf(initialSearch) }; val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleModels = models.filter { model -> val searchable = "${model.provider} ${model.id} ${model.name}".lowercase(); tokens.all { it in searchable } }
+    Column(Modifier.fillMaxSize()) { PanelHeader("/model", onBack); LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(7.dp), contentPadding = PaddingValues(bottom = 14.dp)) { item { Column(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)) { Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold); Text("Pi thinking level → provider reasoning_effort", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, bottom = 6.dp)); effortLevels.forEach { level -> val selected = state?.thinkingLevel == level; Row(Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) { Text(level, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f)); Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } }; item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(top = 6.dp), placeholder = { Text("搜索 provider、模型名称或 ID") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); Text("Models · ${visibleModels.size}/${models.size}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)) }; items(visibleModels) { model -> val selected = state?.provider == model.provider && state.modelId == model.id; val isDefault = defaultModelKey == "${model.provider}/${model.id}"; Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).clickable { onPick(model) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(model.name.ifBlank { model.id }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp); Text("${model.provider}/${model.id}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }; Column(horizontalAlignment = Alignment.End) { Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp); TextButton(onClick = { onSetDefault(model) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(if (isDefault) "★ 新对话默认" else "设为默认", color = if (isDefault) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp) } } } } } }
 }
 
 @Composable
-private fun ModelsPanel(
-    models: List<PiModel>,
-    state: PiState?,
-    initialSearch: String,
-    defaultModelKey: String,
-    onBack: () -> Unit,
-    onSetDefault: (PiModel) -> Unit,
-    onPick: (PiModel) -> Unit,
-    onEffort: (String) -> Unit
-) {
-    val effortLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
-    var search by remember(initialSearch) { mutableStateOf(initialSearch) }
-    val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-    val visibleModels = models.filter { model ->
-        val searchable = "${model.provider} ${model.id} ${model.name}".lowercase()
-        tokens.all { it in searchable }
-    }
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader("/model", onBack)
-        LazyColumn(
-            Modifier.fillMaxSize().padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-            contentPadding = PaddingValues(bottom = 14.dp)
-        ) {
-            item {
-                Column(
-                    Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)
-                ) {
-                    Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Pi thinking level → provider reasoning_effort",
-                        color = TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        modifier = Modifier.padding(top = 3.dp, bottom = 6.dp)
-                    )
-                    effortLevels.forEach { level ->
-                        val selected = state?.thinkingLevel == level
-                        Row(
-                            Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(level, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                        }
-                    }
-                }
-            }
-            item {
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                    placeholder = { Text("搜索 provider、模型名称或 ID") },
-                    singleLine = true,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                )
-                Text(
-                    "Models · ${visibleModels.size}/${models.size}",
-                    color = TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
-                )
-            }
-            items(visibleModels) { model ->
-                val selected = state?.provider == model.provider && state.modelId == model.id
-                val isDefault = defaultModelKey == "${model.provider}/${model.id}"
-                Row(
-                    Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).clickable { onPick(model) }.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(model.name.ifBlank { model.id }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
-                        Text("${model.provider}/${model.id}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        TextButton(onClick = { onSetDefault(model) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
-                            Text(if (isDefault) "★ 新对话默认" else "设为默认", color = if (isDefault) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-                        }
-                    }
-                }
-            }
-        }
-    }
+private fun ThinkingPanel(current: String, onBack: () -> Unit, onPick: (String) -> Unit) { val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"); Column(Modifier.fillMaxSize()) { PanelHeader("/thinking", onBack); levels.forEach { level -> Row(Modifier.fillMaxWidth().clickable { onPick(level) }.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Text(level, color = TextMain, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f)); if (level == current) Text("✓", color = Accent) } } } }
+
+@Composable
+private fun BashPanel(input: String, output: String, running: Boolean, onInput: (String) -> Unit, onBack: () -> Unit, onRun: () -> Unit, onAbort: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/run · Pi RPC bash", onBack); Text(output.ifBlank { "命令通过 Pi 的 bash RPC 执行，并进入 Pi session 上下文。" }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)); Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(input, onInput, Modifier.weight(1f), singleLine = true, label = { Text("$ command") }); if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") } else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") } } } }
+
+@Composable
+private fun FilesPanel(path: String, files: List<PiFile>, selectedFile: String, fileText: String, fileLoading: Boolean, fileTruncated: Boolean, onBack: () -> Unit, onOpen: (PiFile) -> Unit, onUp: () -> Unit, onText: (String) -> Unit, onSave: () -> Unit) {
+    Column(Modifier.fillMaxSize()) { PanelHeader("/files · /$path", onBack); if (selectedFile.isBlank()) { Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) { TextButton(onClick = onUp, enabled = path.isNotBlank()) { Text("↑ 上级") }; Text(path.ifBlank { "/" }, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }; LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) { items(files) { file -> Text((if (file.type == "directory") "[DIR]  " else "[FILE] ") + file.name, color = if (file.type == "directory") Blue else TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.fillMaxWidth().clickable { onOpen(file) }.padding(vertical = 11.dp)) } } } else { Text(selectedFile, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp)); if (fileTruncated) Text("文件超过 2 MB：当前为截断的只读预览，不会允许覆盖原文件。", color = Danger, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)); OutlinedTextField(fileText, onText, Modifier.weight(1f).fillMaxWidth().padding(10.dp), readOnly = fileLoading || fileTruncated, placeholder = { if (fileLoading) Text("加载中…") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMain)); Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = onSave, enabled = !fileLoading && !fileTruncated) { Text("保存") }; TextButton(onClick = { onOpen(PiFile("..", "directory", path)) }) { Text("返回文件列表") } } } }
 }
 
 @Composable
-private fun ThinkingPanel(current: String, onBack: () -> Unit, onPick: (String) -> Unit) {
-    val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader("/thinking", onBack)
-        levels.forEach { level ->
-            Row(
-                Modifier.fillMaxWidth().clickable { onPick(level) }.padding(horizontal = 18.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(level, color = TextMain, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
-                if (level == current) Text("✓", color = Accent)
-            }
-        }
-    }
-}
+private fun TextPanel(title: String, text: String, onBack: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader(title, onBack); Text(text.ifBlank { "加载中…" }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) } }
 
 @Composable
-private fun BashPanel(
-    input: String,
-    output: String,
-    running: Boolean,
-    onInput: (String) -> Unit,
-    onBack: () -> Unit,
-    onRun: () -> Unit,
-    onAbort: () -> Unit
-) {
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader("/run · Pi RPC bash", onBack)
-        Text(
-            output.ifBlank { "命令通过 Pi 的 bash RPC 执行，并进入 Pi session 上下文。" },
-            color = TextMain,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 13.sp,
-            lineHeight = 19.sp,
-            modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)
-        )
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(value = input, onValueChange = onInput, modifier = Modifier.weight(1f), singleLine = true, label = { Text("$ command") })
-            if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") }
-            else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") }
-        }
-    }
-}
+private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/session", onBack); val rows = listOf("Session" to (state?.sessionName?.ifBlank { state.piConversationId }.orEmpty()), "File" to (stats?.sessionFile ?: state?.sessionFile.orEmpty()), "Messages" to (stats?.totalMessages?.toString() ?: "—"), "Input tokens" to (stats?.inputTokens?.toString() ?: "—"), "Output tokens" to (stats?.outputTokens?.toString() ?: "—"), "Cache read" to (stats?.cacheRead?.toString() ?: "—"), "Cost" to (stats?.let { "$${"%.4f".format(it.cost)}" } ?: "—"), "Context" to (stats?.takeIf { it.contextPercent >= 0 }?.let { "${it.contextTokens}/${it.contextWindow} (${"%.1f".format(it.contextPercent)}%)" } ?: "—")); rows.forEach { (label, value) -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 9.dp)) { Text(label, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.width(110.dp)); Text(value, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp) } } } }
 
 @Composable
-private fun FilesPanel(
-    path: String,
-    files: List<PiFile>,
-    selectedFile: String,
-    fileText: String,
-    fileLoading: Boolean,
-    fileTruncated: Boolean,
-    onBack: () -> Unit,
-    onOpen: (PiFile) -> Unit,
-    onUp: () -> Unit,
-    onText: (String) -> Unit,
-    onSave: () -> Unit
-) {
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader("/files · /$path", onBack)
-        if (selectedFile.isBlank()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onUp, enabled = path.isNotBlank()) { Text("↑ 上级") }
-                Text(path.ifBlank { "/" }, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            }
-            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-                items(files) { file ->
-                    Text(
-                        (if (file.type == "directory") "[DIR]  " else "[FILE] ") + file.name,
-                        color = if (file.type == "directory") Blue else TextMain,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
-                        modifier = Modifier.fillMaxWidth().clickable { onOpen(file) }.padding(vertical = 11.dp)
-                    )
-                }
-            }
-        } else {
-            Text(selectedFile, color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp))
-            if (fileTruncated) {
-                Text(
-                    "文件超过 2 MB：当前为截断的只读预览，不会允许覆盖原文件。",
-                    color = Danger,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                )
-            }
-            OutlinedTextField(
-                value = fileText,
-                onValueChange = onText,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(10.dp),
-                readOnly = fileLoading || fileTruncated,
-                placeholder = { if (fileLoading) Text("加载中…") },
-                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMain)
-            )
-            Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSave, enabled = !fileLoading && !fileTruncated) { Text("保存") }
-                TextButton(onClick = { onOpen(PiFile("..", "directory", path)) }) { Text("返回文件列表") }
-            }
-        }
-    }
-}
+private fun ThemesPanel(selected: PiThemeMode, onBack: () -> Unit, onSelect: (PiThemeMode) -> Unit) { Column(Modifier.fillMaxSize().background(Bg)) { PanelHeader("Themes", onBack); Text("主题会立即应用并自动保存。暗色主题保持原有配色。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)); Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { PiThemeMode.entries.forEach { mode -> val preview = colorsFor(mode); Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(8.dp)).border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp)).clickable { onSelect(mode) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { Row(Modifier.width(58.dp).height(38.dp).background(preview.bg, RoundedCornerShape(5.dp)).border(1.dp, preview.border, RoundedCornerShape(5.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp))) }; Column(Modifier.weight(1f)) { Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold); Text(mode.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }; Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } } }
 
 @Composable
-private fun TextPanel(title: String, text: String, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader(title, onBack)
-        Text(
-            text.ifBlank { "加载中…" },
-            color = TextMain,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            lineHeight = 18.sp,
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)
-        )
-    }
-}
+private fun SettingsPanel(cwd: String, launchCommand: String, connected: Boolean, autoCompaction: Boolean, onCwd: (String) -> Unit, onLaunch: (String) -> Unit, onConnect: () -> Unit, onAutoCompaction: (Boolean) -> Unit, onBack: () -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { PanelHeader("/settings", onBack); OutlinedTextField(cwd, onCwd, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi 工作目录") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); OutlinedTextField(launchCommand, onLaunch, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi RPC 启动命令") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); Row(Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp); Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp) }; Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace) }; Text("默认直接使用 Termux 中的 Pi。不要删掉 --mode rpc；Android 的 /resume、/tree、/fork 依赖 -e ~/.pi/android/pi-android-mobile.ts。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(14.dp)); Button(onClick = onConnect, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") } } }
 
 @Composable
-private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize()) {
-        PanelHeader("/session", onBack)
-        val rows = listOf(
-            "Session" to (state?.sessionName?.ifBlank { state.piConversationId }.orEmpty()),
-            "File" to (stats?.sessionFile ?: state?.sessionFile.orEmpty()),
-            "Messages" to (stats?.totalMessages?.toString() ?: "—"),
-            "Input tokens" to (stats?.inputTokens?.toString() ?: "—"),
-            "Output tokens" to (stats?.outputTokens?.toString() ?: "—"),
-            "Cache read" to (stats?.cacheRead?.toString() ?: "—"),
-            "Cost" to (stats?.let { "$${"%.4f".format(it.cost)}" } ?: "—"),
-            "Context" to (stats?.takeIf { it.contextPercent >= 0 }?.let { "${it.contextTokens}/${it.contextWindow} (${"%.1f".format(it.contextPercent)}%)" } ?: "—")
-        )
-        rows.forEach { (label, value) ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 9.dp)) {
-                Text(label, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.width(110.dp))
-                Text(value, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThemesPanel(
-    selected: PiThemeMode,
-    onBack: () -> Unit,
-    onSelect: (PiThemeMode) -> Unit
-) {
-    Column(Modifier.fillMaxSize().background(Bg)) {
-        PanelHeader("Themes", onBack)
-        Text(
-            "主题会立即应用并自动保存。暗色主题保持原有配色。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-        )
-        Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            PiThemeMode.entries.forEach { mode ->
-                val preview = colorsFor(mode)
-                Row(
-                    Modifier.fillMaxWidth()
-                        .background(CardBg, RoundedCornerShape(8.dp))
-                        .border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp))
-                        .clickable { onSelect(mode) }
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        Modifier.width(58.dp).height(38.dp)
-                            .background(preview.bg, RoundedCornerShape(5.dp))
-                            .border(1.dp, preview.border, RoundedCornerShape(5.dp))
-                            .padding(5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp)))
-                        Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp)))
-                        Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp)))
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text(mode.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    }
-                    Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsPanel(
-    cwd: String,
-    launchCommand: String,
-    connected: Boolean,
-    autoCompaction: Boolean,
-    onCwd: (String) -> Unit,
-    onLaunch: (String) -> Unit,
-    onConnect: () -> Unit,
-    onAutoCompaction: (Boolean) -> Unit,
-    onBack: () -> Unit
-) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        PanelHeader("/settings", onBack)
-        OutlinedTextField(
-            value = cwd,
-            onValueChange = onCwd,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            label = { Text("Pi 工作目录") },
-            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        )
-        OutlinedTextField(
-            value = launchCommand,
-            onValueChange = onLaunch,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            label = { Text("Pi RPC 启动命令") },
-            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        )
-        Row(
-            Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp)
-            }
-            Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace)
-        }
-        Text(
-            "默认直接使用 Termux 中的 Pi。不要删掉 --mode rpc；Android 的 /resume、/tree、/fork 依赖 -e ~/.pi/android/pi-android-mobile.ts。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            lineHeight = 18.sp,
-            modifier = Modifier.padding(14.dp)
-        )
-        Button(onClick = onConnect, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") }
-    }
-}
-
-@Composable
-private fun ExtensionDialog(
-    request: PiUiRequest,
-    input: String,
-    onInput: (String) -> Unit,
-    onSelect: (String) -> Unit,
-    onConfirm: (Boolean) -> Unit,
-    onSubmit: () -> Unit,
-    onDismiss: () -> Unit
-) {
+private fun ExtensionDialog(request: PiUiRequest, input: String, onInput: (String) -> Unit, onSelect: (String) -> Unit, onConfirm: (Boolean) -> Unit, onSubmit: () -> Unit, onDismiss: () -> Unit) {
     when (request.method) {
-        "select" -> {
-            val isSessionTree = request.title == "Session Tree"
-            var filter by remember(request.id) { mutableStateOf("") }
-            val tokens = filter.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-            val visibleOptions = if (tokens.isEmpty()) request.options else request.options.filter { option ->
-                val searchable = option.lowercase()
-                tokens.all { it in searchable }
-            }
-            val optionsState = rememberLazyListState()
-            LaunchedEffect(request.id, filter, visibleOptions.size) {
-                if (isSessionTree && filter.isBlank()) {
-                    val currentIndex = visibleOptions.indexOfFirst { "◆" in it }
-                    if (currentIndex >= 0) optionsState.scrollToItem(currentIndex)
-                }
-            }
-            AlertDialog(
-                onDismissRequest = onDismiss,
-                title = { Text(request.title.ifBlank { "选择" }) },
-                text = {
-                    Column(Modifier.fillMaxWidth()) {
-                        if (isSessionTree) {
-                            OutlinedTextField(
-                                value = filter,
-                                onValueChange = { filter = it },
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                                placeholder = { Text("搜索消息、标签或节点 ID") },
-                                singleLine = true,
-                                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                            )
-                        }
-                        if (isSessionTree) {
-                            Text("◆ 当前消息 · ● 当前分支 · 共 ${visibleOptions.size} 条", color = TextMuted, fontSize = 10.sp)
-                        }
-                        LazyColumn(
-                            state = optionsState,
-                            modifier = Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)
-                        ) {
-                            items(visibleOptions) { option ->
-                                Text(
-                                    option,
-                                    color = if (isSessionTree && ("◆" in option || "●" in option)) Accent else TextMain,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    lineHeight = 17.sp,
-                                    modifier = Modifier.fillMaxWidth().clickable { onSelect(option) }.padding(vertical = 9.dp)
-                                )
-                            }
-                        }
-                        if (visibleOptions.isEmpty()) {
-                            Text("没有匹配的节点", color = TextMuted, modifier = Modifier.padding(vertical = 12.dp))
-                        }
-                    }
-                },
-                confirmButton = {},
-                dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-            )
-        }
-        "confirm" -> AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text(request.title.ifBlank { "确认" }) },
-            text = { Text(request.message) },
-            confirmButton = { TextButton(onClick = { onConfirm(true) }) { Text("确认") } },
-            dismissButton = { TextButton(onClick = { onConfirm(false) }) { Text("取消") } }
-        )
-        "input", "editor" -> AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text(request.title.ifBlank { "输入" }) },
-            text = {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = onInput,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = if (request.method == "editor") 180.dp else 56.dp),
-                    placeholder = { Text(request.placeholder) },
-                    singleLine = request.method == "input"
-                )
-            },
-            confirmButton = { TextButton(onClick = onSubmit) { Text("确定") } },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-        )
+        "select" -> { val isSessionTree = request.title == "Session Tree"; var filter by remember(request.id) { mutableStateOf("") }; val tokens = filter.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleOptions = if (tokens.isEmpty()) request.options else request.options.filter { option -> val searchable = option.lowercase(); tokens.all { it in searchable } }; val optionsState = rememberLazyListState(); LaunchedEffect(request.id, filter, visibleOptions.size) { if (isSessionTree && filter.isBlank()) { val currentIndex = visibleOptions.indexOfFirst { "◆" in it }; if (currentIndex >= 0) optionsState.scrollToItem(currentIndex) } }; AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "选择" }) }, text = { Column(Modifier.fillMaxWidth()) { if (isSessionTree) OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(bottom = 6.dp), placeholder = { Text("搜索消息、标签或节点 ID") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); if (isSessionTree) Text("◆ 当前消息 · ● 当前分支 · 共 ${visibleOptions.size} 条", color = TextMuted, fontSize = 10.sp); LazyColumn(state = optionsState, modifier = Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)) { items(visibleOptions) { option -> Text(option, color = if (isSessionTree && ("◆" in option || "●" in option)) Accent else TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.fillMaxWidth().clickable { onSelect(option) }.padding(vertical = 9.dp)) } }; if (visibleOptions.isEmpty()) Text("没有匹配的节点", color = TextMuted, modifier = Modifier.padding(vertical = 12.dp)) } }, confirmButton = {}, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }) }
+        "confirm" -> AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "确认" }) }, text = { Text(request.message) }, confirmButton = { TextButton(onClick = { onConfirm(true) }) { Text("确认") } }, dismissButton = { TextButton(onClick = { onConfirm(false) }) { Text("取消") } })
+        "input", "editor" -> AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "输入" }) }, text = { OutlinedTextField(input, onInput, Modifier.fillMaxWidth().heightIn(min = if (request.method == "editor") 180.dp else 56.dp), placeholder = { Text(request.placeholder) }, singleLine = request.method == "input") }, confirmButton = { TextButton(onClick = onSubmit) { Text("确定") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
     }
 }
