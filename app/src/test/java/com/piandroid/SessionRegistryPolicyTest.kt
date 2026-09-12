@@ -75,6 +75,34 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
+    fun resumingChangesOnlyThePiConversationBinding() {
+        val original = PiSessionRecord(
+            id = "android-a",
+            name = "A",
+            cwd = "/tmp/project",
+            launchCommand = "pi --mode rpc --session-id android-a",
+            port = 17650,
+            token = "token-a",
+            sessionFile = "/tmp/A2.jsonl",
+            piSessionId = "A2",
+            ownedSessionFile = "/tmp/A2.jsonl",
+            sessionDirectory = "~/.pi/android/sessions/android-a/pi-sessions"
+        )
+        val resumed = bindPiConversation(
+            original,
+            PiState("provider", "model", "Model", "off", false, false, "/tmp/A1.jsonl", "A1", "A1", 2, true),
+            "/tmp/A1.jsonl"
+        )
+        assertEquals("android-a", resumed.id)
+        assertEquals(17650, resumed.port)
+        assertEquals("token-a", resumed.token)
+        assertEquals("A1", resumed.piSessionId)
+        assertEquals("/tmp/A1.jsonl", resumed.sessionFile)
+        assertEquals(original.ownedSessionFile, resumed.ownedSessionFile)
+        assertEquals(original.sessionDirectory, resumed.sessionDirectory)
+    }
+
+    @Test
     fun anEmptyRegistryStartsWithItsDrawerOpen() {
         assertTrue(emptySessionDrawerInitiallyOpen(emptyList()))
         assertFalse(emptySessionDrawerInitiallyOpen(listOf(PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"))))

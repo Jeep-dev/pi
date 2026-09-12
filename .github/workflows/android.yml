@@ -9,6 +9,7 @@ on:
       - "tools/test_mobile_fork.mjs"
       - "tools/test_mobile_resources.mjs"
       - "tools/test_multi_session_bridge.mjs"
+      - "tools/test_mobile_resume.mjs"
       - "tools/test_stop_fence.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
@@ -23,6 +24,7 @@ on:
       - "tools/test_mobile_fork.mjs"
       - "tools/test_mobile_resources.mjs"
       - "tools/test_multi_session_bridge.mjs"
+      - "tools/test_mobile_resume.mjs"
       - "tools/test_stop_fence.mjs"
       - "tools/test_themes.mjs"
       - "build.gradle.kts"
@@ -48,6 +50,7 @@ jobs:
           node --check app/src/main/assets/pi-android-bridge.mjs
           node tools/test_bridge_auth.mjs
           node tools/test_multi_session_bridge.mjs
+          node tools/test_mobile_resume.mjs
           node tools/test_stop_fence.mjs
           node tools/test_themes.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
@@ -69,5 +72,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.19.2-apks
+          name: pi-android-v5.19.3-apks
           path: app/build/outputs/apk/**/*.apk

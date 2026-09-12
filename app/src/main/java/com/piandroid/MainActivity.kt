@@ -1417,7 +1417,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.2
+                """Pi Android v5.19.3
+                |• /resume 切换后同步 Activity runtime，恢复的历史不会被旧快照覆盖
+                |• /resume 只切换 Pi conversation，不改变 Android Session 隔离身份
                 |• 无 Session 启动时自动展开侧栏，删除最后一个后可立即新建
                 |• 删除最后一个 Session 后保留打开的侧栏，可直接新建第一个 Session
                 |• 新建 Session 支持独立启动参数，并在恢复时保留参数
@@ -1666,15 +1668,10 @@ private fun PiScreen(
                                         resumeOpen = false
                                         runtime.launchTask {
                                             status = "Switching session"
-                                            bridge.switchSession(session.path).fold(
-                                                onSuccess = { switchedState ->
-                                                    // Persist and use the state returned by the switch itself;
-                                                    // otherwise a disconnect in this window could relaunch the
-                                                    // session that Pi originally started with.
-                                                    currentState = switchedState
-                                                    loadHistory()
-                                                    refreshMeta()
-                                                    requestLoadedResources()
+                                            runtime.switchPiConversation(session.path).fold(
+                                                onSuccess = {
+                                                    // switchPiConversation() publishes the authoritative
+                                                    // switched snapshot through the runtime collector.
                                                     status = "Ready"
                                                 },
                                                 onFailure = {

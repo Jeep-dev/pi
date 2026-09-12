@@ -27,6 +27,19 @@ internal data class PiRuntimeReady(
     val reconnecting: Boolean = false
 )
 
+/** Bind the mutable Pi conversation while preserving Android Session identity. */
+internal fun bindPiConversation(
+    record: PiSessionRecord,
+    state: PiState,
+    fallbackSessionFile: String
+): PiSessionRecord = record.copy(
+    sessionFile = state.sessionFile.ifBlank { fallbackSessionFile },
+    piSessionId = state.sessionId.ifBlank { record.piSessionId },
+    status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
+    lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
+    lastError = ""
+)
+
 internal sealed class PiRuntimeUpdate {
     data class Ready(val value: PiRuntimeReady) : PiRuntimeUpdate()
     data class Snapshot(val value: PiRecoverySnapshot) : PiRuntimeUpdate()
@@ -134,6 +147,7 @@ internal class PiSessionRuntime(
     private var eventJob: Job? = null
     private var stopJob: Deferred<Result<Unit>>? = null
     private var eventCursor = 0L
+    private var conversationGeneration = 0L
     private var lastState: PiState? = null
     private var lastSnapshot: PiRecoverySnapshot? = null
 
@@ -196,6 +210,38 @@ internal class PiSessionRuntime(
         }
     }
 
+    /** Switch the Pi conversation while preserving this Android Session runtime. */
+    suspend fun switchPiConversation(sessionPath: String): Result<PiRuntimeReady> = runCatching {
+        connectMutex.withLock {
+            synchronized(stateLock) {
+                check(!closed) { "Pi Session runtime is closed" }
+                check(connected) { "Pi Session is not connected" }
+                // Invalidate any in-flight event poll for the old conversation.
+                conversationGeneration++
+            }
+            val switched = bridge.switchSession(sessionPath).getOrThrow()
+            val snapshot = bridge.recoverySnapshot().getOrThrow()
+            synchronized(stateLock) {
+                check(!closed) { "Pi Session runtime is closed" }
+                connected = true
+                lastState = switched
+                lastSnapshot = snapshot
+                eventCursor = snapshot.latest
+                record = bindPiConversation(record, switched, sessionPath)
+            }
+            val ready = PiRuntimeReady(
+                state = switched,
+                snapshot = snapshot,
+                runtimeCwd = currentRecord().cwd,
+                reconnecting = false
+            )
+            // Publish the new snapshot as the runtime's latest binding. A newly
+            // composed screen must not replay the pre-resume snapshot.
+            updatesMutable.emit(PiRuntimeUpdate.Ready(ready))
+            ready
+        }
+    }
+
     fun closeAndCleanup(ownedSessionFile: String): Job {
         synchronized(stateLock) {
             if (closed) return scope.launch { }
@@ -249,6 +295,21 @@ internal class PiSessionRuntime(
         configuredRecord: PiSessionRecord,
         allowStart: Boolean
     ): PiRuntimeReady = connectMutex.withLock {
+        connectInternalLocked(configuredRecord, allowStart)
+    }
+
+    private suspend fun connectCurrent(
+        allowStart: Boolean,
+        expectedGeneration: Long? = null
+    ): PiRuntimeReady? = connectMutex.withLock {
+        if (expectedGeneration != null && !isConversationGeneration(expectedGeneration)) return@withLock null
+        connectInternalLocked(currentRecord(), allowStart)
+    }
+
+    private suspend fun connectInternalLocked(
+        configuredRecord: PiSessionRecord,
+        allowStart: Boolean
+    ): PiRuntimeReady {
         val healthBefore = bridge.health(timeoutMs = 2_500).getOrNull()
         val attached = bridge.attachToRunningBridge().getOrNull()
         val runningHealth = healthBefore ?: bridge.health(timeoutMs = 2_500).getOrNull()
@@ -256,7 +317,7 @@ internal class PiSessionRuntime(
             val runningCwd = runningHealth?.cwd.orEmpty()
             if (sameCwd(configuredRecord.cwd, runningCwd)) {
                 val snapshot = bridge.recoverySnapshot().getOrThrow()
-                return@withLock PiRuntimeReady(
+                return PiRuntimeReady(
                     state = attached,
                     snapshot = snapshot,
                     runtimeCwd = runningCwd
@@ -309,15 +370,16 @@ internal class PiSessionRuntime(
         )
     }
 
-    private fun publishReady(ready: PiRuntimeReady) {
+    private fun publishReady(ready: PiRuntimeReady, expectedGeneration: Long? = null): Boolean {
         synchronized(stateLock) {
-            if (closed) return
+            if (closed || (expectedGeneration != null && conversationGeneration != expectedGeneration)) return false
             connected = true
             lastState = ready.state
             lastSnapshot = ready.snapshot
             eventCursor = ready.snapshot.latest
         }
         scope.launch { updatesMutable.emit(PiRuntimeUpdate.Ready(ready)) }
+        return true
     }
 
     private fun startEventLoop() {
@@ -330,12 +392,15 @@ internal class PiSessionRuntime(
     private suspend fun eventLoop() {
         var failures = 0
         while (currentCoroutineContext().isActive && !isClosed() && isConnected()) {
-            val result = bridge.events(eventCursor)
+            val (cursor, generation) = synchronized(stateLock) { eventCursor to conversationGeneration }
+            val result = bridge.events(cursor)
+            if (!isConversationGeneration(generation)) continue
             if (result.isSuccess) {
                 val batch = result.getOrThrow()
                 failures = 0
                 if (batch.gap) {
                     val snapshot = bridge.recoverySnapshot()
+                    if (!isConversationGeneration(generation)) continue
                     if (snapshot.isSuccess) {
                         val value = snapshot.getOrThrow()
                         synchronized(stateLock) { eventCursor = value.latest; lastSnapshot = value }
@@ -359,15 +424,16 @@ internal class PiSessionRuntime(
                             updatesMutable.emit(PiRuntimeUpdate.Disconnected)
                             break
                         }
-                        recoverFromEventFailure()
+                        recoverFromEventFailure(generation)
                     }
                 }
             } else {
+                if (!isConversationGeneration(generation)) continue
                 val error = result.exceptionOrNull() ?: IllegalStateException("Bridge event polling failed")
                 failures++
                 updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
                 if (failures >= 3) {
-                    if (recoverFromEventFailure()) failures = 0
+                    if (recoverFromEventFailure(generation)) failures = 0
                     else delay((500L * (1L shl (failures.coerceAtMost(4) - 1))).coerceAtMost(5_000L))
                 } else {
                     delay((500L * (1L shl (failures - 1))).coerceAtMost(5_000L))
@@ -377,24 +443,27 @@ internal class PiSessionRuntime(
         synchronized(stateLock) { eventJob = null }
     }
 
-    private suspend fun recoverFromEventFailure(): Boolean {
-        if (!canRecover()) return false
+    private suspend fun recoverFromEventFailure(expectedGeneration: Long? = null): Boolean {
+        if (!canRecover() || (expectedGeneration != null && !isConversationGeneration(expectedGeneration))) return false
         updatesMutable.emit(PiRuntimeUpdate.Reconnecting(IllegalStateException("Pi runtime reconnecting")))
-        val result = runCatching {
-            connectMutex.withLock { connectInternal(currentRecord(), true) }
-        }
-        if (result.isSuccess) {
-            publishReady(result.getOrThrow().copy(reconnecting = true))
-            return true
+        val result = runCatching { connectCurrent(true, expectedGeneration) }
+        val ready = result.getOrNull()
+        if (ready != null) {
+            return publishReady(ready.copy(reconnecting = true), expectedGeneration)
         }
         // Keep the runtime marked alive while its Activity-owned loop retries;
         // a transient reconnect must not make the UI submit a second start for
         // the same endpoint.
-        updatesMutable.emit(PiRuntimeUpdate.Reconnecting(result.exceptionOrNull() ?: IllegalStateException("reconnect failed")))
+        if (result.exceptionOrNull() != null && (expectedGeneration == null || isConversationGeneration(expectedGeneration))) {
+            updatesMutable.emit(PiRuntimeUpdate.Reconnecting(result.exceptionOrNull()!!))
+        }
         return false
     }
 
     private fun currentRecord(): PiSessionRecord = synchronized(stateLock) { record }
+    private fun isConversationGeneration(expected: Long): Boolean = synchronized(stateLock) {
+        !closed && conversationGeneration == expected
+    }
     private fun canRecover(): Boolean = synchronized(stateLock) { !closed && recoveryEnabled }
     private fun isClosed(): Boolean = synchronized(stateLock) { closed }
 

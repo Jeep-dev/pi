@@ -337,6 +337,33 @@ function sessionDirForCwd(baseCwd) {
   return path.join(termuxHome, ".pi", "agent", "sessions", safe);
 }
 
+/** Use Pi's active --session-dir instead of falling back to the cwd-wide store. */
+function sessionDirForRuntime() {
+  let explicitDirectory = "";
+  let explicitSession = "";
+  try {
+    const argumentsList = splitCommand(launchCommand);
+    for (let index = 0; index < argumentsList.length; index++) {
+      const argument = argumentsList[index];
+      if (argument === "--no-session") return "";
+      if (argument === "--session-dir") {
+        explicitDirectory = argumentsList[index + 1] || "";
+        index++;
+      } else if (argument.startsWith("--session-dir=")) {
+        explicitDirectory = argument.slice("--session-dir=".length);
+      } else if (argument === "--session") {
+        explicitSession = argumentsList[index + 1] || "";
+        index++;
+      } else if (argument.startsWith("--session=")) {
+        explicitSession = argument.slice("--session=".length);
+      }
+    }
+  } catch {}
+  if (explicitDirectory) return path.resolve(cwd, expandHome(explicitDirectory));
+  if (explicitSession) return path.dirname(path.resolve(cwd, expandHome(explicitSession)));
+  return sessionDirForCwd(cwd);
+}
+
 function visibleText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -634,7 +661,8 @@ async function summarizeSession(file, currentFile) {
 }
 
 async function listSessions() {
-  const dir = sessionDirForCwd(cwd);
+  const dir = sessionDirForRuntime();
+  if (!dir) return [];
   let names;
   try { names = await readdir(dir); }
   catch (error) {
@@ -1036,8 +1064,9 @@ const server = http.createServer(async (req, res) => {
       if (stopFence) throw new Error("Stop in progress; session switch rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       const target = path.resolve(String(input.path || ""));
-      const dir = path.resolve(sessionDirForCwd(cwd));
-      const sessionRoot = await realpath(dir);
+      const dir = sessionDirForRuntime();
+      if (!dir) throw new Error("Pi session persistence is disabled");
+      const sessionRoot = await realpath(path.resolve(dir));
       const canonicalTarget = await realpath(target);
       if (!canonicalTarget.endsWith(".jsonl") ||
           (canonicalTarget !== sessionRoot && !canonicalTarget.startsWith(`${sessionRoot}${path.sep}`))) {
