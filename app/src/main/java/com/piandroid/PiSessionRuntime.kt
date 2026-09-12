@@ -484,6 +484,9 @@ internal class PiSessionRuntimeManager(context: Context) {
     private val runtimes = LinkedHashMap<String, PiSessionRuntime>()
 
     @Synchronized
+    fun activate(record: PiSessionRecord): PiSessionRuntime = runtime(record)
+
+    @Synchronized
     fun runtime(record: PiSessionRecord): PiSessionRuntime {
         val existing = runtimes[record.id]
         if (existing != null) {

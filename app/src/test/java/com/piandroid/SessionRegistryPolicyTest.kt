@@ -72,6 +72,24 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
+    fun sameCwdSessionsKeepDistinctListAndRuntimeIdentityAcrossRepeatedSelection() {
+        val records = listOf(
+            PiSessionRecord("session-A", "Pi 1", "/data/data/com.termux/files/home", "pi", 17650, "token-a"),
+            PiSessionRecord("session-B", "Pi 2", "/data/data/com.termux/files/home", "pi", 17651, "token-b")
+        )
+        assertEquals(2, records.map { it.id }.distinct().size)
+        var active = "session-B"
+        repeat(20) { index ->
+            val target = if (index % 2 == 0) "session-A" else "session-B"
+            active = requireNotNull(selectPiSessionId(records, target))
+            assertEquals(target, active)
+            // PiSessionRuntimeManager is keyed by the same stable Android ID.
+            assertEquals(target, records.single { it.id == active }.id)
+        }
+        assertEquals("session-B", active)
+    }
+
+    @Test
     fun deletingCurrentSessionChoosesOnlyARemainingSession() {
         val records = listOf(
             PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"),

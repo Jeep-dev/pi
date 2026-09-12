@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.util.Log
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.WindowManager
@@ -171,6 +172,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private const val SESSION_SELECTION_TAG = "PiSessionSelection"
 private const val ANDROID_EXTENSIONS_WIDGET = "__android_loaded_extensions"
 private const val ANDROID_RESOURCES_WIDGET = "__android_loaded_resources"
 private const val ANDROID_RESOURCES_COMMAND = "__android_loaded_resources"
@@ -434,10 +436,24 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     }
 
     fun selectSession(id: String): Boolean {
-        val selectedId = selectPiSessionId(sessions, id) ?: return false
+        val before = activeSessionId
+        Log.d(SESSION_SELECTION_TAG, "SESSION_CLICK target=$id ACTIVE_BEFORE=$before")
+        val selectedId = selectPiSessionId(sessions, id)
+        if (selectedId == null) {
+            Log.w(SESSION_SELECTION_TAG, "SESSION_CLICK target=$id ACTIVE_BEFORE=$before ACTIVE_AFTER=$before RUNTIME_SESSION=")
+            return false
+        }
         activeSessionId = selectedId
+        val targetRecord = sessions.first { it.id == selectedId }
+        val activeRuntime = runtimeManager.activate(targetRecord)
         sessionStore.save(orderPiSessions(sessions), selectedId)
-        return activeSessionId == selectedId
+        val runtimeSession = activeRuntime.id
+        val accepted = activeSessionId == selectedId && runtimeSession == selectedId
+        Log.d(
+            SESSION_SELECTION_TAG,
+            "SESSION_CLICK target=$id ACTIVE_BEFORE=$before ACTIVE_AFTER=$activeSessionId RUNTIME_SESSION=$runtimeSession"
+        )
+        return accepted
     }
 
     fun requestSessionManagement(record: PiSessionRecord) {
@@ -553,6 +569,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                                 runtime = runtime,
                                 session = record,
                                 sessions = sessions,
+                                activeSessionId = activeSessionId,
                                 autoStart = active,
                                 hostModifier = if (active) Modifier.fillMaxSize() else Modifier.size(0.dp),
                                 themeMode = themeMode,
@@ -635,6 +652,7 @@ private fun PiScreen(
     runtime: PiSessionRuntime,
     session: PiSessionRecord,
     sessions: List<PiSessionRecord>,
+    activeSessionId: String,
     autoStart: Boolean,
     hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
@@ -1427,7 +1445,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.5
+                """Pi Android v5.19.6
+                |• Session 选择全链路只使用 Android session.id，并记录切换诊断日志
                 |• Session 条目先提交 activeSession，再关闭侧栏，修复点击无效
                 |• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史
                 |• 选择旧版历史后重启仍保持绑定，不迁移或删除旧文件
@@ -2090,13 +2109,14 @@ private fun PiScreen(
         }
         SessionDrawer(
             sessions = sessions,
-            activeSessionId = session.id,
+            activeSessionId = activeSessionId,
             modifier = Modifier
                 .width(drawerWidth)
                 .fillMaxHeight()
                 .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
                 .zIndex(2f),
             onSelect = {
+                Log.d(SESSION_SELECTION_TAG, "DRAWER_ITEM_CLICK target=$it ACTIVE_BEFORE=$activeSessionId")
                 // Commit the active Android Session first. A failed/unknown
                 // selection must not dismiss the drawer or hide the failure.
                 if (onSelectSession(it)) settleDrawer(0f)
