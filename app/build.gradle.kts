@@ -10,6 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
+// v5.19.16: stale-event replay and full-visible-content follow guards.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
