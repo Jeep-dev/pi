@@ -24,7 +24,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-12.1"
+    private val expectedBridgeVersion = "2026-09-12.2"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -32,7 +32,8 @@ class PiBridge(
         "persistent-widgets-v1",
         "multi-session-v1",
         "consistent-recovery-v1",
-        "bounded-event-cache-v1"
+        "bounded-event-cache-v1",
+        "hard-stop-v1"
     )
     private val authToken: String by lazy {
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, endpointKey)
@@ -59,6 +60,35 @@ class PiBridge(
         context.packageManager.getPackageInfo(termux, 0)
     }.isSuccess
 
+    /** Stop only this endpoint and remove only its private bridge/session namespace. */
+    suspend fun shutdownAndCleanup(ownedSessionFile: String = ""): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            request("/shutdown", "{}", 5_000)
+            delay(750)
+            val owned = shellQuote(ownedSessionFile)
+            val cleanup = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+                // The default endpoint historically lives directly under ~/.pi/android;
+                // never recursively remove that directory because it contains other tabs.
+                """
+                owned_file=$owned
+                case "${'$'}owned_file" in
+                  "${'$'}HOME"/.pi/android/sessions/default/pi-sessions/*.jsonl) rm -f -- "${'$'}owned_file" ;;
+                esac
+                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="${'$'}(cat ~/.pi/android/bridge.pid)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi
+                rm -f -- ~/.pi/android/bridge.mjs ~/.pi/android/pi-android-mobile.ts ~/.pi/android/bridge.pid ~/.pi/android/bridge.log
+                rm -rf -- ~/.pi/android/sessions/default/pi-sessions
+                """.trimIndent()
+            } else {
+                // A non-default endpoint owns this whole directory, including its
+                // dedicated --session-dir history. No cwd/project path is touched.
+                "dir=~/.pi/android/sessions/${shellQuote(endpointKey)}; if [ -f \"${'$'}dir/bridge.pid\" ]; then old_pid=\"${'$'}(cat \"${'$'}dir/bridge.pid\")\"; kill \"${'$'}old_pid\" 2>/dev/null || true; sleep 0.7; kill -9 \"${'$'}old_pid\" 2>/dev/null || true; fi; rm -rf -- \"${'$'}dir\""
+            }
+            runTermux(cleanup).getOrThrow()
+            runtimePreferences().edit().remove(lastSessionPreferenceKey).commit()
+            forgetEndpointToken(context, endpointKey)
+        }
+    }
+
     suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
         if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
         runCatching {
@@ -77,7 +107,7 @@ class PiBridge(
                 chmod 700 $remoteBridgeScript &&
                 if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
                 rm -f $remotePidFile &&
-                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_PID_FILE=$remotePidFile &&
+                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$endpointKey' PI_ANDROID_PID_FILE=$remotePidFile &&
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
@@ -133,7 +163,16 @@ class PiBridge(
             cwd = root.optString("cwd"),
             launchCommand = root.optString("launchCommand"),
             activeSessionFile = root.optString("activeSessionFile"),
-            stderr = root.optString("lastStderr")
+            stderr = root.optString("lastStderr"),
+            stdoutTail = root.optString("lastStdoutTail"),
+            lastExit = root.optJSONObject("lastExit")?.let { exit ->
+                "exit=${if (exit.isNull("code")) "?" else exit.optInt("code")} signal=${if (exit.isNull("signal")) "-" else exit.optString("signal")}"
+            }.orEmpty(),
+            bridgePid = root.optLong("bridgePid"),
+            piPid = root.optLong("piPid"),
+            port = root.optInt("port"),
+            endpointKey = root.optString("endpointKey"),
+            stopInProgress = root.optBoolean("stopInProgress")
         )
     }
 
@@ -205,7 +244,20 @@ class PiBridge(
             }
         }
 
-    suspend fun abort(): Result<Unit> = request("/abort", "{}").map { Unit }
+    /** Stop the active agent, clear Pi's queues, and fence new work in the bridge. */
+    suspend fun stop(): Result<Unit> = request("/stop", "{}", 70_000).map { Unit }
+
+    // Kept as a source-compatible alias for older callers.
+    suspend fun abort(): Result<Unit> = stop()
+
+    suspend fun clearQueue(): Result<PiQueue> = request("/clear-queue", "{}", 8_000).mapCatching { raw ->
+        val data = JSONObject(raw).optJSONObject("data") ?: JSONObject()
+        PiQueue(
+            steering = data.optJSONArray("steering")?.let { array -> List(array.length()) { index -> array.optString(index) } }.orEmpty(),
+            followUp = data.optJSONArray("followUp")?.let { array -> List(array.length()) { index -> array.optString(index) } }.orEmpty()
+        )
+    }
+
     suspend fun newSession(): Result<Unit> = request("/new-session", "{}").map { Unit }
     suspend fun cloneSession(): Result<Unit> = request("/clone", "{}").map { Unit }
 
@@ -268,7 +320,18 @@ class PiBridge(
     }
 
     /** Build a clean command for a new cwd without inheriting any old session selector. */
-    fun freshLaunchCommand(baseCommand: String): String = launchPiWithoutSession(baseCommand)
+    fun freshLaunchCommand(
+        baseCommand: String,
+        sessionId: String = "",
+        sessionDirectory: String = ""
+    ): String {
+        val fresh = launchPiWithoutSession(baseCommand)
+        return if (sessionId.isNotBlank() && sessionDirectory.isNotBlank()) {
+            ensurePiSessionIdentity(fresh, sessionId, sessionDirectory)
+        } else {
+            fresh
+        }
+    }
 
     fun defaultModelKey(): String = context.getSharedPreferences("model_defaults", Context.MODE_PRIVATE)
         .getString("default_model", "").orEmpty()
@@ -615,6 +678,8 @@ class PiBridge(
         }
     }
 
+    private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
     private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
@@ -674,6 +739,12 @@ class PiBridge(
             check(preferences.edit().putString(preferenceKey, token).commit()) { "无法保存 Bridge 认证信息" }
             return token
         }
+
+        internal fun forgetEndpointToken(context: Context, key: String) {
+            val preferenceKey = if (key == DEFAULT_ENDPOINT_KEY) "auth_token" else "auth_token_$key"
+            context.applicationContext.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
+                .edit().remove(preferenceKey).commit()
+        }
     }
 }
 
@@ -682,7 +753,19 @@ data class PiHealth(
     val cwd: String,
     val launchCommand: String,
     val activeSessionFile: String,
-    val stderr: String
+    val stderr: String,
+    val stdoutTail: String = "",
+    val lastExit: String = "",
+    val bridgePid: Long = 0L,
+    val piPid: Long = 0L,
+    val port: Int = 0,
+    val endpointKey: String = "",
+    val stopInProgress: Boolean = false
+)
+
+data class PiQueue(
+    val steering: List<String>,
+    val followUp: List<String>
 )
 data class PiState(
     val provider: String,

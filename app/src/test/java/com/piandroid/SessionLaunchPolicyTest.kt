@@ -81,6 +81,29 @@ class SessionLaunchPolicyTest {
     }
 
     @Test
+    fun shellArgumentParsingKeepsQuotedSpacesEmptyArgumentsAndEscapes() {
+        assertEquals(
+            listOf("pi", "", "two words", "escaped value"),
+            parseShellArguments("pi '' \"two words\" escaped\\ value")
+        )
+        assertNull(parseShellArguments("pi --system-prompt \"unterminated"))
+    }
+
+    @Test
+    fun newSessionIdentityUsesAPrivateDirectoryAndExactNativeId() {
+        val command = ensurePiSessionIdentity(
+            "pi --mode rpc --session-id stale --session /tmp/old.jsonl --session-dir /tmp/shared",
+            "session-a",
+            "~/.pi/android/sessions/session-a/pi-sessions"
+        )
+        assertFalse(command.contains("stale"))
+        assertFalse(command.contains("/tmp/old.jsonl"))
+        assertFalse(command.contains("/tmp/shared"))
+        assertTrue(command.contains("--session-dir ~/.pi/android/sessions/session-a/pi-sessions"))
+        assertTrue(command.contains("--session-id session-a"))
+    }
+
+    @Test
     fun startupArgumentsPreserveQuotesAndAppendToThePiCommand() {
         val base = "pi --mode rpc -e ~/.pi/android/mobile.ts"
         val args = "--no-tools --system-prompt \"You are a simple chat assistant.\""
@@ -94,7 +117,13 @@ class SessionLaunchPolicyTest {
 
     @Test
     fun startupArgumentsCannotReplaceAppOwnedSessionOrRpcOptions() {
-        listOf("--mode json", "--session /tmp/other.jsonl", "--no-session", "--api-key secret").forEach {
+        listOf(
+            "--mode json",
+            "--session /tmp/other.jsonl",
+            "--session-dir /tmp/other",
+            "--no-session",
+            "--api-key secret"
+        ).forEach {
             assertNotNull(startupArgumentsError(it))
         }
         assertNull(startupArgumentsError("--system-prompt \"--session is text\" --no-tools"))

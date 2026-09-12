@@ -19,9 +19,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -135,7 +137,8 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
     private val permissionRequestCode = 7001
-    private val bridge by lazy { PiBridge(applicationContext) }
+    // Runtime ownership belongs to the Activity process, never to a Composable.
+    private val runtimeManager by lazy { PiSessionRuntimeManager(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -151,7 +154,7 @@ class MainActivity : ComponentActivity() {
             window.decorView.systemUiVisibility = 0
         }
         requestTermuxPermissionIfNeeded()
-        setContent { PiTouchApp(bridge) }
+        setContent { PiTouchApp(runtimeManager) }
     }
 
     private fun requestTermuxPermissionIfNeeded() {
@@ -360,6 +363,12 @@ private fun directDocumentPath(context: Context, uri: Uri): String? {
     }
 }
 
+private fun bridgeHealthDiagnostic(health: PiHealth): String = listOf(
+    health.lastExit,
+    health.stderr.trim().takeIf { it.isNotBlank() }?.let { "stderr: $it" },
+    health.stdoutTail.trim().takeIf { it.isNotBlank() }?.let { "stdout: $it" }
+).filterNotNull().joinToString("\n")
+
 private suspend fun pollPiSession(context: Context, record: PiSessionRecord): PiSessionRecord {
     val bridge = PiBridge(context, record.port, record.token, record.id)
     val health = bridge.health(timeoutMs = 2_500).getOrNull()
@@ -367,13 +376,18 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
             status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
         )
     if (!health.piRunning) {
+        val diagnostic = bridgeHealthDiagnostic(health)
         return record.copy(
             cwd = health.cwd.ifBlank { record.cwd },
-            status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
+            status = if (diagnostic.isBlank() && record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR,
+            lastError = diagnostic.ifBlank { record.lastError }
         )
     }
-    val state = bridge.state(timeoutMs = 4_000).getOrNull()
-        ?: return record.copy(status = PiSessionStatus.ERROR, lastError = "无法读取 Pi 状态")
+    val stateResult = bridge.state(timeoutMs = 4_000)
+    val state = stateResult.getOrElse {
+        val detail = listOf(it.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
+        return record.copy(status = PiSessionStatus.ERROR, lastError = detail.ifBlank { "无法读取 Pi 状态" })
+    }
     return record.copy(
         name = state.sessionName.ifBlank { record.name },
         cwd = health.cwd.ifBlank { record.cwd },
@@ -386,7 +400,7 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
 }
 
 @Composable
-private fun PiTouchApp(baseBridge: PiBridge) {
+private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     val context = LocalContext.current
     val sessionStore = remember { PiSessionStore(context) }
     val initialSessions = remember { sessionStore.loadOrCreateDefault() }
@@ -399,19 +413,39 @@ private fun PiTouchApp(baseBridge: PiBridge) {
     var createSessionName by remember { mutableStateOf("") }
     var createSessionCwd by remember { mutableStateOf(initialSessions.first().cwd) }
     var createSessionStartupArguments by remember { mutableStateOf("") }
+    var managedSession by remember { mutableStateOf<PiSessionRecord?>(null) }
+    var renameSession by remember { mutableStateOf<PiSessionRecord?>(null) }
+    var renameSessionText by remember { mutableStateOf("") }
+    var deleteSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     val latestSessions by rememberUpdatedState(sessions)
     val latestActiveId by rememberUpdatedState(activeSessionId)
 
     fun updateSession(id: String, transform: (PiSessionRecord) -> PiSessionRecord) {
-        val updated = sessions.map { if (it.id == id) transform(it) else it }
+        val updated = orderPiSessions(sessions.map { if (it.id == id) transform(it) else it })
         sessions = updated
+        updated.firstOrNull { it.id == id }?.let { runtimeManager.runtime(it).update(it) }
         sessionStore.save(updated, activeSessionId)
     }
 
     fun selectSession(id: String) {
         if (sessions.none { it.id == id }) return
         activeSessionId = id
-        sessionStore.save(sessions, id)
+        sessionStore.save(orderPiSessions(sessions), id)
+    }
+
+    fun requestSessionManagement(record: PiSessionRecord) {
+        managedSession = record
+    }
+
+    fun confirmDeleteSession(record: PiSessionRecord) {
+        val remaining = orderPiSessions(removePiSession(sessions, record.id))
+        val nextActive = nextPiSessionIdAfterDelete(remaining, record.id, activeSessionId)
+        sessions = remaining
+        activeSessionId = nextActive.orEmpty()
+        sessionStore.save(remaining, nextActive)
+        runtimeManager.remove(record)
+        managedSession = null
+        deleteSession = null
     }
 
     fun createSession() {
@@ -451,7 +485,7 @@ private fun PiTouchApp(baseBridge: PiBridge) {
         }
     }
 
-    val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.first()
+    val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.firstOrNull()
 
     var themeKey by rememberSaveable {
         mutableStateOf(context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE).getString("theme", "dark") ?: "dark")
@@ -488,40 +522,46 @@ private fun PiTouchApp(baseBridge: PiBridge) {
     CompositionLocalProvider(LocalPiColors provides colors) {
         MaterialTheme(colorScheme = scheme) {
             Surface(Modifier.fillMaxSize(), color = colors.bg) {
-                // Keep every Session screen composed. Its per-session RPC event
-                // loop then remains alive while another tab is visible; switching
-                // changes only which sized screen is on top and never disposes the
-                // outgoing Pi/Bridge client state.
-                sessions.forEach { record ->
-                    key(record.id) {
-                        val recordBridge = remember(record.id, record.port, record.token) {
-                            if (record.id == PiSessionStore.DEFAULT_ID && record.port == PiSessionStore.DEFAULT_PORT) {
-                                baseBridge
-                            } else {
-                                PiBridge(context, record.port, record.token, record.id)
-                            }
+                if (activeSession == null) {
+                    EmptySessionHost(
+                        onNew = {
+                            createSessionName = ""
+                            createSessionCwd = PiSessionStore.DEFAULT_CWD
+                            createSessionStartupArguments = ""
+                            createSessionOpen = true
                         }
-                        PiScreen(
-                            bridge = recordBridge,
-                            session = record,
-                            sessions = sessions,
-                            autoStart = record.id == activeSession.id,
-                            hostModifier = if (record.id == activeSession.id) Modifier.fillMaxSize() else Modifier.size(0.dp),
-                            themeMode = themeMode,
-                            onTheme = { selected ->
-                                themeKey = selected.storageKey
-                                context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
-                                    .edit().putString("theme", selected.storageKey).apply()
-                            },
-                            onSelectSession = ::selectSession,
-                            onNewSession = {
-                                createSessionName = ""
-                                createSessionCwd = activeSession.cwd
-                                createSessionStartupArguments = ""
-                                createSessionOpen = true
-                            },
-                            onSessionUpdate = ::updateSession
-                        )
+                    )
+                } else {
+                    // Keep every Session screen composed. Its per-session runtime
+                    // is Activity-owned, and this keeps the existing screen state
+                    // visible without making it responsible for Pi/Bridge lifetime.
+                    sessions.forEach { record ->
+                        key(record.id) {
+                            val runtime = runtimeManager.runtime(record)
+                            val active = record.id == activeSession.id
+                            PiScreen(
+                                runtime = runtime,
+                                session = record,
+                                sessions = sessions,
+                                autoStart = active,
+                                hostModifier = if (active) Modifier.fillMaxSize() else Modifier.size(0.dp),
+                                themeMode = themeMode,
+                                onTheme = { selected ->
+                                    themeKey = selected.storageKey
+                                    context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                                        .edit().putString("theme", selected.storageKey).apply()
+                                },
+                                onSelectSession = ::selectSession,
+                                onNewSession = {
+                                    createSessionName = ""
+                                    createSessionCwd = activeSession.cwd
+                                    createSessionStartupArguments = ""
+                                    createSessionOpen = true
+                                },
+                                onSessionUpdate = ::updateSession,
+                                onManageSession = ::requestSessionManagement
+                            )
+                        }
                     }
                 }
             }
@@ -537,13 +577,52 @@ private fun PiTouchApp(baseBridge: PiBridge) {
                     onDismiss = { createSessionOpen = false }
                 )
             }
+            managedSession?.let { target ->
+                SessionManageDialog(
+                    record = target,
+                    onDismiss = { managedSession = null },
+                    onRename = {
+                        renameSession = target
+                        renameSessionText = sessionDisplayName(target)
+                        managedSession = null
+                    },
+                    onTogglePinned = {
+                        updateSession(target.id) { it.copy(pinned = !it.pinned) }
+                        managedSession = null
+                    },
+                    onDelete = {
+                        deleteSession = target
+                        managedSession = null
+                    }
+                )
+            }
+            renameSession?.let { target ->
+                SessionRenameDialog(
+                    currentName = renameSessionText,
+                    onName = { renameSessionText = it },
+                    onDismiss = { renameSession = null },
+                    onConfirm = {
+                        val updated = renamePiSession(sessions, target.id, renameSessionText)
+                        sessions = orderPiSessions(updated)
+                        sessionStore.save(sessions, activeSessionId)
+                        renameSession = null
+                    }
+                )
+            }
+            deleteSession?.let { target ->
+                SessionDeleteDialog(
+                    record = target,
+                    onDismiss = { deleteSession = null },
+                    onConfirm = { confirmDeleteSession(target) }
+                )
+            }
         }
     }
 }
 
 @Composable
 private fun PiScreen(
-    bridge: PiBridge,
+    runtime: PiSessionRuntime,
     session: PiSessionRecord,
     sessions: List<PiSessionRecord>,
     autoStart: Boolean,
@@ -552,11 +631,11 @@ private fun PiScreen(
     onTheme: (PiThemeMode) -> Unit,
     onSelectSession: (String) -> Unit,
     onNewSession: () -> Unit,
-    onSessionUpdate: (String, (PiSessionRecord) -> PiSessionRecord) -> Unit
+    onSessionUpdate: (String, (PiSessionRecord) -> PiSessionRecord) -> Unit,
+    onManageSession: (PiSessionRecord) -> Unit
 ) {
+    val bridge = runtime.bridge
     var cwd by rememberSaveable(session.id) { mutableStateOf(session.cwd) }
-    var runtimeCwd by rememberSaveable(session.id) { mutableStateOf("") }
-    var cwdEdited by rememberSaveable(session.id) { mutableStateOf(false) }
     var launchCommand by rememberSaveable(session.id) { mutableStateOf(session.launchCommand) }
     var input by rememberSaveable(session.id) { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
@@ -571,8 +650,6 @@ private fun PiScreen(
     var loadedExtensions by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadedResourceSections by remember { mutableStateOf<List<LoadedResourceSection>>(emptyList()) }
     var categorizedResourcesReceived by remember { mutableStateOf(false) }
-    var cursor by remember { mutableLongStateOf(0L) }
-    var eventFailures by remember { mutableStateOf(0) }
     val lines = remember { mutableStateListOf<ChatLine>() }
     val toolDraftChars = remember { mutableMapOf<Int, Int>() }
     val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
@@ -631,8 +708,8 @@ private fun PiScreen(
     }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        scope.launch {
-            if (uris.isEmpty()) return@launch
+        runtime.launchTask {
+            if (uris.isEmpty()) return@launchTask
             attachmentNotice = "正在建立文件引用…"
             var failures = 0
             uris.forEachIndexed { index, uri ->
@@ -738,53 +815,6 @@ private fun PiScreen(
         bridge.history().onSuccess { restoreHistory(it, preservePending) }
     }
 
-    fun applyRuntimeHealth(health: PiHealth) {
-        if (health.cwd.isNotBlank()) {
-            runtimeCwd = health.cwd
-            cwd = health.cwd
-            cwdEdited = false
-            updateSessionRecord { it.copy(cwd = health.cwd, status = PiSessionStatus.IDLE, lastError = "") }
-        }
-    }
-
-    fun reconnectDecisionForRuntime(runningCwd: String): ReconnectDecision =
-        if (!cwdEdited) ReconnectDecision.ATTACH else reconnectDecision(cwd, runningCwd)
-
-    suspend fun syncAttachedRuntime() {
-        // The runtime command may contain a temporary --session selector. Do
-        // not copy it back into the user's editable base command.
-        bridge.health().onSuccess(::applyRuntimeHealth)
-    }
-
-    suspend fun restartPi(preserveSession: Boolean): PiState {
-        status = "Checkpointing session"
-        bridge.state(1_500).onSuccess { previous ->
-            currentState = previous
-            if (!previous.streaming && !previous.compacting) {
-                val canCheckpoint = bridge.commands().getOrDefault(emptyList()).any { it.name == "__android_checkpoint" }
-                if (canCheckpoint) bridge.prompt("/__android_checkpoint")
-            }
-        }
-        status = "Installing bridge"
-        bridge.installAndStartBridge().getOrThrow()
-        status = "Waiting for bridge"
-        bridge.waitForBridge(30_000).getOrThrow()
-        status = "Starting Pi"
-        // Keep launchCommand as the App's base command. Per-Session startup
-        // arguments are parsed and appended before recovery adds the session
-        // selector, so they cannot replace App-owned RPC/session options.
-        val configuredLaunch = appendPiStartupArguments(launchCommand.trim(), session.startupArguments)
-        val launch = if (preserveSession) {
-            val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
-            bridge.recoveryLaunchCommand(configuredLaunch, knownSessionFile)
-        } else {
-            bridge.freshLaunchCommand(configuredLaunch)
-        }
-        val started = bridge.start(cwd.trim(), launch).getOrThrow()
-        applyRuntimeHealth(bridge.health().getOrThrow())
-        return started
-    }
-
     suspend fun refreshMeta() = coroutineScope {
         val state = async { bridge.state().getOrNull() }
         val stats = async { bridge.stats().getOrNull() }
@@ -796,7 +826,9 @@ private fun PiScreen(
                 record.copy(
                     name = it.sessionName.ifBlank { record.name },
                     sessionFile = it.sessionFile.ifBlank { record.sessionFile },
+                    ownedSessionFile = record.ownedSessionFile.ifBlank { it.sessionFile },
                     piSessionId = it.sessionId.ifBlank { record.piSessionId },
+                    sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
                     status = if (it.streaming || it.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
                     lastActivity = if (it.streaming || it.compacting) System.currentTimeMillis() else record.lastActivity,
                     lastError = ""
@@ -812,7 +844,7 @@ private fun PiScreen(
         // This is an extension command, so older Pi runtimes simply do not
         // advertise it. Keep the legacy widget untouched in that case.
         if (remoteCommands.none { it.name == ANDROID_RESOURCES_COMMAND }) return
-        scope.launch {
+        runtime.launchTask {
             if (delayMillis > 0) delay(delayMillis)
             // The categorized widget is fire-and-forget; a transient failure
             // must not erase the last authoritative snapshot.
@@ -1079,6 +1111,7 @@ private fun PiScreen(
                             status = "Ready"
                         } else if (req.message == "ANDROID_PI_QUIT") {
                             intentionalQuit = true
+                            runtime.disableRecovery()
                             status = "Stopping"
                         } else if (req.message == "资源已重新加载") {
                             addSystem(req.message)
@@ -1119,105 +1152,107 @@ private fun PiScreen(
         }
     }
 
+    suspend fun applyRuntimeReady(ready: PiRuntimeReady) {
+        val state = ready.state
+        currentState = state
+        if (ready.runtimeCwd.isNotBlank()) cwd = ready.runtimeCwd
+        updateSessionRecord { record ->
+            record.copy(
+                cwd = ready.runtimeCwd.ifBlank { record.cwd },
+                name = state.sessionName.ifBlank { record.name },
+                sessionFile = state.sessionFile.ifBlank { record.sessionFile },
+                ownedSessionFile = record.ownedSessionFile.ifBlank { state.sessionFile },
+                piSessionId = state.sessionId.ifBlank { record.piSessionId },
+                sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
+                status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
+                lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
+                lastError = ""
+            )
+        }
+        status = "Restoring session"
+        restoreHistory(ready.snapshot.history, preservePending = ready.reconnecting)
+        ready.snapshot.events.forEach { applyEvent(it, recovering = true) }
+        pendingUi = ready.snapshot.pendingUi.lastOrNull()
+        ready.snapshot.pendingUi.lastOrNull()?.let { request ->
+            dialogInput = request.prefill.ifBlank { "" }
+        }
+        ready.snapshot.editorText?.let { input = it }
+        connected = true
+        connecting = false
+        status = when {
+            currentState?.compacting == true -> "Compacting"
+            currentState?.streaming == true -> "Working"
+            else -> "Ready"
+        }
+        panel = Panel.Chat
+        refreshMeta()
+        requestLoadedResources()
+        if (currentState?.streaming == true || currentState?.compacting == true) {
+            AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
+        } else {
+            AgentKeepAliveService.stop(bridge.applicationContext())
+        }
+    }
+
     val connect: () -> Unit = connect@{
         if (connecting) return@connect
         connecting = true
-        scope.launch {
-            try {
-                connected = false
-                status = "Checking running agent"
-                val attached = bridge.attachToRunningBridge().getOrNull()
-                var restarted = false
-                var preservedSessionOnRestart = false
-                if (attached != null) {
-                    val runningCwd = bridge.health().getOrNull()?.cwd
-                        ?.takeIf { it.isNotBlank() }
-                        ?: runtimeCwd
-                    if (reconnectDecisionForRuntime(runningCwd) == ReconnectDecision.ATTACH) {
-                        syncAttachedRuntime()
-                        currentState = attached
-                        status = "Ready"
-                    } else if (autoStart) {
-                        currentState = restartPi(preserveSession = false)
-                        restarted = true
-                    }
-                } else if (autoStart) {
-                    val knownRuntimeCwd = bridge.health().getOrNull()?.cwd
-                        ?.takeIf { it.isNotBlank() }
-                        ?: runtimeCwd
-                    val preserveSession = if (knownRuntimeCwd.isBlank()) {
-                        !cwdEdited
-                    } else {
-                        reconnectDecisionForRuntime(knownRuntimeCwd) == ReconnectDecision.ATTACH
-                    }
-                    currentState = restartPi(preserveSession)
-                    restarted = true
-                    preservedSessionOnRestart = preserveSession
-                } else {
+        connected = false
+        intentionalQuit = false
+        status = "Checking running agent"
+        runtime.ensureConnected(session, autoStart)
+    }
+
+    // The runtime owns this loop. Compose only renders its updates; removing or
+    // resizing this screen can no longer cancel the RPC/event/reconnect jobs.
+    LaunchedEffect(runtime) {
+        runtime.updates.collect { update ->
+            when (update) {
+                is PiRuntimeUpdate.Ready -> applyRuntimeReady(update.value)
+                is PiRuntimeUpdate.Snapshot -> {
+                    restoreHistory(update.value.history, preservePending = true)
+                    update.value.events.forEach { applyEvent(it, recovering = true) }
+                    pendingUi = update.value.pendingUi.lastOrNull()
+                    update.value.editorText?.let { input = it }
+                    connected = true
+                    connecting = false
+                }
+                is PiRuntimeUpdate.Events -> {
+                    update.value.events.forEach { applyEvent(it) }
+                }
+                is PiRuntimeUpdate.Reconnecting -> {
+                    status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
+                    connecting = true
+                }
+                is PiRuntimeUpdate.Unavailable -> {
+                    connected = false
+                    connecting = false
                     status = "Disconnected"
                     updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
-                    return@launch
                 }
-                if (restarted) {
-                    val availableModels = bridge.models().getOrDefault(emptyList())
-                    models = availableModels
-                    // Pi restores model + thinking level from an existing session.
-                    // Android's preference is only for a genuinely new session;
-                    // /new applies it for subsequent new conversations.
-                    val configuredLaunch = appendPiStartupArguments(launchCommand.trim(), session.startupArguments)
-                    val launch = if (preservedSessionOnRestart) {
-                        val knownSessionFile = currentState?.sessionFile?.takeIf { it.isNotBlank() } ?: session.sessionFile
-                        bridge.recoveryLaunchCommand(configuredLaunch, knownSessionFile)
-                    } else {
-                        bridge.freshLaunchCommand(configuredLaunch)
-                    }
-                    if (shouldApplyAndroidDefaultModel(launch, currentState?.messageCount ?: 0)) {
-                        bridge.applyDefaultModel(availableModels).onSuccess { selected ->
-                            if (selected != null) bridge.state().onSuccess { state -> currentState = state }
-                        }.onFailure { addSystem(it.message.orEmpty()) }
-                    }
+                is PiRuntimeUpdate.Failed -> {
+                    connected = false
+                    connecting = false
+                    status = "Connection failed"
+                    updateSessionRecord { it.copy(status = PiSessionStatus.ERROR, lastError = update.error.message.orEmpty()) }
+                    addSystem("连接失败：${update.error.message}")
                 }
-                status = "Restoring session"
-                val snapshot = bridge.recoverySnapshot().getOrThrow()
-                restoreHistory(snapshot.history)
-                cursor = snapshot.latest
-                snapshot.events.forEach { applyEvent(it, recovering = true) }
-                pendingUi = snapshot.pendingUi.lastOrNull()
-                snapshot.pendingUi.lastOrNull()?.let { request ->
-                    dialogInput = request.prefill.ifBlank { "" }
+                PiRuntimeUpdate.Disconnected -> {
+                    connected = false
+                    connecting = false
+                    status = "Disconnected"
+                    updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
                 }
-                snapshot.editorText?.let { input = it }
-                connected = true
-                status = when {
-                    currentState?.compacting == true -> "Compacting"
-                    currentState?.streaming == true -> "Working"
-                    else -> "Ready"
-                }
-                panel = Panel.Chat
-                refreshMeta()
-                requestLoadedResources()
-                if (currentState?.streaming == true || currentState?.compacting == true) {
-                    AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
-                } else {
-                    AgentKeepAliveService.stop(bridge.applicationContext())
-                }
-            } catch (error: Exception) {
-                AgentKeepAliveService.stop(bridge.applicationContext())
-                status = "Connection failed"
-                updateSessionRecord { it.copy(status = PiSessionStatus.ERROR, lastError = error.message.orEmpty()) }
-                addSystem("连接失败：${error.message}")
-            } finally {
-                connecting = false
             }
         }
     }
 
-    LaunchedEffect(bridge, autoStart) {
-        if (!connected) connect()
+    LaunchedEffect(runtime, autoStart, session.cwd, session.launchCommand, session.startupArguments, session.sessionFile) {
+        runtime.ensureConnected(session, autoStart)
     }
 
     fun sendExtensionCommand(text: String) {
-        scope.launch {
+        runtime.launchTask {
             bridge.command(text).onFailure { addSystem("命令发送失败：${it.message}") }
         }
     }
@@ -1228,6 +1263,10 @@ private fun PiScreen(
         val firstToken = text.substringBefore(' ').lowercase()
         if (!connected && firstToken !in setOf("/settings", "/themes")) {
             addSystem("还没有连接 Pi。点顶部 Connect 或输入 /settings。")
+            return
+        }
+        if (!runtime.canSubmitTask() && firstToken !in setOf("/settings", "/themes")) {
+            addSystem("当前 Session 正在停止，新的操作已拦截")
             return
         }
         if (attachments.isNotEmpty()) {
@@ -1242,7 +1281,7 @@ private fun PiScreen(
                     delivery = if (steering) "steering_queued" else "normal"
                 )
             )
-            scope.launch {
+            runtime.launchTask {
                 val behavior = if (steering) "steer" else null
                 bridge.prompt(text, behavior, attachments).fold(
                     onSuccess = { status = "Working" },
@@ -1263,7 +1302,7 @@ private fun PiScreen(
             if (bashCommand.isBlank()) return
             panel = Panel.Bash
             bashInput = bashCommand
-            scope.launch {
+            runtime.launchTask {
                 bashRunning = true
                 bashOutput = "$ ${if (excluded) "!" else ""}$bashCommand\n"
                 bridge.bash(bashCommand, excluded).fold(
@@ -1288,7 +1327,7 @@ private fun PiScreen(
                 |资源：/reload /trust /files /diff /themes /settings
                 |系统：/hotkeys /changelog /login /logout /quit""".trimMargin()
             )
-            "/resume" -> scope.launch {
+            "/resume" -> runtime.launchTask {
                 bridge.sessions().fold(
                     onSuccess = { sessions ->
                         resumeSessions = sessions
@@ -1299,7 +1338,7 @@ private fun PiScreen(
                 )
             }
             "/tree", "/fork", "/name", "/export", "/import", "/share", "/trust", "/reload", "/login", "/logout", "/quit" -> sendExtensionCommand(text)
-            "/copy" -> scope.launch {
+            "/copy" -> runtime.launchTask {
                 bridge.lastAssistantText().fold(
                     onSuccess = { copied ->
                         if (copied.isBlank()) {
@@ -1324,7 +1363,7 @@ private fun PiScreen(
                             "${it.provider}/${it.id}".lowercase() == needle ||
                             it.name.lowercase() == needle
                     }
-                    if (exact.size == 1) scope.launch {
+                    if (exact.size == 1) runtime.launchTask {
                         bridge.setModel(exact.first()).fold(
                             onSuccess = { refreshMeta(); addSystem("模型已切换为 ${exact.first().provider}/${exact.first().id}") },
                             onFailure = { addSystem("切换模型失败：${it.message}") }
@@ -1347,7 +1386,7 @@ private fun PiScreen(
                     val levels = setOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
                     val level = args.lowercase()
                     if (level !in levels) addSystem("未知 thinking level：$args；可用：${levels.joinToString()}")
-                    else scope.launch {
+                    else runtime.launchTask {
                         bridge.setThinking(level).fold(
                             onSuccess = { refreshMeta(); addSystem("Thinking = $level") },
                             onFailure = { addSystem("Thinking 设置失败：${it.message}") }
@@ -1357,7 +1396,7 @@ private fun PiScreen(
             }
             "/session" -> {
                 panel = Panel.Stats
-                scope.launch { bridge.stats().onSuccess { currentStats = it }.onFailure { addSystem(it.message.orEmpty()) } }
+                runtime.launchTask { bridge.stats().onSuccess { currentStats = it }.onFailure { addSystem(it.message.orEmpty()) } }
             }
             "/hotkeys" -> addSystem(
                 """移动端操作
@@ -1372,8 +1411,10 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.18.0
+                """Pi Android v5.19.0
                 |• 新建 Session 支持独立启动参数，并在恢复时保留参数
+                |• Session 长按支持重命名、置顶和确认删除
+                |• Stop 会清空 Pi 队列并取消当前任务，阻止后续操作继续执行
                 |• Session 侧栏改为从中间区域右滑触发，保留左边缘返回手势
                 |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
                 |• 从中间区域右滑打开 Session 侧栏，切换不会停止后台任务
@@ -1409,7 +1450,7 @@ private fun PiScreen(
                 panel = Panel.Bash
                 if (args.isNotBlank()) {
                     bashInput = args
-                    scope.launch {
+                    runtime.launchTask {
                         bashRunning = true
                         bridge.bash(args).fold(
                             onSuccess = { bashOutput = "$ $args\n${it.output}\n[exit ${it.exitCode}]" },
@@ -1422,13 +1463,13 @@ private fun PiScreen(
             }
             "/files" -> {
                 panel = Panel.Files
-                scope.launch { bridge.files(currentPath).onSuccess { files = it }.onFailure { addSystem(it.message.orEmpty()) } }
+                runtime.launchTask { bridge.files(currentPath).onSuccess { files = it }.onFailure { addSystem(it.message.orEmpty()) } }
             }
             "/diff" -> {
                 panel = Panel.Diff
-                scope.launch { bridge.diff().onSuccess { diffText = it.ifBlank { "没有未提交改动" } }.onFailure { diffText = "ERROR: ${it.message}" } }
+                runtime.launchTask { bridge.diff().onSuccess { diffText = it.ifBlank { "没有未提交改动" } }.onFailure { diffText = "ERROR: ${it.message}" } }
             }
-            "/new" -> scope.launch {
+            "/new" -> runtime.launchTask {
                 bridge.newSession().fold(
                     onSuccess = {
                         lines.clear()
@@ -1440,7 +1481,7 @@ private fun PiScreen(
                     onFailure = { addSystem("/new 失败：${it.message}") }
                 )
             }
-            "/compact" -> scope.launch {
+            "/compact" -> runtime.launchTask {
                 status = "Compacting"
                 bridge.compact(args).fold(
                     onSuccess = {
@@ -1457,7 +1498,7 @@ private fun PiScreen(
                     }
                 )
             }
-            "/clone" -> scope.launch {
+            "/clone" -> runtime.launchTask {
                 bridge.cloneSession().fold(
                     onSuccess = {
                         addSystem("当前 active branch 已克隆")
@@ -1468,12 +1509,17 @@ private fun PiScreen(
                     onFailure = { addSystem("/clone 失败：${it.message}") }
                 )
             }
-            "/abort" -> scope.launch {
+            "/abort" -> {
                 status = "Stopping"
-                bridge.abort().fold(
-                    onSuccess = { addSystem("已发送取消") },
-                    onFailure = { addSystem("取消失败：${it.message}") }
-                )
+                // Create the Activity-owned stop job before using the UI scope;
+                // a disappearing Composable cannot cancel the remote emergency stop.
+                val stop = runtime.stopCurrentAgent()
+                scope.launch {
+                    stop.await().fold(
+                        onSuccess = { addSystem("已停止当前任务并清空队列") },
+                        onFailure = { addSystem("取消失败：${it.message}") }
+                    )
+                }
             }
             "/themes" -> {
                 val requested = when (args.lowercase()) {
@@ -1495,7 +1541,7 @@ private fun PiScreen(
                 val steering = currentState?.streaming == true || status == "Working"
                 if (steering) steeringQueueSize += 1
                 lines.add(ChatLine("user", text, delivery = if (steering) "steering_queued" else "normal"))
-                scope.launch {
+                runtime.launchTask {
                     val behavior = if (steering) "steer" else null
                     bridge.prompt(text, behavior).fold(
                         onSuccess = { status = "Working" },
@@ -1507,97 +1553,6 @@ private fun PiScreen(
                             addSystem("发送失败：${it.message}")
                         }
                     )
-                }
-            }
-        }
-    }
-
-    suspend fun recoverBridge(): String {
-        status = if (currentState?.streaming == true) "Working" else "RECONNECTING"
-        val attached = bridge.attachToRunningBridge().getOrNull()
-        val runningCwd = bridge.health().getOrNull()?.cwd
-            ?.takeIf { it.isNotBlank() }
-            ?: runtimeCwd
-        if (attached != null && reconnectDecisionForRuntime(runningCwd) == ReconnectDecision.ATTACH) {
-            syncAttachedRuntime()
-            currentState = attached
-            return "attached"
-        }
-        val knownRuntimeCwd = runningCwd.takeIf { it.isNotBlank() } ?: runtimeCwd
-        val preserveSession = if (knownRuntimeCwd.isBlank()) {
-            !cwdEdited
-        } else {
-            reconnectDecisionForRuntime(knownRuntimeCwd) == ReconnectDecision.ATTACH
-        }
-        return runCatching {
-            currentState = restartPi(preserveSession)
-            "restarted"
-        }.getOrElse { "failed" }
-    }
-
-    suspend fun restoreAfterReconnect() {
-        bridge.recoverySnapshot().onSuccess { snapshot ->
-            restoreHistory(snapshot.history, preservePending = true)
-            cursor = snapshot.latest
-            snapshot.events.forEach { event -> applyEvent(event, recovering = true) }
-            pendingUi = snapshot.pendingUi.lastOrNull()
-            snapshot.editorText?.let { input = it }
-        }
-        requestLoadedResources()
-    }
-
-    LaunchedEffect(connected) {
-        if (!connected) return@LaunchedEffect
-        while (connected) {
-            bridge.events(cursor).onSuccess { batch ->
-                eventFailures = 0
-                val processExited = batch.events.any { it.type == "process_exit" }
-                if (batch.gap) {
-                    bridge.recoverySnapshot().fold(
-                        onSuccess = { snapshot ->
-                            restoreHistory(snapshot.history, preservePending = true)
-                            cursor = snapshot.latest
-                            snapshot.events.forEach { applyEvent(it, recovering = true) }
-                            pendingUi = snapshot.pendingUi.lastOrNull()
-                            snapshot.editorText?.let { input = it }
-                        },
-                        onFailure = {
-                            loadHistory()
-                            cursor = batch.latest
-                        }
-                    )
-                } else {
-                    cursor = batch.latest
-                    batch.events.forEach { event -> applyEvent(event) }
-                }
-                if (processExited && connected) {
-                    when (recoverBridge()) {
-                        "restarted" -> restoreAfterReconnect()
-                        "attached" -> requestLoadedResources()
-                    }
-                    status = if (currentState?.streaming == true) "Working" else "Ready"
-                }
-            }.onFailure { error ->
-                eventFailures += 1
-                status = if (currentState?.streaming == true) "Working" else "RECONNECTING"
-                delay((500L * (1L shl (eventFailures.coerceAtMost(3) - 1))).coerceAtMost(5_000L))
-                if (eventFailures >= 3) {
-                    when (recoverBridge()) {
-                        "attached" -> {
-                            requestLoadedResources()
-                            eventFailures = 0
-                            status = if (currentState?.streaming == true) "Working" else "Ready"
-                        }
-                        "restarted" -> {
-                            restoreAfterReconnect()
-                            eventFailures = 0
-                            status = if (currentState?.streaming == true) "Working" else "Ready"
-                        }
-                        else -> Unit
-                    }
-                }
-                if (eventFailures > 0 && eventFailures % 3 == 0) {
-                    addSystem("Bridge 暂时不可用，正在后台重试：${error.message}")
                 }
             }
         }
@@ -1633,11 +1588,11 @@ private fun PiScreen(
         if (followOutput) showScrollControls = false
     }
 
-    LaunchedEffect(connected) {
-        if (!connected) return@LaunchedEffect
+    LaunchedEffect(runtime) {
         var knownSession = currentState?.sessionId.orEmpty()
-        while (connected) {
+        while (isActive) {
             delay(10_000)
+            if (!runtime.isConnected()) continue
             bridge.state().onSuccess { state ->
                 if (knownSession.isNotBlank() && state.sessionId.isNotBlank() && state.sessionId != knownSession) {
                     loadHistory()
@@ -1652,7 +1607,7 @@ private fun PiScreen(
     pendingUi?.let { request ->
         fun sendUiResponse(action: suspend () -> Result<Unit>) {
             pendingUi = null
-            scope.launch {
+            runtime.launchTask {
                 action().onFailure {
                     pendingUi = request
                     addSystem("界面请求响应失败：${it.message}")
@@ -1701,7 +1656,7 @@ private fun PiScreen(
                                     .fillMaxWidth()
                                     .clickable(enabled = !session.current) {
                                         resumeOpen = false
-                                        scope.launch {
+                                        runtime.launchTask {
                                             status = "Switching session"
                                             bridge.switchSession(session.path).fold(
                                                 onSuccess = { switchedState ->
@@ -1869,7 +1824,7 @@ private fun PiScreen(
                         addSystem("新对话默认模型：$defaultModelKey")
                     },
                     onPick = { model ->
-                        scope.launch {
+                        runtime.launchTask {
                             bridge.setModel(model).fold(
                                 onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") },
                                 onFailure = { addSystem("切换模型失败：${it.message}") }
@@ -1877,7 +1832,7 @@ private fun PiScreen(
                         }
                     },
                     onEffort = { level ->
-                        scope.launch {
+                        runtime.launchTask {
                             bridge.setThinking(level).fold(
                                 onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") },
                                 onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }
@@ -1886,7 +1841,7 @@ private fun PiScreen(
                     }
                 )
                 Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), onBack = { panel = Panel.Chat }) { level ->
-                    scope.launch {
+                    runtime.launchTask {
                         bridge.setThinking(level).fold(
                             onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") },
                             onFailure = { addSystem("Thinking 设置失败：${it.message}") }
@@ -1901,7 +1856,7 @@ private fun PiScreen(
                     onBack = { panel = Panel.Chat },
                     onRun = {
                         val command = bashInput.trim()
-                        if (command.isNotBlank()) scope.launch {
+                        if (command.isNotBlank()) runtime.launchTask {
                             bashRunning = true
                             bashOutput = "$ $command\n"
                             bridge.bash(command).fold(
@@ -1912,7 +1867,13 @@ private fun PiScreen(
                             refreshMeta()
                         }
                     },
-                    onAbort = { scope.launch { bridge.abortBash() } }
+                    onAbort = {
+                        val stop = runtime.stopCurrentAgent()
+                        scope.launch {
+                            stop.await()
+                            bashRunning = false
+                        }
+                    }
                 )
                 Panel.Files -> FilesPanel(
                     path = currentPath,
@@ -1929,14 +1890,14 @@ private fun PiScreen(
                             fileText = ""
                             fileLoading = false
                             fileTruncated = false
-                            scope.launch { bridge.files(currentPath).onSuccess { files = it } }
+                            runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } }
                         } else {
                             val requested = item.path
                             selectedFile = requested
                             fileText = ""
                             fileLoading = true
                             fileTruncated = false
-                            scope.launch {
+                            runtime.launchTask {
                                 bridge.file(requested).fold(
                                     onSuccess = { loaded ->
                                         if (selectedFile == requested) {
@@ -1963,13 +1924,13 @@ private fun PiScreen(
                         fileText = ""
                         fileLoading = false
                         fileTruncated = false
-                        scope.launch { bridge.files(currentPath).onSuccess { files = it } }
+                        runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } }
                     },
                     onText = { fileText = it },
                     onSave = {
                         if (fileTruncated) {
                             addSystem("文件超过 2 MB，只显示了只读预览；为防止数据丢失，不能从这里覆盖保存")
-                        } else if (!fileLoading && selectedFile.isNotBlank()) scope.launch {
+                        } else if (!fileLoading && selectedFile.isNotBlank()) runtime.launchTask {
                             bridge.writeFile(selectedFile, fileText).fold(
                                 onSuccess = { addSystem("已保存 $selectedFile") },
                                 onFailure = { addSystem("保存失败：${it.message}") }
@@ -1991,7 +1952,6 @@ private fun PiScreen(
                     autoCompaction = currentState?.autoCompactionEnabled ?: true,
                     onCwd = {
                         cwd = it
-                        cwdEdited = true
                         updateSessionRecord { record -> record.copy(cwd = it) }
                     },
                     onLaunch = {
@@ -2000,7 +1960,7 @@ private fun PiScreen(
                     },
                     onConnect = connect,
                     onAutoCompaction = { enabled ->
-                        scope.launch {
+                        runtime.launchTask {
                             bridge.setAutoCompaction(enabled).fold(
                                 onSuccess = { refreshMeta(); addSystem("自动压缩：${if (enabled) "开启" else "关闭"}") },
                                 onFailure = { addSystem("自动压缩设置失败：${it.message}") }
@@ -2125,7 +2085,8 @@ private fun PiScreen(
             onNew = {
                 settleDrawer(0f)
                 onNewSession()
-            }
+            },
+            onManage = onManageSession
         )
     }
 }
@@ -2137,13 +2098,15 @@ private fun sessionStatusLabel(record: PiSessionRecord): String = when (record.s
     PiSessionStatus.ERROR -> "Error"
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionDrawer(
     sessions: List<PiSessionRecord>,
     activeSessionId: String,
     modifier: Modifier = Modifier,
     onSelect: (String) -> Unit,
-    onNew: () -> Unit
+    onNew: () -> Unit,
+    onManage: (PiSessionRecord) -> Unit = {}
 ) {
     Column(
         modifier
@@ -2172,25 +2135,28 @@ private fun SessionDrawer(
             Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
             contentPadding = PaddingValues(bottom = 12.dp)
         ) {
-            items(sessions) { record ->
+            items(sessions, key = { it.id }) { record ->
                 val selected = record.id == activeSessionId
                 Column(
                     Modifier
                         .fillMaxWidth()
                         .background(if (selected) CardBg else Color.Transparent)
-                        .clickable { onSelect(record.id) }
+                        .combinedClickable(
+                            onClick = { onSelect(record.id) },
+                            onLongClick = { onManage(record) }
+                        )
                         .padding(horizontal = 14.dp, vertical = 11.dp)
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            if (selected) "◆" else "○",
-                            color = if (selected) Accent else TextMuted,
+                            if (selected) "◆" else if (record.pinned) "★" else "○",
+                            color = if (selected || record.pinned) Accent else TextMuted,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp
                         )
                         Spacer(Modifier.width(7.dp))
                         Text(
-                            record.name.ifBlank { "Pi" },
+                            sessionDisplayName(record),
                             color = if (selected) Accent else TextMain,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 13.sp,
@@ -2304,6 +2270,150 @@ private fun SessionCreateDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+@Composable
+private fun SessionManageDialog(
+    record: PiSessionRecord,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onDelete: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(sessionDisplayName(record)) },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                TextButton(onClick = onRename, modifier = Modifier.fillMaxWidth()) { Text("重命名") }
+                TextButton(onClick = onTogglePinned, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (record.pinned) "取消置顶" else "置顶")
+                }
+                TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) { Text("删除", color = Danger) }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun SessionRenameDialog(
+    currentName: String,
+    onName: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名 Pi Session") },
+        text = {
+            OutlinedTextField(
+                value = currentName,
+                onValueChange = onName,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("显示名称") },
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun SessionDeleteDialog(
+    record: PiSessionRecord,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除 Pi Session？") },
+        text = { Text("将停止并清理“${sessionDisplayName(record)}”自己的 Pi、Bridge 和会话配置；不会删除项目文件或其他 Session。") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("确认删除", color = Danger) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun EmptySessionHost(onNew: () -> Unit) {
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var drawerProgress by remember { mutableFloatStateOf(0f) }
+    val currentProgress = rememberUpdatedState(drawerProgress)
+    fun settle(target: Float) {
+        scope.launch {
+            val animation = Animatable(drawerProgress)
+            animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { drawerProgress = value }
+        }
+    }
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .background(Bg)
+            .pointerInput(Unit) {
+                val edgeExclusion = with(density) { 72.dp.toPx() }
+                val contentTop = with(density) { 32.dp.toPx() }
+                val touchSlop = with(density) { 18.dp.toPx() }
+                val drawerWidthPx = size.width * 0.86f
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val startProgress = currentProgress.value
+                    val chatArea = size.height * 0.86f
+                    val inZone = startProgress <= 0.01f && down.position.x > edgeExclusion &&
+                        down.position.y in (contentTop..chatArea) || startProgress > 0.01f && down.position.x > edgeExclusion
+                    var dragging = false
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        val dx = change.position.x - down.position.x
+                        val dy = change.position.y - down.position.y
+                        if (!dragging) {
+                            if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) return@awaitEachGesture
+                            if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f) {
+                                if (!inZone) return@awaitEachGesture
+                                dragging = true
+                            }
+                        }
+                        if (dragging) {
+                            change.consume()
+                            drawerProgress = (startProgress + dx / drawerWidthPx).coerceIn(0f, 1f)
+                        }
+                        if (!change.pressed) {
+                            if (dragging) settle(if (drawerProgress >= 0.35f) 1f else 0f)
+                            break
+                        }
+                    }
+                }
+            }
+    ) {
+        val drawerWidth = maxWidth * 0.86f
+        val drawerWidthPx = with(density) { drawerWidth.toPx() }
+        BackHandler(enabled = drawerProgress > 0.01f) { settle(0f) }
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("没有 Pi Session", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+        }
+        if (drawerProgress > 0.001f) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.34f)).clickable { settle(0f) }.zIndex(1f))
+        }
+        SessionDrawer(
+            sessions = emptyList(),
+            activeSessionId = "",
+            modifier = Modifier
+                .width(drawerWidth)
+                .fillMaxHeight()
+                .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
+                .zIndex(2f),
+            onSelect = {},
+            onNew = {
+                settle(0f)
+                onNew()
+            }
+        )
+    }
 }
 
 @Composable

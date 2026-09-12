@@ -19,28 +19,38 @@ internal fun parseShellArguments(command: String): List<String>? {
     val current = StringBuilder()
     var quote: Char? = null
     var escaped = false
+    var tokenStarted = false
     for (character in command) {
         if (escaped) {
             current.append(character)
             escaped = false
+            tokenStarted = true
         } else if (character == '\\' && quote != '\'') {
             escaped = true
+            tokenStarted = true
         } else if (quote != null) {
             if (character == quote) quote = null else current.append(character)
+            tokenStarted = true
         } else if (character == '\'' || character == '"') {
             quote = character
+            tokenStarted = true
         } else if (character.isWhitespace()) {
-            if (current.isNotEmpty()) {
+            if (tokenStarted) {
                 arguments += current.toString()
                 current.clear()
+                tokenStarted = false
             }
         } else {
             current.append(character)
+            tokenStarted = true
         }
     }
-    if (escaped) current.append('\\')
+    if (escaped) {
+        current.append('\\')
+        tokenStarted = true
+    }
     if (quote != null) return null
-    if (current.isNotEmpty()) arguments += current.toString()
+    if (tokenStarted) arguments += current.toString()
     return arguments
 }
 
@@ -127,6 +137,37 @@ private fun withoutPiSessionArguments(command: String): List<String>? {
 /** Remove session selectors so a new cwd always starts a new Pi session. */
 internal fun launchPiWithoutSession(command: String): String {
     val retained = withoutPiSessionArguments(command) ?: return command
+    return retained.joinToString(" ", transform = ::quoteLaunchArgument)
+}
+
+/**
+ * Give a newly created Android Session a native Pi identity immediately.
+ * --session-id is exact (and creates the file when absent), while --session-dir
+ * keeps equal cwd values from ever sharing Pi's default project session folder.
+ */
+internal fun ensurePiSessionIdentity(command: String, sessionId: String, sessionDirectory: String): String {
+    if (sessionId.isBlank() || sessionDirectory.isBlank()) return command
+    val source = withoutPiSessionArguments(command)?.toMutableList() ?: return command
+    val optionTerminator = source.indexOf("--")
+    val retained = mutableListOf<String>()
+    var index = 0
+    while (index < source.size) {
+        if (optionTerminator >= 0 && index >= optionTerminator) {
+            retained += source[index]
+            index++
+            continue
+        }
+        when {
+            source[index] == "--session-dir" -> index += 2
+            source[index].startsWith("--session-dir=") -> index++
+            else -> {
+                retained += source[index]
+                index++
+            }
+        }
+    }
+    val insertionPoint = retained.indexOf("--").takeIf { it >= 0 } ?: retained.size
+    retained.addAll(insertionPoint, listOf("--session-dir", sessionDirectory, "--session-id", sessionId))
     return retained.joinToString(" ", transform = ::quoteLaunchArgument)
 }
 

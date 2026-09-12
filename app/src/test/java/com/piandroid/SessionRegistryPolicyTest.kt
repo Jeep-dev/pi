@@ -26,4 +26,50 @@ class SessionRegistryPolicyTest {
     fun persistedProcessStatusStartsAsNotStarted() {
         assertEquals(PiSessionStatus.NOT_STARTED, PiSessionRecord("a", "one", "/tmp", "pi", 17650, "token").status)
     }
+
+    @Test
+    fun nativeIdentityAndHistoryNamespaceAreIndependentOfCwd() {
+        val first = PiSessionStore.defaultLaunchCommand("a")
+        val second = PiSessionStore.defaultLaunchCommand("b")
+        assertTrue(first.contains("--session-dir ~/.pi/android/sessions/a/pi-sessions"))
+        assertTrue(second.contains("--session-dir ~/.pi/android/sessions/b/pi-sessions"))
+        assertTrue(first.contains("--session-id a"))
+        assertTrue(second.contains("--session-id b"))
+        assertNotEquals(first, second)
+    }
+
+    @Test
+    fun renameAndPinOnlyChangeAndroidPresentation() {
+        val original = PiSessionRecord(
+            "a", "native", "/tmp/project", "pi", 17650, "token",
+            sessionFile = "/tmp/a.jsonl", piSessionId = "native-a",
+            displayName = "A", ownedSessionFile = "/tmp/a.jsonl",
+            sessionDirectory = "~/.pi/android/sessions/a/pi-sessions"
+        )
+        val renamed = renamePiSession(listOf(original), "a", "Renamed").single()
+        assertEquals("Renamed", sessionDisplayName(renamed))
+        assertEquals(original.cwd, renamed.cwd)
+        assertEquals(original.sessionFile, renamed.sessionFile)
+        assertEquals(original.piSessionId, renamed.piSessionId)
+        assertEquals(original.port, renamed.port)
+        assertEquals(original.token, renamed.token)
+
+        val records = listOf(original, original.copy(id = "b", displayName = "B", pinned = true))
+        val pinned = togglePiSessionPinned(records, "a")
+        assertEquals(listOf("a", "b"), pinned.map { it.id })
+        assertTrue(pinned.first().pinned)
+    }
+
+    @Test
+    fun deletingCurrentSessionChoosesOnlyARemainingSession() {
+        val records = listOf(
+            PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"),
+            PiSessionRecord("b", "B", "/tmp", "pi", 17651, "token-b")
+        )
+        val remaining = removePiSession(records, "a")
+        assertEquals(listOf("b"), remaining.map { it.id })
+        assertEquals("b", nextPiSessionIdAfterDelete(remaining, "a", "a"))
+        assertEquals("b", nextPiSessionIdAfterDelete(remaining, "b", "b"))
+        assertEquals(null, nextPiSessionIdAfterDelete(emptyList(), "a", "a"))
+    }
 }

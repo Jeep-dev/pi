@@ -169,7 +169,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-12.1");
+  assert.equal(health.bridgeVersion, "2026-09-12.2");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
@@ -177,6 +177,7 @@ try {
   assert.ok(health.capabilities.includes("multi-session-v1"));
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
   assert.ok(health.capabilities.includes("bounded-event-cache-v1"));
+  assert.ok(health.capabilities.includes("hard-stop-v1"));
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {

@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-12.1";
+const bridgeVersion = "2026-09-12.2";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -21,6 +21,7 @@ const bridgeCapabilities = [
   "multi-session-v1",
   "consistent-recovery-v1",
   "bounded-event-cache-v1",
+  "hard-stop-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -53,6 +54,8 @@ const eventWaiters = new Set();
 const pendingUiRequests = new Map();
 const persistentUiEvents = new Map();
 let latestQueueEvent = null;
+let stopFence = false;
+let stopInProgress = null;
 
 function addEvent(value) {
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
@@ -145,6 +148,8 @@ function attachJsonl(stream) {
 }
 
 function stopPi() {
+  stopFence = false;
+  stopInProgress = null;
   addEvent({ type: "process_reset" });
   pendingUiRequests.clear();
   persistentUiEvents.clear();
@@ -260,6 +265,8 @@ async function startPi(nextCwd, nextLaunchCommand) {
   lastStderr = "";
   lastStdoutTail = "";
   lastExit = null;
+  stopFence = false;
+  stopInProgress = null;
 
   let startedChild;
   try {
@@ -779,10 +786,52 @@ async function rpcResponse(res, command, timeoutMs) {
 }
 
 function dispatchLongCommand(message) {
+  if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
   void rpc({ type: "prompt", message }, 24 * 60 * 60 * 1000).catch(error => {
     addEvent({ type: "extension_error", error: `Command failed: ${String(error?.message || error)}` });
   });
+}
+
+/**
+ * Stop is a task fence, not merely an abort button. Clear both Pi queues before
+ * aborting the active run, abort a direct RPC bash, and reject new work until
+ * Pi has acknowledged the idle boundary.
+ */
+async function stopCurrentAgent() {
+  if (stopInProgress) return stopInProgress;
+  if (!child || child.exitCode != null || !child.stdin.writable) {
+    stopFence = false;
+    return { cleared: false, aborted: false, bashAborted: false };
+  }
+
+  stopFence = true;
+  const operation = (async () => {
+    let cleared = false;
+    try {
+      await rpc({ type: "clear_queue" }, 8_000);
+      cleared = true;
+    } catch (error) {
+      addEvent({ type: "extension_error", error: `Stop queue clear failed: ${String(error?.message || error)}` });
+    }
+
+    const [bashResult, abortResult] = await Promise.allSettled([
+      rpc({ type: "abort_bash" }, 8_000),
+      // Pi's abort response completes only after the active run reaches idle.
+      rpc({ type: "abort" }, 60_000),
+    ]);
+    if (abortResult.status === "rejected") throw abortResult.reason;
+    return {
+      cleared,
+      aborted: true,
+      bashAborted: bashResult.status === "fulfilled",
+    };
+  })();
+  stopInProgress = operation.finally(() => {
+    stopFence = false;
+    stopInProgress = null;
+  });
+  return stopInProgress;
 }
 
 async function sessionStats() {
@@ -829,6 +878,11 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         bridgeVersion,
         capabilities: bridgeCapabilities,
+        bridgePid: process.pid,
+        piPid: child?.pid ?? null,
+        port,
+        endpointKey: process.env.PI_ANDROID_ENDPOINT_KEY || "",
+        stopInProgress: !!stopInProgress,
         piRunning: !!child && child.exitCode == null,
         cwd,
         launchCommand,
@@ -871,12 +925,23 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/start") {
       const input = JSON.parse(await readBody(req) || "{}");
-      await startPi(String(input.cwd || cwd), String(input.launchCommand || launchCommand));
-      const state = await rpc({ type: "get_state" }, 60000);
-      return send(res, 200, { ok: true, cwd, launchCommand, state: state.data || null });
+      try {
+        await startPi(String(input.cwd || cwd), String(input.launchCommand || launchCommand));
+        const state = await rpc({ type: "get_state" }, 60000);
+        return send(res, 200, { ok: true, cwd, launchCommand, state: state.data || null });
+      } catch (error) {
+        const diagnostics = [
+          String(error?.message || error),
+          lastExit ? `exit=${lastExit.code ?? "?"} signal=${lastExit.signal ?? "-"}` : "exit=unknown",
+          lastStderr.trim() ? `stderr:\n${lastStderr.trim()}` : "",
+          lastStdoutTail.trim() ? `stdout:\n${lastStdoutTail.trim()}` : "",
+        ].filter(Boolean).join("\n");
+        throw new Error(diagnostics);
+      }
     }
 
     if (req.method === "POST" && url.pathname === "/command") {
+      if (stopFence) throw new Error("Stop in progress; command rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       const message = String(input.message || "").trim();
       if (!message.startsWith("/")) throw new Error("slash command required");
@@ -885,6 +950,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/prompt") {
+      if (stopFence) throw new Error("Stop in progress; prompt rejected");
       const input = JSON.parse(await readBody(req));
       const attachments = Array.isArray(input.attachments)
         ? input.attachments.filter(item => item && typeof item.path === "string" && item.path.trim())
@@ -905,7 +971,11 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    if (req.method === "POST" && url.pathname === "/abort") return rpcResponse(res, { type: "abort" });
+    if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {
+      const result = await stopCurrentAgent();
+      return send(res, 200, { ok: true, ...result });
+    }
+    if (req.method === "POST" && url.pathname === "/clear-queue") return rpcResponse(res, { type: "clear_queue" }, 8_000);
     if (req.method === "POST" && url.pathname === "/new-session") return rpcResponse(res, { type: "new_session" });
     if (req.method === "POST" && url.pathname === "/compact") {
       const input = JSON.parse(await readBody(req) || "{}");
@@ -995,6 +1065,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/bash") {
+      if (stopFence) throw new Error("Stop in progress; bash rejected");
       const input = JSON.parse(await readBody(req));
       return rpcResponse(res, {
         type: "bash",
