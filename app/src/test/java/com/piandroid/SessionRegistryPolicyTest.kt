@@ -1,12 +1,19 @@
 package com.piandroid
 
+import android.content.Context
+import android.content.ContextWrapper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SessionRegistryPolicyTest {
+    private class RuntimeTestContext : ContextWrapper(null) {
+        override fun getApplicationContext(): Context = this
+    }
+
     @Test
     fun newSessionLaunchUsesAnIsolatedExtensionDirectory() {
         val command = PiSessionStore.defaultLaunchCommand("session-abc")
@@ -78,13 +85,16 @@ class SessionRegistryPolicyTest {
             PiSessionRecord("session-B", "Pi 2", "/data/data/com.termux/files/home", "pi", 17651, "token-b")
         )
         assertEquals(2, records.map { it.id }.distinct().size)
+        val manager = PiSessionRuntimeManager(RuntimeTestContext())
+        val runtimes = records.associate { it.id to manager.activate(it) }
         var active = "session-B"
         repeat(20) { index ->
             val target = if (index % 2 == 0) "session-A" else "session-B"
             active = requireNotNull(selectPiSessionId(records, target))
+            val activeRuntime = manager.activate(records.single { it.id == active })
             assertEquals(target, active)
-            // PiSessionRuntimeManager is keyed by the same stable Android ID.
-            assertEquals(target, records.single { it.id == active }.id)
+            assertEquals(target, activeRuntime.id)
+            assertSame(runtimes[target], activeRuntime)
         }
         assertEquals("session-B", active)
     }
