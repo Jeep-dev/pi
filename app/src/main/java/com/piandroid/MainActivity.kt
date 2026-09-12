@@ -1739,7 +1739,7 @@ private fun PiScreen(
     fun settleDrawer(target: Float) {
         scope.launch {
             val animation = Animatable(drawerProgress)
-            animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { value -> drawerProgress = value.value }
+            animation.animateTo(target.coerceIn(0f, 1f), tween(180)) { drawerProgress = value }
         }
     }
 
