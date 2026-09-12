@@ -3,7 +3,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "app/src/main/java/com/piandroid/MainActivity.kt"
 GRADLE = ROOT / "app/build.gradle.kts"
-ANDROID_YML = ROOT / ".github/workflows/android.yml"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -97,9 +96,5 @@ gradle = GRADLE.read_text()
 gradle = replace_once(gradle, 'versionCode = 114', 'versionCode = 115', 'versionCode')
 gradle = replace_once(gradle, 'versionName = "5.19.15"', 'versionName = "5.19.16"', 'versionName')
 GRADLE.write_text(gradle)
-
-workflow = ANDROID_YML.read_text()
-workflow = workflow.replace('pi-android-v5.19.15-apks', 'pi-android-v5.19.16-apks')
-ANDROID_YML.write_text(workflow)
 
 print("v5.19.16 source repair applied")
