@@ -49,14 +49,27 @@ class ToolPresentationTest {
     }
 
     @Test
-    fun collapsedToolPreviewShowsTailAndExplicitHiddenCount() {
+    fun collapsedToolOutputShowsTailAndExplicitHiddenCount() {
         val output = (1..12).joinToString("\n") { "line $it" }
 
         assertEquals(
             (8..12).joinToString("\n") { "line $it" },
             toolOutputPreview(output)
         )
-        assertEquals("… (7 earlier lines)", toolHiddenHint(output))
+        assertEquals("… +7 lines", toolHiddenHint(output))
+    }
+
+    @Test
+    fun collapsedToolArgsKeepTheHeadAndBoundHugeSingleLineCommands() {
+        val multiLine = (1..6).joinToString("\n") { "arg line $it" }
+        assertEquals("arg line 1\narg line 2", toolArgsPreview(multiLine))
+        assertEquals("… +4 arg lines", toolArgsHiddenHint(multiLine))
+
+        val huge = "x".repeat(500)
+        val preview = toolArgsPreview(huge)
+        assertEquals(181, preview.length)
+        assertTrue(preview.endsWith("…"))
+        assertEquals("… +320 arg chars", toolArgsHiddenHint(huge))
     }
 
     @Test
