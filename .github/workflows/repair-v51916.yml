@@ -1,0 +1,40 @@
+name: Repair v5.19.16 source
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - "tools/repair_v51916.py"
+      - ".github/workflows/repair-v51916.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - name: Apply repair
+        run: python tools/repair_v51916.py
+      - name: Verify patch
+        run: |
+          git diff --check
+          grep -q 'versionName = "5.19.16"' app/build.gradle.kts
+          grep -q 'lastAppliedEventSeq' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'line.toolOutput.hashCode()' app/src/main/java/com/piandroid/MainActivity.kt
+      - name: Commit repair
+        run: |
+          if git diff --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts .github/workflows/android.yml
+          git commit -m "Fix stale chat replay and bottom follow"
+          git push origin HEAD:fix/security-lifecycle-build

@@ -2,52 +2,78 @@ name: Build Pi Android
 on:
   workflow_dispatch:
   push:
-    paths: ["app/**", "tools/build_patch_v44.py", "tools/build_patch_v45.py", "tools/build_patch_v46.py", "tools/build_patch_v47.py", "tools/build_patch_v48.py", "tools/build_patch_v49.py", "tools/build_patch_v50.py", "tools/build_patch_v51.py", "tools/build_patch_v52.py", "tools/build_patch_v53.py", "tools/build_patch_v54.py", "tools/build_patch_v55.py", "build.gradle.kts", "settings.gradle.kts", "gradle/**", ".github/workflows/android.yml"]
+    paths:
+      - "app/**"
+      - "tools/test_bridge_auth.mjs"
+      - "tools/test_mobile_tree.mjs"
+      - "tools/test_mobile_fork.mjs"
+      - "tools/test_mobile_resources.mjs"
+      - "tools/test_multi_session_bridge.mjs"
+      - "tools/test_active_session_ui.mjs"
+      - "tools/test_mobile_resume.mjs"
+      - "tools/test_stop_fence.mjs"
+      - "tools/test_themes.mjs"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "tools/test_bridge_auth.mjs"
+      - "tools/test_mobile_tree.mjs"
+      - "tools/test_mobile_fork.mjs"
+      - "tools/test_mobile_resources.mjs"
+      - "tools/test_multi_session_bridge.mjs"
+      - "tools/test_active_session_ui.mjs"
+      - "tools/test_mobile_resume.mjs"
+      - "tools/test_stop_fence.mjs"
+      - "tools/test_themes.mjs"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android.yml"
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Apply PiTouch v4.4 startup isolation patch
-        run: python3 tools/build_patch_v44.py
-      - name: Apply PiTouch v4.5 direct resume patch
-        run: python3 tools/build_patch_v45.py
-      - name: Apply PiTouch v4.6 command scroll and reasoning effort patch
-        run: python3 tools/build_patch_v46.py
-      - name: Apply PiTouch v4.7 stale bridge race fix
-        run: python3 tools/build_patch_v47.py
-      - name: Apply PiTouch v4.8 immersive scroll-away header patch
-        run: python3 tools/build_patch_v48.py
-      - name: Apply PiTouch v4.9 bridge instance handshake
-        run: python3 tools/build_patch_v49.py
-      - name: Apply PiTouch v5.0 Termux callback relaunch fix
-        run: python3 tools/build_patch_v50.py
-      - name: Apply PiTouch v5.1 deterministic bridge lifecycle fix
-        run: python3 tools/build_patch_v51.py
-      - name: Apply PiTouch v5.2 connection resilience patch
-        run: python3 tools/build_patch_v52.py
-      - name: Apply PiTouch v5.3 fresh-port stale-bridge bypass
-        run: python3 tools/build_patch_v53.py
-      - name: Apply PiTouch v5.4 robust Termux launcher
-        run: python3 tools/build_patch_v54.py
-      - name: Apply PiTouch v5.5 composer polish
-        run: python3 tools/build_patch_v55.py
-      - name: Validate launcher unchanged from v5.4
+      - name: Prepare signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pi-android.jks"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate bridge, mobile extension, and UI guards
         run: |
-          grep -q 'private val port = 17648' app/src/main/java/com/piandroid/PiBridge.kt
-          grep -q 'exec /data/data/com.termux/files/usr/bin/node' app/src/main/java/com/piandroid/PiBridge.kt
-          ! grep -q "pgrep -f '\[b\]ridge" app/src/main/java/com/piandroid/PiBridge.kt
-      - name: Validate composer behavior
-        run: |
-          grep -q 'focusedBorderColor = Color.Transparent' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'keyboardController?.hide()' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'focusManager.clearFocus(force = true)' app/src/main/java/com/piandroid/MainActivity.kt
-      - name: Validate Pi bridge JavaScript
-        run: node --check app/src/main/assets/pi-android-bridge.mjs
+          npm install --global --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_bridge_auth.mjs
+          node tools/test_multi_session_bridge.mjs
+          node tools/test_active_session_ui.mjs
+          node tools/test_mobile_resume.mjs
+          node tools/test_stop_fence.mjs
+          node tools/test_themes.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_fork.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_resources.mjs
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21", cache: gradle }
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Build signed debug and release APKs
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/pi-android.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
-        with: { name: pi-android-v5.5-debug, path: app/build/outputs/apk/debug/*.apk }
+        with:
+          name: pi-android-v5.19.17-apks
+          path: app/build/outputs/apk/**/*.apk

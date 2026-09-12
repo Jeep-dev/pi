@@ -5,6 +5,11 @@
 ## 当前功能
 
 - Pi RPC 聊天和流式事件
+- 多个独立 Pi Session 并行运行，支持后台工作；相同 cwd 也使用独立 Pi session 文件和进程
+- 每个 Session 可保存独立 Pi 启动参数，恢复时继续使用
+- 长按 Session 可重命名、置顶或确认删除
+- Stop 会清空 steering/follow-up 队列并取消当前任务
+- 从中间区域右滑打开 Session 侧栏；每个 Session 独立保存 cwd 和恢复信息
 - 输入 `/` 调出命令菜单
 - 浏览 Termux 项目文件
 - 查看和编辑文件并保存
@@ -34,9 +39,24 @@ allow-external-apps=true
 termux-setup-storage
 ```
 
-## GitHub Actions 构建
+## 安全模型
 
-将本目录上传为 GitHub 仓库后，打开 `Actions → Build Pi Android → Run workflow`。工作流会自动准备 JDK 21、Android SDK，并上传 `app-debug.apk`。
+App 首次运行时生成 256 位随机 Bridge Token，并保存在 Android 私有配置中。所有本机 HTTP RPC 请求都必须携带该 Token；Bridge 缺少 Token 时会拒绝启动。文件接口会解析真实路径，拒绝通过符号链接越出当前项目。
+
+Termux 的 `RUN_COMMAND` 能力仍具有当前 Termux 用户的完整权限，请只安装可信 APK。
+
+## 构建
+
+本地构建：
+
+```bash
+node tools/test_bridge_auth.mjs
+node tools/test_multi_session_bridge.mjs
+node tools/test_stop_fence.mjs
+./gradlew :app:assembleDebug :app:assembleRelease
+```
+
+GitHub Actions 会直接从已提交源码构建，不再动态套用补丁。配置仓库签名 Secrets 后，会上传使用同一密钥签名的 debug 和 release APK，后续版本可以直接覆盖安装。
 
 ## 项目目录
 
