@@ -413,7 +413,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     var createSessionName by remember { mutableStateOf("") }
     var createSessionCwd by remember { mutableStateOf(initialSessions.firstOrNull()?.cwd ?: PiSessionStore.DEFAULT_CWD) }
     var createSessionStartupArguments by remember { mutableStateOf("") }
-    var emptySessionDrawerOpen by remember { mutableStateOf(false) }
+    var emptySessionDrawerOpen by remember {
+        mutableStateOf(emptySessionDrawerInitiallyOpen(initialSessions))
+    }
     var managedSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     var renameSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     var renameSessionText by remember { mutableStateOf("") }
@@ -1415,7 +1417,8 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.1
+                """Pi Android v5.19.2
+                |• 无 Session 启动时自动展开侧栏，删除最后一个后可立即新建
                 |• 删除最后一个 Session 后保留打开的侧栏，可直接新建第一个 Session
                 |• 新建 Session 支持独立启动参数，并在恢复时保留参数
                 |• Session 长按支持重命名、置顶和确认删除

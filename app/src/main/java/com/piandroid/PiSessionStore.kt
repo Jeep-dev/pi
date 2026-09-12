@@ -69,6 +69,8 @@ internal data class PiSessionDeleteResult(
     val keepDrawerOpen: Boolean
 )
 
+internal fun emptySessionDrawerInitiallyOpen(records: List<PiSessionRecord>): Boolean = records.isEmpty()
+
 internal fun deletePiSessionState(
     records: List<PiSessionRecord>,
     deletedId: String,

@@ -75,6 +75,12 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
+    fun anEmptyRegistryStartsWithItsDrawerOpen() {
+        assertTrue(emptySessionDrawerInitiallyOpen(emptyList()))
+        assertFalse(emptySessionDrawerInitiallyOpen(listOf(PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a"))))
+    }
+
+    @Test
     fun deletingLastSessionClearsActiveIdAndKeepsEmptyDrawerAvailable() {
         val result = deletePiSessionState(
             records = listOf(PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a")),
