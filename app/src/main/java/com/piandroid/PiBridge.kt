@@ -502,21 +502,85 @@ class PiBridge(
 
     private fun toolArgsText(toolName: String, args: JSONObject?): String {
         if (args == null || args.length() == 0) return ""
+        fun path(): String = args.optString("path")
         return when (toolName) {
-            "write" -> {
-                val content = args.optString("content")
-                buildString {
-                    append("目标：${args.optString("path")}\n")
-                    append("内容：${content.length} 字符")
-                    if (content.isNotBlank()) {
-                        val preview = content.takeLast(1_600)
-                        append("\n\n写入预览${if (content.length > preview.length) "（末尾）" else ""}：\n$preview")
-                    }
+            "bash" -> buildString {
+                append(args.optString("command"))
+                val timeout = args.optInt("timeout", 0)
+                if (timeout > 0) append("  (${timeout}s timeout)")
+            }
+            "read" -> buildString {
+                append(path())
+                val offset = args.optInt("offset", 0)
+                val limit = args.optInt("limit", 0)
+                if (offset > 0 || limit > 0) append("  [${if (offset > 0) "offset $offset" else ""}${if (offset > 0 && limit > 0) ", " else ""}${if (limit > 0) "limit $limit" else ""}]")
+            }
+            "write" -> buildString {
+                append(path())
+                val count = args.optString("content").length
+                if (count > 0) append("  ·  $count chars")
+            }
+            "edit" -> buildString {
+                append(path())
+                val count = args.optJSONArray("edits")?.length() ?: 0
+                if (count > 0) append("  ·  $count edits")
+            }
+            "grep" -> buildString {
+                append(args.optString("pattern"))
+                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
+            }
+            "find" -> buildString {
+                append(args.optString("pattern", args.optString("query")))
+                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
+            }
+            "ls" -> path()
+            "subagent" -> {
+                val tasks = args.optJSONArray("tasks")
+                if (tasks != null && tasks.length() > 0) {
+                    val agents = buildList {
+                        for (i in 0 until tasks.length()) {
+                            tasks.optJSONObject(i)?.optString("agent")?.takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }.distinct()
+                    if (tasks.length() == 1) agents.firstOrNull().orEmpty() else "${tasks.length()} tasks${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
+                } else {
+                    args.optString("agent")
                 }
             }
-            "edit" -> "目标：${args.optString("path")}\n修改块：${args.optJSONArray("edits")?.length() ?: 0}"
-            "bash" -> "命令：${args.optString("command")}"
-            else -> args.toString(2).let { if (it.length > 4_000) it.take(4_000) + "\n… 参数显示已截断" else it }
+            else -> args.toString().replace('\n', ' ').let { if (it.length > 800) it.take(800) + " …" else it }
+        }
+    }
+
+    private fun compactToolNumber(value: Long): String = when {
+        value >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fm", value / 1_000_000.0)
+        value >= 1_000 -> String.format(java.util.Locale.US, "%.1fk", value / 1_000.0)
+        else -> value.toString()
+    }
+
+    private fun subagentMeta(details: JSONObject?): String {
+        if (details?.optString("kind") != "pi-subagent-progress") return ""
+        val runs = details.optJSONArray("runs") ?: return ""
+        return buildString {
+            for (i in 0 until runs.length()) {
+                val run = runs.optJSONObject(i) ?: continue
+                if (isNotEmpty()) append('\n')
+                val status = run.optString("status")
+                val icon = when (status) {
+                    "succeeded" -> "✓"
+                    "failed", "error" -> "✗"
+                    "running" -> "●"
+                    else -> "○"
+                }
+                append(icon).append(' ').append(run.optString("agent", "subagent"))
+                run.optString("model").substringAfter('/').takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
+                val usage = run.optJSONObject("usage")
+                val turns = usage?.optInt("turns", 0) ?: 0
+                val ctx = usage?.optLong("ctxTokens", 0L) ?: 0L
+                val cost = usage?.optDouble("cost", 0.0) ?: 0.0
+                if (turns > 0) append(" · ").append(turns).append(if (turns == 1) " turn" else " turns")
+                if (ctx > 0) append(" · ").append(compactToolNumber(ctx)).append(" ctx")
+                if (cost > 0.0) append(" · $").append(String.format(java.util.Locale.US, "%.4f", cost))
+            }
         }
     }
 
@@ -528,14 +592,15 @@ class PiBridge(
                 val subtype = delta.optString("type")
                 val text = when (subtype) {
                     "text_delta", "thinking_delta", "toolcall_delta" -> delta.optString("delta")
-                    "toolcall_start" -> "正在准备工具：${delta.optString("toolName")}"
-                    "toolcall_end" -> "工具参数准备完成：${delta.optJSONObject("toolCall")?.optString("name").orEmpty()}"
+                    "toolcall_start" -> delta.optString("toolName")
+                    "toolcall_end" -> delta.optJSONObject("toolCall")?.optString("name").orEmpty()
                     else -> ""
                 }
                 PiEvent(
                     seq, type, subtype, text,
                     toolCallId = delta.optString("id"),
-                    contentIndex = delta.optInt("contentIndex", -1)
+                    contentIndex = delta.optInt("contentIndex", -1),
+                    toolName = delta.optString("toolName", delta.optJSONObject("toolCall")?.optString("name").orEmpty())
                 )
             }
             "message_end" -> {
@@ -549,12 +614,15 @@ class PiBridge(
             "tool_execution_start" -> {
                 val args = value.optJSONObject("args")
                 val toolName = value.optString("toolName")
-                val details = toolArgsText(toolName, args)
-                val text = buildString {
-                    append("执行工具：$toolName")
-                    if (details.isNotBlank()) append("\n\n$details")
-                }
-                PiEvent(seq, type, "", text, toolCallId = value.optString("toolCallId"))
+                PiEvent(
+                    seq = seq,
+                    type = type,
+                    subtype = "",
+                    text = "",
+                    toolCallId = value.optString("toolCallId"),
+                    argsText = toolArgsText(toolName, args),
+                    toolName = toolName
+                )
             }
             "tool_execution_update" -> {
                 val content = value.optJSONObject("partialResult")?.optJSONArray("content") ?: JSONArray()
@@ -568,13 +636,16 @@ class PiBridge(
                     }
                 }
                 val toolName = value.optString("toolName")
+                val meta = subagentMeta(value.optJSONObject("partialResult")?.optJSONObject("details"))
                 PiEvent(
-                    seq, type, "", text,
+                    seq = seq,
+                    type = type,
+                    subtype = "",
+                    text = if (meta.isNotBlank() && text.trim() == "subagent running") "" else text,
                     toolCallId = value.optString("toolCallId"),
-                    argsText = buildString {
-                        append("执行工具：$toolName")
-                        toolArgsText(toolName, value.optJSONObject("args")).takeIf { it.isNotBlank() }?.let { append("\n\n$it") }
-                    }
+                    argsText = toolArgsText(toolName, value.optJSONObject("args")),
+                    toolName = toolName,
+                    metaText = meta
                 )
             }
             "queue_update" -> {
@@ -609,15 +680,21 @@ class PiBridge(
                     }
                 }
                 val name = value.optString("toolName")
+                val details = result?.optJSONObject("details")
                 PiEvent(
-                    seq, type, "",
-                    toolResultText(
+                    seq = seq,
+                    type = type,
+                    subtype = "",
+                    text = toolResultText(
                         toolName = name,
                         output = output,
                         isError = value.optBoolean("isError"),
-                        diff = result?.optJSONObject("details")?.optString("diff").orEmpty()
+                        diff = details?.optString("diff").orEmpty()
                     ),
-                    toolCallId = value.optString("toolCallId")
+                    toolCallId = value.optString("toolCallId"),
+                    toolName = name,
+                    metaText = subagentMeta(details),
+                    isError = value.optBoolean("isError")
                 )
             }
             "compaction_start", "compaction_end" -> {
@@ -824,7 +901,10 @@ data class PiEvent(
     val followUpCount: Int = 0,
     val steeringQueue: List<String> = emptyList(),
     val followUpQueue: List<String> = emptyList(),
-    val argsText: String = ""
+    val argsText: String = "",
+    val toolName: String = "",
+    val metaText: String = "",
+    val isError: Boolean = false
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)

@@ -227,7 +227,14 @@ private data class ChatLine(
     val contentIndex: Int = -1,
     val collapsed: Boolean = false,
     val delivery: String = "normal",
-    val tokensBefore: Long = 0
+    val tokensBefore: Long = 0,
+    val toolName: String = "",
+    val toolArgs: String = "",
+    val toolOutput: String = "",
+    val toolMeta: String = "",
+    val toolIsError: Boolean = false,
+    val toolStartedAt: Long = 0L,
+    val toolEndedAt: Long = 0L
 )
 private data class LocalCommand(val name: String, val description: String)
 
@@ -907,67 +914,66 @@ private fun PiScreen(
         }
     }
 
-    fun startToolDraft(contentIndex: Int, toolCallId: String, text: String) {
+    fun startToolDraft(contentIndex: Int, toolCallId: String, toolName: String) {
         if (contentIndex < 0) return
         toolDraftChars[contentIndex] = 0
         toolDraftBuffers[contentIndex] = StringBuilder()
         lines.add(
             ChatLine(
                 role = "tool-draft",
-                text = "$text\n\n正在生成调用参数…",
+                text = "",
                 streaming = true,
                 toolCallId = toolCallId,
                 contentIndex = contentIndex,
-                collapsed = true
+                collapsed = true,
+                toolName = toolName
             )
         )
     }
 
     fun updateToolDraft(contentIndex: Int, delta: String) {
         if (contentIndex < 0) return
-        val previous = toolDraftChars[contentIndex] ?: 0
-        val current = previous + delta.length
-        toolDraftChars[contentIndex] = current
-        val buffer = toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
-        val now = android.os.SystemClock.uptimeMillis()
-        val lastRefresh = toolDraftRefreshAt[contentIndex] ?: 0L
-        if (now - lastRefresh < 50) return
-        toolDraftRefreshAt[contentIndex] = now
-        val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
-        if (index >= 0) {
-            val line = lines[index]
-            lines[index] = line.copy(text = line.text.substringBefore("\n\n") + "\n\n" + toolDraftPreview(buffer.toString(), current))
-        }
+        toolDraftChars[contentIndex] = (toolDraftChars[contentIndex] ?: 0) + delta.length
+        toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
     }
 
-    fun finishToolDraft(contentIndex: Int, text: String) {
-        val count = toolDraftChars.remove(contentIndex) ?: 0
-        val raw = toolDraftBuffers.remove(contentIndex)?.toString().orEmpty()
+    fun finishToolDraft(contentIndex: Int, toolName: String) {
+        toolDraftChars.remove(contentIndex)
+        toolDraftBuffers.remove(contentIndex)
         toolDraftRefreshAt.remove(contentIndex)
         val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
         if (index >= 0) {
             val line = lines[index]
-            lines[index] = line.copy(
-                text = "$text\n\n${toolDraftPreview(raw, count)}\n\n参数完整，等待执行…",
-                streaming = false
-            )
+            lines[index] = line.copy(toolName = toolName.ifBlank { line.toolName }, streaming = true)
         }
     }
 
-    fun startTool(toolCallId: String, text: String) {
+    fun startTool(event: PiEvent) {
+        val toolCallId = event.toolCallId
+        val startedAt = android.os.SystemClock.uptimeMillis()
         val existingIndex = lines.indexOfLast {
             it.toolCallId == toolCallId && (it.role == "tool-draft" || it.role == "tool")
         }
+        val next = ChatLine(
+            role = "tool",
+            text = "",
+            streaming = true,
+            toolCallId = toolCallId,
+            collapsed = true,
+            toolName = event.toolName,
+            toolArgs = event.argsText,
+            toolStartedAt = startedAt
+        )
         if (existingIndex >= 0) {
             val existing = lines[existingIndex]
-            lines[existingIndex] = ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = existing.collapsed)
+            lines[existingIndex] = next.copy(collapsed = existing.collapsed)
         } else {
-            lines.add(ChatLine("tool", text, streaming = true, toolCallId = toolCallId, collapsed = true))
+            lines.add(next)
         }
     }
 
-    fun updateTool(toolCallId: String, text: String, argsText: String = "") {
-        if (text.isBlank()) return
+    fun updateTool(event: PiEvent) {
+        val toolCallId = event.toolCallId
         val refreshKey = toolCallId.ifBlank { "__active_tool__" }
         val now = android.os.SystemClock.uptimeMillis()
         val lastRefresh = toolOutputRefreshAt[refreshKey] ?: 0L
@@ -976,22 +982,25 @@ private fun PiScreen(
         var index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
         }
-        if (index < 0 && argsText.isNotBlank()) {
-            startTool(toolCallId, argsText)
+        if (index < 0) {
+            startTool(event)
             index = lines.indexOfLast {
                 it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
             }
         }
         if (index >= 0) {
             val line = lines[index]
-            val header = line.text.substringBefore("\n\n工具输出：")
-            lines[index] = line.copy(text = "$header\n\n工具输出：\n${text.trimEnd()}")
-        } else {
-            lines.add(ChatLine("tool", text.trimEnd(), streaming = true, toolCallId = toolCallId, collapsed = true))
+            lines[index] = line.copy(
+                toolName = event.toolName.ifBlank { line.toolName },
+                toolArgs = event.argsText.ifBlank { line.toolArgs },
+                toolOutput = event.text.trimEnd().ifBlank { line.toolOutput },
+                toolMeta = event.metaText.ifBlank { line.toolMeta }
+            )
         }
     }
 
-    fun finishTool(toolCallId: String, text: String) {
+    fun finishTool(event: PiEvent) {
+        val toolCallId = event.toolCallId
         toolOutputRefreshAt.remove(toolCallId.ifBlank { "__active_tool__" })
         var index = lines.indexOfLast {
             it.role == "tool" && it.streaming && (toolCallId.isBlank() || it.toolCallId == toolCallId)
@@ -999,13 +1008,33 @@ private fun PiScreen(
         if (index < 0 && toolCallId.isNotBlank()) {
             index = lines.indexOfLast { it.role == "tool" && it.toolCallId == toolCallId }
         }
+        val endedAt = android.os.SystemClock.uptimeMillis()
         if (index >= 0) {
             val line = lines[index]
-            val header = line.text.substringBefore("\n\n工具输出：").trimEnd()
-            val suffix = if (text.isBlank()) "" else "\n\n${text.trim()}"
-            lines[index] = line.copy(text = header + suffix, streaming = false, collapsed = true)
-        } else if (text.isNotBlank()) {
-            lines.add(ChatLine("tool", text.trim(), toolCallId = toolCallId, collapsed = true))
+            lines[index] = line.copy(
+                streaming = false,
+                toolName = event.toolName.ifBlank { line.toolName },
+                toolOutput = event.text.trimEnd().ifBlank { line.toolOutput },
+                toolMeta = event.metaText.ifBlank { line.toolMeta },
+                toolIsError = event.isError,
+                toolEndedAt = endedAt
+            )
+        } else {
+            lines.add(
+                ChatLine(
+                    role = "tool",
+                    text = "",
+                    streaming = false,
+                    toolCallId = toolCallId,
+                    collapsed = true,
+                    toolName = event.toolName,
+                    toolOutput = event.text.trimEnd(),
+                    toolMeta = event.metaText,
+                    toolIsError = event.isError,
+                    toolStartedAt = endedAt,
+                    toolEndedAt = endedAt
+                )
+            )
         }
     }
 
@@ -1097,7 +1126,8 @@ private fun PiScreen(
                     for (i in lines.indices) {
                         if (lines[i].role == "tool-draft" && lines[i].streaming) {
                             lines[i] = lines[i].copy(
-                                text = lines[i].text.substringBefore("\n\n") + "\n\n已取消，工具未执行",
+                                text = "",
+                                toolMeta = "Cancelled",
                                 streaming = false
                             )
                         }
@@ -1108,9 +1138,9 @@ private fun PiScreen(
                     toolOutputRefreshAt.clear()
                 }
             }
-            "tool_execution_start" -> startTool(event.toolCallId, event.text)
-            "tool_execution_update" -> updateTool(event.toolCallId, event.text, event.argsText)
-            "tool_execution_end" -> finishTool(event.toolCallId, event.text)
+            "tool_execution_start" -> startTool(event)
+            "tool_execution_update" -> updateTool(event)
+            "tool_execution_end" -> finishTool(event)
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
                 settleStreams()
@@ -2643,12 +2673,7 @@ private fun ChatPanel(
             // A single logical line (JSON/source maps, escaped output) may wrap into
             // hundreds of visual lines. Clamp rendered lines as well as detecting
             // long character-only output.
-            val hasHiddenToolContent = isTool && (fullText.lines().size > 10 || fullText.length > 240)
-            val visibleText = if (isTool && line.collapsed && fullText.length > 4_000) {
-                fullText.take(4_000) + "\n…"
-            } else {
-                fullText
-            }
+            val visibleText = fullText
             SelectionContainer {
                 when (line.role) {
                 "user" -> if (line.delivery == "steering" || line.delivery == "steering_queued" || line.delivery == "steering_sent" || line.delivery == "steering_failed") {
@@ -2747,30 +2772,115 @@ private fun ChatPanel(
                         )
                     }
                 }
-                "tool", "tool-draft" -> Column(
-                    Modifier.fillMaxWidth().background(ToolBg, RoundedCornerShape(3.dp)).padding(horizontal = 6.dp, vertical = 10.dp)
-                ) {
-                    Text(
-                        visibleText,
-                        color = if (fullText.contains("工具执行失败：")) Danger else TextMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        maxLines = if (line.collapsed) 10 else Int.MAX_VALUE,
-                        overflow = if (line.collapsed) TextOverflow.Ellipsis else TextOverflow.Clip
-                    )
-                    if (hasHiddenToolContent) {
-                        TextButton(
-                            onClick = { onToggleLine(lineIndex) },
-                            modifier = Modifier.fillMaxWidth(),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
-                        ) {
+                "tool", "tool-draft" -> {
+                    val colors = LocalPiColors.current
+                    var toolNow by remember(line.toolCallId, line.toolStartedAt) {
+                        mutableLongStateOf(android.os.SystemClock.uptimeMillis())
+                    }
+                    LaunchedEffect(line.streaming, line.toolStartedAt) {
+                        while (line.streaming && line.toolStartedAt > 0L) {
+                            toolNow = android.os.SystemClock.uptimeMillis()
+                            delay(250)
+                        }
+                    }
+                    val toolOutput = line.toolOutput.ifBlank { fullText }
+                    val hiddenHint = toolHiddenHint(toolOutput)
+                    val renderedOutput = if (line.collapsed && hiddenHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
+                    val duration = if (line.toolStartedAt > 0L) {
+                        val end = if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow
+                        formatToolDuration(end - line.toolStartedAt)
+                    } else ""
+                    val background = when {
+                        line.toolIsError -> colors.toolErrorBg
+                        line.streaming -> colors.toolPendingBg
+                        else -> colors.toolSuccessBg
+                    }
+                    Column(
+                        Modifier.fillMaxWidth().background(background, RoundedCornerShape(3.dp)).padding(horizontal = 8.dp, vertical = 9.dp)
+                    ) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                if (line.collapsed) "展开全部 ↓" else "收起 ↑",
-                                color = Blue,
+                                buildAnnotatedString {
+                                    val name = line.toolName.ifBlank { if (line.role == "tool-draft") "tool" else "tool" }
+                                    pushStyle(SpanStyle(color = colors.toolTitle, fontWeight = FontWeight.Bold))
+                                    append(if (name == "bash") "$ " else name)
+                                    if (name != "bash" && line.toolArgs.isNotBlank()) append(" ")
+                                    pop()
+                                    if (line.toolArgs.isNotBlank()) {
+                                        pushStyle(SpanStyle(color = Accent))
+                                        append(line.toolArgs)
+                                        pop()
+                                    }
+                                },
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                modifier = Modifier.weight(1f)
                             )
+                            if (duration.isNotBlank()) {
+                                Text(
+                                    (if (line.streaming) "Elapsed " else "Took ") + duration,
+                                    color = colors.toolMeta,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
+                            }
+                        }
+                        if (line.toolMeta.isNotBlank()) {
+                            Text(
+                                line.toolMeta,
+                                color = if (line.toolIsError) Danger else colors.toolMeta,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                lineHeight = 15.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        if (renderedOutput.isNotBlank()) {
+                            val styledOutput = buildAnnotatedString {
+                                renderedOutput.lines().forEachIndexed { index, outputLine ->
+                                    val color = when {
+                                        outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded
+                                        outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved
+                                        else -> colors.toolOutput
+                                    }
+                                    pushStyle(SpanStyle(color = color))
+                                    append(outputLine)
+                                    pop()
+                                    if (index != renderedOutput.lines().lastIndex) append('\n')
+                                }
+                            }
+                            Text(
+                                styledOutput,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.5.sp,
+                                lineHeight = 17.sp,
+                                modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
+                            )
+                        }
+                        if (hiddenHint.isNotBlank()) {
+                            if (line.collapsed) {
+                                Text(
+                                    hiddenHint,
+                                    color = colors.toolMeta,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                            TextButton(
+                                onClick = { onToggleLine(lineIndex) },
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    if (line.collapsed) "Show all" else "Collapse",
+                                    color = Blue,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                )
+                            }
                         }
                     }
                 }
