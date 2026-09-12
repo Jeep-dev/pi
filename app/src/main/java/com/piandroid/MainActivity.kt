@@ -580,41 +580,35 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                         }
                     )
                 } else {
-                    // Each retained screen has one owner-specific Runtime. Only
-                    // the active Android Session is allowed to present dialogs.
-                    sessions.forEach { record ->
-                        key(record.androidSessionId) {
-                            val active = record.androidSessionId == activeSession.androidSessionId
-                            val runtime = if (active) {
-                                runtimeManager.activate(record)
-                            } else {
-                                runtimeManager.runtime(record)
-                            }
-                            PiScreen(
-                                runtime = runtime,
-                                session = record,
-                                sessions = sessions,
-                                activeAndroidSessionId = activeAndroidSessionId,
-                                autoStart = active,
-                                hostModifier = if (active) Modifier.fillMaxSize() else Modifier.size(0.dp),
-                                themeMode = themeMode,
-                                onTheme = { selected ->
-                                    themeKey = selected.storageKey
-                                    context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
-                                        .edit().putString("theme", selected.storageKey).apply()
-                                },
-                                onSelectSession = ::selectSession,
-                                onNewSession = {
-                                    createSessionName = ""
-                                    createSessionCwd = activeSession.cwd
-                                    createSessionStartupArguments = ""
-                                    createSessionOpen = true
-                                },
-                                onSessionUpdate = ::updateSession,
-                                onCanBindConversation = ::canBindConversation,
-                                onManageSession = ::requestSessionManagement
-                            )
-                        }
+                    // Render exactly one chat UI. Background Runtime objects remain
+                    // Activity-owned, but an inactive Session must never keep a hidden
+                    // Compose chat tree that can leak/replay another Session's UI state.
+                    key(activeSession.androidSessionId) {
+                        val runtime = runtimeManager.activate(activeSession)
+                        PiScreen(
+                            runtime = runtime,
+                            session = activeSession,
+                            sessions = sessions,
+                            activeAndroidSessionId = activeAndroidSessionId,
+                            autoStart = true,
+                            hostModifier = Modifier.fillMaxSize(),
+                            themeMode = themeMode,
+                            onTheme = { selected ->
+                                themeKey = selected.storageKey
+                                context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                                    .edit().putString("theme", selected.storageKey).apply()
+                            },
+                            onSelectSession = ::selectSession,
+                            onNewSession = {
+                                createSessionName = ""
+                                createSessionCwd = activeSession.cwd
+                                createSessionStartupArguments = ""
+                                createSessionOpen = true
+                            },
+                            onSessionUpdate = ::updateSession,
+                            onCanBindConversation = ::canBindConversation,
+                            onManageSession = ::requestSessionManagement
+                        )
                     }
                 }
             }

@@ -229,7 +229,31 @@ internal class PiSessionRuntime(
             if (connected) {
                 val state = lastState
                 val snapshot = lastSnapshot
-                if (state != null && snapshot != null) {
+                if (autoStart) {
+                    // A newly visible PiScreen starts with empty Compose state. Do not
+                    // replay a cached snapshot from the last time this Session was visible:
+                    // refresh from this Runtime's own Bridge endpoint and fence any event
+                    // batch that was in flight before activation.
+                    val generation = ++conversationGeneration
+                    scope.launch {
+                        val refreshed = runCatching { connectCurrent(true, generation) }
+                        val ready = refreshed.getOrNull()
+                        if (ready != null) {
+                            if (!publishReady(ready, generation)) {
+                                updatesMutable.emit(
+                                    PiRuntimeUpdate.Failed(
+                                        IllegalStateException("Pi conversation is already owned by another Android Session")
+                                    )
+                                )
+                            }
+                        } else {
+                            val error = refreshed.exceptionOrNull()
+                            if (error != null && isConversationGeneration(generation)) {
+                                updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+                            }
+                        }
+                    }
+                } else if (state != null && snapshot != null) {
                     updatesMutable.tryEmit(PiRuntimeUpdate.Ready(PiRuntimeReady(state, snapshot)))
                 }
                 return
