@@ -149,7 +149,6 @@ class MainActivity : ComponentActivity() {
         requestTermuxPermissionIfNeeded()
         setContent { PiTouchApp(bridge) }
     }
-    }
 
     private fun requestTermuxPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
