@@ -693,6 +693,7 @@ private fun PiScreen(
     val bridge = runtime.bridge
     var cwd by rememberSaveable(session.androidSessionId) { mutableStateOf(session.cwd) }
     var launchCommand by rememberSaveable(session.androidSessionId) { mutableStateOf(session.launchCommand) }
+    var startupArguments by rememberSaveable(session.androidSessionId) { mutableStateOf(session.startupArguments) }
     var input by rememberSaveable(session.androidSessionId) { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(false) }
@@ -1498,7 +1499,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.16
+                """Pi Android v5.19.17
+                |• /settings 显示并可编辑每个 Session 的附加启动参数
+                |• 按 Pi 原生 CLI 分类提示常用模型、工具、资源和提示词启动参数
                 |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面
                 |• 自动跟随监听完整可见内容；工具参数、输出和状态增长也会持续贴底
                 |• 工具卡片改为接近原生 Pi 的中性终端布局，不再把整条命令染成绿色
@@ -1910,7 +1913,38 @@ private fun PiScreen(
                     Panel.Diff -> TextPanel("/diff", diffText) { panel = Panel.Chat }
                     Panel.Stats -> StatsPanel(currentStats, currentState) { panel = Panel.Chat }
                     Panel.Themes -> ThemesPanel(themeMode, { panel = Panel.Chat }, onTheme)
-                    Panel.Settings -> SettingsPanel(cwd, launchCommand, connected, currentState?.autoCompactionEnabled ?: true, { cwd = it; updateSessionRecord { record -> record.copy(cwd = it) } }, { launchCommand = it; updateSessionRecord { record -> record.copy(launchCommand = it) } }, connect, { enabled -> runtime.launchTask { bridge.setAutoCompaction(enabled).fold(onSuccess = { refreshMeta(); addSystem("自动压缩：${if (enabled) "开启" else "关闭"}") }, onFailure = { addSystem("自动压缩设置失败：${it.message}") }) } }, { panel = Panel.Chat })
+                    Panel.Settings -> SettingsPanel(
+                        cwd = cwd,
+                        launchCommand = launchCommand,
+                        startupArguments = startupArguments,
+                        connected = connected,
+                        autoCompaction = currentState?.autoCompactionEnabled ?: true,
+                        onCwd = { value ->
+                            cwd = value
+                            updateSessionRecord { record -> record.copy(cwd = value) }
+                        },
+                        onLaunch = { value ->
+                            launchCommand = value
+                            updateSessionRecord { record -> record.copy(launchCommand = value) }
+                        },
+                        onStartupArguments = { value ->
+                            startupArguments = value
+                            updateSessionRecord { record -> record.copy(startupArguments = value) }
+                        },
+                        onConnect = connect,
+                        onAutoCompaction = { enabled ->
+                            runtime.launchTask {
+                                bridge.setAutoCompaction(enabled).fold(
+                                    onSuccess = {
+                                        refreshMeta()
+                                        addSystem("自动压缩：${if (enabled) "开启" else "关闭"}")
+                                    },
+                                    onFailure = { addSystem("自动压缩设置失败：${it.message}") }
+                                )
+                            }
+                        },
+                        onBack = { panel = Panel.Chat }
+                    )
                 }
 
                 if (panel == Panel.Chat && showScrollControls) {
@@ -2152,7 +2186,73 @@ private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) { C
 private fun ThemesPanel(selected: PiThemeMode, onBack: () -> Unit, onSelect: (PiThemeMode) -> Unit) { Column(Modifier.fillMaxSize().background(Bg)) { PanelHeader("Themes", onBack); Text("主题会立即应用并自动保存。暗色主题保持原有配色。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)); Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { PiThemeMode.entries.forEach { mode -> val preview = colorsFor(mode); Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(8.dp)).border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp)).clickable { onSelect(mode) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { Row(Modifier.width(58.dp).height(38.dp).background(preview.bg, RoundedCornerShape(5.dp)).border(1.dp, preview.border, RoundedCornerShape(5.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp))) }; Column(Modifier.weight(1f)) { Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold); Text(mode.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }; Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } } }
 
 @Composable
-private fun SettingsPanel(cwd: String, launchCommand: String, connected: Boolean, autoCompaction: Boolean, onCwd: (String) -> Unit, onLaunch: (String) -> Unit, onConnect: () -> Unit, onAutoCompaction: (Boolean) -> Unit, onBack: () -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { PanelHeader("/settings", onBack); OutlinedTextField(cwd, onCwd, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi 工作目录") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); OutlinedTextField(launchCommand, onLaunch, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi RPC 启动命令") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); Row(Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp); Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp) }; Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace) }; Text("默认直接使用 Termux 中的 Pi。不要删掉 --mode rpc；Android 的 /resume、/tree、/fork 依赖 -e ~/.pi/android/pi-android-mobile.ts。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(14.dp)); Button(onClick = onConnect, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") } } }
+private fun SettingsPanel(
+    cwd: String,
+    launchCommand: String,
+    startupArguments: String,
+    connected: Boolean,
+    autoCompaction: Boolean,
+    onCwd: (String) -> Unit,
+    onLaunch: (String) -> Unit,
+    onStartupArguments: (String) -> Unit,
+    onConnect: () -> Unit,
+    onAutoCompaction: (Boolean) -> Unit,
+    onBack: () -> Unit
+) {
+    val startupError = startupArgumentsError(startupArguments)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        PanelHeader("/settings", onBack)
+        OutlinedTextField(cwd, onCwd, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi 工作目录") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+        OutlinedTextField(launchCommand, onLaunch, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi RPC 基础启动命令") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+        OutlinedTextField(
+            startupArguments,
+            onStartupArguments,
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            label = { Text("附加启动参数") },
+            placeholder = { Text("例如：--no-tools") },
+            minLines = 1,
+            maxLines = 4,
+            isError = startupError != null,
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        )
+        startupError?.let { Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) }
+        Text(
+            "模型：--provider / --model / --thinking / --models\n" +
+                "工具：--tools / --exclude-tools / --no-builtin-tools / --no-tools\n" +
+                "资源：-e / --no-extensions / --skill / --no-skills / --prompt-template / --no-prompt-templates / --no-context-files\n" +
+                "提示：--system-prompt / --append-system-prompt\n" +
+                "其他：--name / --verbose / --approve / --no-approve",
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+        )
+        Text(
+            "附加参数会在启动时追加到上面的基础命令；两个输入框都可以编辑。",
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+        )
+        Row(Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp)
+            }
+            Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace)
+        }
+        Text(
+            "默认直接使用 Termux 中的 Pi。--mode rpc、Android Session 身份和私有 session-dir 由 App 维持；其他 Pi 原生启动参数可在上方编辑。",
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(14.dp)
+        )
+        Button(onClick = onConnect, enabled = startupError == null, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") }
+    }
+}
 
 @Composable
 private fun ExtensionDialog(request: PiUiRequest, input: String, onInput: (String) -> Unit, onSelect: (String) -> Unit, onConfirm: (Boolean) -> Unit, onSubmit: () -> Unit, onDismiss: () -> Unit) {
