@@ -18,13 +18,13 @@ class PiBridge(
     context: Context,
     private val endpointPort: Int = DEFAULT_PORT,
     private val endpointToken: String? = null,
-    private val endpointKey: String = DEFAULT_ENDPOINT_KEY
+    private val runtimeOwnerSessionId: String = DEFAULT_ENDPOINT_KEY
 ) {
     private val context = context.applicationContext
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-12.2"
+    private val expectedBridgeVersion = "2026-09-12.3"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -33,25 +33,26 @@ class PiBridge(
         "multi-session-v1",
         "consistent-recovery-v1",
         "bounded-event-cache-v1",
-        "hard-stop-v1"
+        "hard-stop-v1",
+        "conversation-owner-v1"
     )
     private val authToken: String by lazy {
-        endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, endpointKey)
+        endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)
     }
     private var nextId = 3000
-    private val remoteBridgeDir = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+    private val remoteBridgeDir = if (runtimeOwnerSessionId == DEFAULT_ENDPOINT_KEY) {
         "~/.pi/android"
     } else {
-        "~/.pi/android/sessions/$endpointKey"
+        "~/.pi/android/sessions/$runtimeOwnerSessionId"
     }
     private val remoteBridgeScript = "$remoteBridgeDir/bridge.mjs"
     private val remoteExtensionScript = "$remoteBridgeDir/pi-android-mobile.ts"
     private val remotePidFile = "$remoteBridgeDir/bridge.pid"
     private val remoteLogFile = "$remoteBridgeDir/bridge.log"
-    private val lastSessionPreferenceKey = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+    private val lastSessionPreferenceKey = if (runtimeOwnerSessionId == DEFAULT_ENDPOINT_KEY) {
         "last_session_file"
     } else {
-        "last_session_file_$endpointKey"
+        "last_session_file_$runtimeOwnerSessionId"
     }
 
     fun applicationContext(): Context = context
@@ -66,7 +67,7 @@ class PiBridge(
             request("/shutdown", "{}", 5_000)
             delay(750)
             val owned = shellQuote(ownedSessionFile)
-            val cleanup = if (endpointKey == DEFAULT_ENDPOINT_KEY) {
+            val cleanup = if (runtimeOwnerSessionId == DEFAULT_ENDPOINT_KEY) {
                 // The default endpoint historically lives directly under ~/.pi/android;
                 // never recursively remove that directory because it contains other tabs.
                 """
@@ -81,11 +82,11 @@ class PiBridge(
             } else {
                 // A non-default endpoint owns this whole directory, including its
                 // dedicated --session-dir history. No cwd/project path is touched.
-                "dir=~/.pi/android/sessions/${shellQuote(endpointKey)}; if [ -f \"${'$'}dir/bridge.pid\" ]; then old_pid=\"${'$'}(cat \"${'$'}dir/bridge.pid\")\"; kill \"${'$'}old_pid\" 2>/dev/null || true; sleep 0.7; kill -9 \"${'$'}old_pid\" 2>/dev/null || true; fi; rm -rf -- \"${'$'}dir\""
+                "dir=~/.pi/android/sessions/${shellQuote(runtimeOwnerSessionId)}; if [ -f \"${'$'}dir/bridge.pid\" ]; then old_pid=\"${'$'}(cat \"${'$'}dir/bridge.pid\")\"; kill \"${'$'}old_pid\" 2>/dev/null || true; sleep 0.7; kill -9 \"${'$'}old_pid\" 2>/dev/null || true; fi; rm -rf -- \"${'$'}dir\""
             }
             runTermux(cleanup).getOrThrow()
             runtimePreferences().edit().remove(lastSessionPreferenceKey).commit()
-            forgetEndpointToken(context, endpointKey)
+            forgetEndpointToken(context, runtimeOwnerSessionId)
         }
     }
 
@@ -107,7 +108,7 @@ class PiBridge(
                 chmod 700 $remoteBridgeScript &&
                 if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
                 rm -f $remotePidFile &&
-                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$endpointKey' PI_ANDROID_PID_FILE=$remotePidFile &&
+                export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$runtimeOwnerSessionId' PI_ANDROID_PID_FILE=$remotePidFile &&
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
@@ -171,7 +172,7 @@ class PiBridge(
             bridgePid = root.optLong("bridgePid"),
             piPid = root.optLong("piPid"),
             port = root.optInt("port"),
-            endpointKey = root.optString("endpointKey"),
+            runtimeOwnerSessionId = root.optString("endpointKey"),
             stopInProgress = root.optBoolean("stopInProgress")
         )
     }
@@ -273,7 +274,7 @@ class PiBridge(
         val usage = data.optJSONObject("contextUsage")
         PiStats(
             sessionFile = data.optString("sessionFile"),
-            sessionId = data.optString("sessionId"),
+            piConversationId = data.optString("sessionId"),
             totalMessages = data.optInt("totalMessages"),
             inputTokens = tokens.optLong("input"),
             outputTokens = tokens.optLong("output"),
@@ -470,7 +471,7 @@ class PiBridge(
             streaming = data.optBoolean("isStreaming"),
             compacting = data.optBoolean("isCompacting"),
             sessionFile = data.optString("sessionFile"),
-            sessionId = data.optString("sessionId"),
+            piConversationId = data.optString("sessionId"),
             sessionName = data.optString("sessionName"),
             messageCount = data.optInt("messageCount"),
             autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
@@ -759,7 +760,7 @@ data class PiHealth(
     val bridgePid: Long = 0L,
     val piPid: Long = 0L,
     val port: Int = 0,
-    val endpointKey: String = "",
+    val runtimeOwnerSessionId: String = "",
     val stopInProgress: Boolean = false
 )
 
@@ -775,14 +776,14 @@ data class PiState(
     val streaming: Boolean,
     val compacting: Boolean,
     val sessionFile: String,
-    val sessionId: String,
+    val piConversationId: String,
     val sessionName: String,
     val messageCount: Int,
     val autoCompactionEnabled: Boolean
 )
 data class PiStats(
     val sessionFile: String,
-    val sessionId: String,
+    val piConversationId: String,
     val totalMessages: Int,
     val inputTokens: Long,
     val outputTokens: Long,

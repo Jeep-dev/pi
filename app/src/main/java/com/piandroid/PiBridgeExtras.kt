@@ -77,7 +77,7 @@ suspend fun PiBridge.sessions(): Result<List<PiSession>> = request("/sessions", 
             add(
                 PiSession(
                     path = item.optString("path"),
-                    id = item.optString("id"),
+                    piConversationId = item.optString("id"),
                     title = item.optString("title").ifBlank { "未命名 session" },
                     modified = item.optLong("modified"),
                     current = item.optBoolean("current")
@@ -87,27 +87,35 @@ suspend fun PiBridge.sessions(): Result<List<PiSession>> = request("/sessions", 
     }
 }
 
-suspend fun PiBridge.switchSession(sessionPath: String): Result<PiState> =
-    switchSession("", sessionPath)
-
-suspend fun PiBridge.switchSession(androidSessionId: String, sessionPath: String): Result<PiState> = withContext(Dispatchers.IO) {
+suspend fun PiBridge.switchSession(
+    runtimeOwnerSessionId: String,
+    targetPiConversationId: String,
+    sessionPath: String
+): Result<PiState> = withContext(Dispatchers.IO) {
     request(
         "/switch-session",
         JSONObject()
-            .put("androidSessionId", androidSessionId)
+            .put("androidSessionId", runtimeOwnerSessionId)
+            .put("piConversationId", targetPiConversationId)
             .put("path", sessionPath)
             .toString(),
         70_000
     ).mapCatching { raw ->
         val state = JSONObject(raw).optJSONObject("state")
             ?: throw IllegalStateException("Pi did not return the switched session state")
-        parseState(state)
+        parseState(state).also { switched ->
+            check(
+                targetPiConversationId.isBlank() || switched.piConversationId == targetPiConversationId
+            ) {
+                "Pi conversation identity mismatch: expected=$targetPiConversationId actual=${switched.piConversationId}"
+            }
+        }
     }
 }
 
 data class PiSession(
     val path: String,
-    val id: String,
+    val piConversationId: String,
     val title: String,
     val modified: Long,
     val current: Boolean

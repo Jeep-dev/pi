@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-12.2";
+const bridgeVersion = "2026-09-12.3";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -22,6 +22,7 @@ const bridgeCapabilities = [
   "consistent-recovery-v1",
   "bounded-event-cache-v1",
   "hard-stop-v1",
+  "conversation-owner-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -1077,10 +1078,12 @@ const server = http.createServer(async (req, res) => {
       if (stopFence) throw new Error("Stop in progress; session switch rejected");
       const input = JSON.parse(await readBody(req) || "{}");
       const requestedAndroidSessionId = String(input.androidSessionId || "").trim();
+      const targetPiConversationId = String(input.piConversationId || "").trim();
       const endpointAndroidSessionId = String(process.env.PI_ANDROID_ENDPOINT_KEY || "").trim();
-      if (requestedAndroidSessionId && endpointAndroidSessionId && requestedAndroidSessionId !== endpointAndroidSessionId) {
+      if (!requestedAndroidSessionId || !endpointAndroidSessionId || requestedAndroidSessionId !== endpointAndroidSessionId) {
         throw new Error("Android Session identity mismatch");
       }
+      if (!targetPiConversationId) throw new Error("Pi conversation identity is required");
       const target = path.resolve(String(input.path || ""));
       const sessionRoots = [];
       for (const directory of sessionDiscoveryDirectories()) {
@@ -1094,8 +1097,16 @@ const server = http.createServer(async (req, res) => {
         throw new Error("session path outside trusted Pi session directories");
       }
       if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
+      const targetSummary = await summarizeSession(canonicalTarget, "");
+      if (targetSummary.id !== targetPiConversationId) {
+        throw new Error(`Pi conversation identity mismatch: expected=${targetPiConversationId} actual=${targetSummary.id}`);
+      }
       const result = await rpc({ type: "switch_session", sessionPath: canonicalTarget }, 30000);
       const state = await rpc({ type: "get_state" }, 60000);
+      const switchedPiConversationId = String(state?.data?.sessionId || "");
+      if (switchedPiConversationId !== targetPiConversationId) {
+        throw new Error(`Pi conversation identity mismatch after switch: expected=${targetPiConversationId} actual=${switchedPiConversationId}`);
+      }
       activeSessionFile = String(state?.data?.sessionFile || canonicalTarget);
       return send(res, 200, { ok: true, result: result.data || null, state: state.data || null });
     }

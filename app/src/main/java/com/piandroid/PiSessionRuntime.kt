@@ -30,7 +30,26 @@ internal data class PiRuntimeReady(
     val reconnecting: Boolean = false
 )
 
+internal data class PiRuntimeIdentity(
+    val androidSessionId: String,
+    val runtimeOwnerSessionId: String,
+    val piConversationId: String,
+    val sessionFile: String,
+    val history: List<PiHistoryMessage>
+)
+
 /** Bind the mutable Pi conversation while preserving Android Session identity. */
+internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
+    val expectedFile = record.sessionFile
+    return if (expectedFile.isNotBlank()) {
+        samePiConversationFile(expectedFile, state.sessionFile) &&
+            (record.piConversationId.isBlank() || record.piConversationId == state.piConversationId)
+    } else {
+        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
+            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
+    }
+}
+
 internal fun bindPiConversation(
     record: PiSessionRecord,
     state: PiState,
@@ -39,8 +58,8 @@ internal fun bindPiConversation(
     val selectedFile = state.sessionFile.ifBlank { fallbackSessionFile }
     return record.copy(
         sessionFile = selectedFile,
-        piSessionId = state.sessionId.ifBlank { record.piSessionId },
-        legacySessionFile = selectedFile.isNotBlank() && !isPrivatePiSessionFile(record.id, selectedFile),
+        piConversationId = state.piConversationId.ifBlank { record.piConversationId },
+        legacySessionFile = selectedFile.isNotBlank() && !isPrivatePiSessionFile(record.androidSessionId, selectedFile),
         status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
         lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
         lastError = ""
@@ -49,6 +68,7 @@ internal fun bindPiConversation(
 
 internal sealed class PiRuntimeUpdate {
     data class Ready(val value: PiRuntimeReady) : PiRuntimeUpdate()
+    data class State(val value: PiState) : PiRuntimeUpdate()
     data class Snapshot(val value: PiRecoverySnapshot) : PiRuntimeUpdate()
     data class Events(val value: PiEventBatch) : PiRuntimeUpdate()
     data class Reconnecting(val error: Throwable) : PiRuntimeUpdate()
@@ -125,9 +145,10 @@ internal class PiTaskGate {
 internal class PiSessionRuntime(
     initialRecord: PiSessionRecord,
     parentJob: Job,
-    bridge: PiBridge
+    bridge: PiBridge,
+    private val claimConversation: (String, String) -> Boolean = { _, _ -> true }
 ) {
-    val id: String = initialRecord.id
+    val runtimeOwnerSessionId: String = initialRecord.androidSessionId
     val bridge: PiBridge = bridge
 
     // Main keeps UI callbacks safe; every PiBridge HTTP/file operation switches
@@ -159,9 +180,35 @@ internal class PiSessionRuntime(
     private var lastSnapshot: PiRecoverySnapshot? = null
 
     fun update(next: PiSessionRecord) {
-        synchronized(stateLock) {
-            if (!closed) record = next
+        check(next.androidSessionId == runtimeOwnerSessionId) {
+            "Runtime owner mismatch: owner=$runtimeOwnerSessionId record=${next.androidSessionId}"
         }
+        synchronized(stateLock) {
+            if (!closed) {
+                // Once connected, only this Runtime may change its conversation.
+                // Compose/poll records can update presentation/configuration but
+                // cannot push an older conversation binding back into Runtime.
+                record = lastState?.let { state ->
+                    bindPiConversation(next, state, state.sessionFile)
+                } ?: next
+            }
+        }
+    }
+
+    fun identitySnapshot(): PiRuntimeIdentity = synchronized(stateLock) {
+        PiRuntimeIdentity(
+            androidSessionId = record.androidSessionId,
+            runtimeOwnerSessionId = runtimeOwnerSessionId,
+            piConversationId = lastState?.piConversationId.orEmpty().ifBlank { record.piConversationId },
+            sessionFile = lastState?.sessionFile.orEmpty().ifBlank { record.sessionFile },
+            history = lastSnapshot?.history.orEmpty()
+        )
+    }
+
+    fun conversationVersion(): Long = synchronized(stateLock) { conversationGeneration }
+
+    fun isConversationVersion(expected: Long): Boolean = synchronized(stateLock) {
+        !closed && conversationGeneration == expected
     }
 
     fun isConnected(): Boolean = synchronized(stateLock) { connected }
@@ -183,7 +230,7 @@ internal class PiSessionRuntime(
                 val state = lastState
                 val snapshot = lastSnapshot
                 if (state != null && snapshot != null) {
-                    scope.launch { updatesMutable.emit(PiRuntimeUpdate.Ready(PiRuntimeReady(state, snapshot))) }
+                    updatesMutable.tryEmit(PiRuntimeUpdate.Ready(PiRuntimeReady(state, snapshot)))
                 }
                 return
             }
@@ -197,6 +244,38 @@ internal class PiSessionRuntime(
         synchronized(stateLock) {
             recoveryEnabled = false
             autoStartRequested = false
+        }
+    }
+
+    /** Refresh Pi state through the same serialized conversation authority. */
+    suspend fun refreshState(): Result<PiState> = runCatching {
+        connectMutex.withLock {
+            val refreshed = bridge.state().getOrThrow()
+            val changed = synchronized(stateLock) {
+                val previous = lastState
+                previous != null && (
+                    previous.piConversationId != refreshed.piConversationId ||
+                        conversationFileKey(previous.sessionFile) != conversationFileKey(refreshed.sessionFile)
+                    )
+            }
+            if (changed) {
+                val generation = synchronized(stateLock) { ++conversationGeneration }
+                val snapshot = bridge.recoverySnapshot().getOrThrow()
+                val ready = PiRuntimeReady(
+                    state = refreshed,
+                    snapshot = snapshot,
+                    runtimeCwd = currentRecord().cwd
+                )
+                check(commitReady(ready, generation)) { "Pi conversation changed while refreshing state" }
+            } else {
+                synchronized(stateLock) {
+                    check(!closed) { "Pi Session runtime is closed" }
+                    lastState = refreshed
+                    record = bindPiConversation(record, refreshed, refreshed.sessionFile)
+                    updatesMutable.tryEmit(PiRuntimeUpdate.State(refreshed))
+                }
+            }
+            refreshed
         }
     }
 
@@ -219,65 +298,78 @@ internal class PiSessionRuntime(
 
     /** Switch only the conversation owned by the initiating Android Session. */
     suspend fun switchPiConversation(
-        androidSessionId: String,
+        targetAndroidSessionId: String,
         targetPiConversationId: String,
         sessionPath: String
     ): Result<PiRuntimeReady> = runCatching {
         val currentPiConversationId = synchronized(stateLock) {
-            lastState?.sessionId.orEmpty().ifBlank { record.piSessionId }
+            lastState?.piConversationId.orEmpty().ifBlank { record.piConversationId }
         }
         Log.d(
             PI_SESSION_IDENTITY_TAG,
-            "RESUME_IDENTITY targetAndroidSessionId=$androidSessionId activeAndroidSessionId=$id " +
-                "runtimeOwnerSessionId=$id currentPiConversationId=$currentPiConversationId " +
+            "RESUME_IDENTITY targetAndroidSessionId=$targetAndroidSessionId " +
+                "runtimeOwnerSessionId=$runtimeOwnerSessionId currentPiConversationId=$currentPiConversationId " +
                 "targetPiConversationId=$targetPiConversationId"
         )
-        check(id == androidSessionId) { "Pi Session identity mismatch" }
+        check(runtimeOwnerSessionId == targetAndroidSessionId) { "Pi Session identity mismatch" }
         connectMutex.withLock {
-            synchronized(stateLock) {
+            val generation = synchronized(stateLock) {
                 check(!closed) { "Pi Session runtime is closed" }
                 check(connected) { "Pi Session is not connected" }
-                // Invalidate any in-flight event poll for the old conversation.
-                conversationGeneration++
+                // Invalidate every in-flight event/history result for the old conversation.
+                ++conversationGeneration
             }
-            val switched = bridge.switchSession(androidSessionId, sessionPath).getOrThrow()
+            val switched = bridge.switchSession(
+                targetAndroidSessionId,
+                targetPiConversationId,
+                sessionPath
+            ).getOrThrow()
+            check(switched.piConversationId == targetPiConversationId) {
+                "Pi conversation identity mismatch: expected=$targetPiConversationId actual=${switched.piConversationId}"
+            }
             val snapshot = bridge.recoverySnapshot().getOrThrow()
-            synchronized(stateLock) {
-                check(!closed) { "Pi Session runtime is closed" }
-                connected = true
-                lastState = switched
-                lastSnapshot = snapshot
-                eventCursor = snapshot.latest
-                record = bindPiConversation(record, switched, sessionPath)
-            }
             val ready = PiRuntimeReady(
                 state = switched,
                 snapshot = snapshot,
                 runtimeCwd = currentRecord().cwd,
                 reconnecting = false
             )
-            // Publish the new snapshot as the runtime's latest binding. A newly
-            // composed screen must not replay the pre-resume snapshot.
-            updatesMutable.emit(PiRuntimeUpdate.Ready(ready))
+            check(commitReady(ready, generation, sessionPath)) {
+                "Pi conversation changed while resume was completing"
+            }
             ready
         }
     }
 
     fun closeAndCleanup(ownedSessionFile: String): Job {
-        synchronized(stateLock) {
-            if (closed) return scope.launch { }
-            closed = true
-            connected = false
-            recoveryEnabled = false
-            autoStartRequested = false
-            connectionJob?.cancel()
-            eventJob?.cancel()
-            taskGate.close()
-        }
+        val closedNow = fenceClient()
+        if (!closedNow) return scope.launch { }
         return scope.launch {
-            bridge.shutdownAndCleanup(ownedSessionFile)
-            scope.coroutineContext[Job]?.cancel()
+            try {
+                bridge.shutdownAndCleanup(ownedSessionFile)
+            } finally {
+                scope.coroutineContext[Job]?.cancel()
+            }
         }
+    }
+
+    /** Release only this Android client; the owner-specific Bridge/Pi keeps running. */
+    fun closeClient(): Boolean {
+        val closedNow = fenceClient()
+        if (closedNow) scope.coroutineContext[Job]?.cancel()
+        return closedNow
+    }
+
+    private fun fenceClient(): Boolean = synchronized(stateLock) {
+        if (closed) return@synchronized false
+        closed = true
+        connected = false
+        recoveryEnabled = false
+        autoStartRequested = false
+        connectionJob?.cancel()
+        eventJob?.cancel()
+        taskGate.close()
+        true
     }
 
     private fun launchConnectionLocked() {
@@ -293,8 +385,15 @@ internal class PiSessionRuntime(
                 if (promote) result = runCatching { connectInternal(currentRecord(), true) }
             }
             if (result.isSuccess) {
-                publishReady(result.getOrThrow())
-                startEventLoop()
+                if (publishReady(result.getOrThrow())) {
+                    startEventLoop()
+                } else {
+                    updatesMutable.emit(
+                        PiRuntimeUpdate.Failed(
+                            IllegalStateException("Pi conversation is already owned by another Android Session")
+                        )
+                    )
+                }
             } else {
                 val error = result.exceptionOrNull() ?: IllegalStateException("Pi connection failed")
                 if (error is RuntimeUnavailable) updatesMutable.emit(PiRuntimeUpdate.Unavailable)
@@ -336,7 +435,9 @@ internal class PiSessionRuntime(
         val runningHealth = healthBefore ?: bridge.health(timeoutMs = 2_500).getOrNull()
         if (attached != null) {
             val runningCwd = runningHealth?.cwd.orEmpty()
-            if (sameCwd(configuredRecord.cwd, runningCwd)) {
+            val ownerMatches = runningHealth?.runtimeOwnerSessionId == runtimeOwnerSessionId
+            val conversationMatches = runtimeConversationMatches(configuredRecord, attached)
+            if (ownerMatches && sameCwd(configuredRecord.cwd, runningCwd) && conversationMatches) {
                 val snapshot = bridge.recoverySnapshot().getOrThrow()
                 return PiRuntimeReady(
                     state = attached,
@@ -344,17 +445,22 @@ internal class PiSessionRuntime(
                     runtimeCwd = runningCwd
                 )
             }
+            Log.w(
+                PI_SESSION_IDENTITY_TAG,
+                "REJECT_ATTACH androidSessionId=${configuredRecord.androidSessionId} " +
+                    "runtimeOwnerSessionId=$runtimeOwnerSessionId endpointOwner=${runningHealth?.runtimeOwnerSessionId.orEmpty()} " +
+                    "expectedPiConversationId=${configuredRecord.piConversationId} actualPiConversationId=${attached.piConversationId} " +
+                    "expectedSessionFile=${configuredRecord.sessionFile} actualSessionFile=${attached.sessionFile}"
+            )
             if (!allowStart) throw RuntimeUnavailable()
         } else if (!allowStart) {
             throw RuntimeUnavailable()
         }
 
-        val previous = bridge.state(timeoutMs = 1_500).getOrNull()
-        val previousFile = previous?.sessionFile?.takeIf { it.isNotBlank() }
-            ?: lastState?.sessionFile?.takeIf { it.isNotBlank() }
+        val previous = attached ?: bridge.state(timeoutMs = 1_500).getOrNull()
+        val previousFile = synchronized(stateLock) { lastState?.sessionFile?.takeIf { it.isNotBlank() } }
             ?: configuredRecord.sessionFile.takeIf { it.isNotBlank() }
-        val preserveSession = previousFile != null &&
-            (runningHealth?.cwd.isNullOrBlank() || sameCwd(configuredRecord.cwd, runningHealth?.cwd.orEmpty()))
+        val preserveSession = previousFile != null
 
         if (previous != null && !previous.streaming && !previous.compacting) {
             bridge.commands().getOrDefault(emptyList())
@@ -369,19 +475,26 @@ internal class PiSessionRuntime(
             configuredRecord.startupArguments
         )
         val sessionDirectory = configuredRecord.sessionDirectory.ifBlank {
-            PiSessionStore.sessionDirectory(configuredRecord.id)
+            PiSessionStore.sessionDirectory(configuredRecord.androidSessionId)
         }
         val launch = if (preserveSession && previousFile != null) {
             bridge.recoveryLaunchCommand(configuredLaunch, previousFile)
         } else {
             bridge.freshLaunchCommand(
                 configuredLaunch,
-                configuredRecord.piSessionId.ifBlank { configuredRecord.id },
+                configuredRecord.piConversationId.ifBlank { configuredRecord.androidSessionId },
                 sessionDirectory
             )
         }
         val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()
         val runtimeHealth = bridge.health(timeoutMs = 8_000).getOrThrow()
+        check(runtimeHealth.runtimeOwnerSessionId == runtimeOwnerSessionId) {
+            "Bridge owner mismatch: expected=$runtimeOwnerSessionId actual=${runtimeHealth.runtimeOwnerSessionId}"
+        }
+        check(runtimeConversationMatches(configuredRecord, started)) {
+            "Pi conversation mismatch after start: expected=${configuredRecord.piConversationId}/${configuredRecord.sessionFile} " +
+                "actual=${started.piConversationId}/${started.sessionFile}"
+        }
         val snapshot = bridge.recoverySnapshot().getOrThrow()
         return PiRuntimeReady(
             state = started,
@@ -391,17 +504,27 @@ internal class PiSessionRuntime(
         )
     }
 
-    private fun publishReady(ready: PiRuntimeReady, expectedGeneration: Long? = null): Boolean {
-        synchronized(stateLock) {
-            if (closed || (expectedGeneration != null && conversationGeneration != expectedGeneration)) return false
-            connected = true
-            lastState = ready.state
-            lastSnapshot = ready.snapshot
-            eventCursor = ready.snapshot.latest
+    internal fun commitReady(
+        ready: PiRuntimeReady,
+        expectedGeneration: Long? = null,
+        fallbackSessionFile: String = ready.state.sessionFile
+    ): Boolean {
+        if (!claimConversation(runtimeOwnerSessionId, ready.state.sessionFile)) return false
+        return synchronized(stateLock) {
+        if (closed || (expectedGeneration != null && conversationGeneration != expectedGeneration)) return false
+        connected = true
+        lastState = ready.state
+        lastSnapshot = ready.snapshot
+        eventCursor = ready.snapshot.latest
+        record = bindPiConversation(record, ready.state, fallbackSessionFile)
+        // tryEmit while holding the generation lock gives Ready/Snapshot/Events
+        // one total order. An old result can never be queued after a newer resume.
+        updatesMutable.tryEmit(PiRuntimeUpdate.Ready(ready))
         }
-        scope.launch { updatesMutable.emit(PiRuntimeUpdate.Ready(ready)) }
-        return true
     }
+
+    private fun publishReady(ready: PiRuntimeReady, expectedGeneration: Long? = null): Boolean =
+        commitReady(ready, expectedGeneration)
 
     private fun startEventLoop() {
         synchronized(stateLock) {
@@ -424,21 +547,34 @@ internal class PiSessionRuntime(
                     if (!isConversationGeneration(generation)) continue
                     if (snapshot.isSuccess) {
                         val value = snapshot.getOrThrow()
-                        synchronized(stateLock) { eventCursor = value.latest; lastSnapshot = value }
-                        updatesMutable.emit(PiRuntimeUpdate.Snapshot(value))
+                        val committed = synchronized(stateLock) {
+                            if (closed || conversationGeneration != generation) false
+                            else {
+                                eventCursor = value.latest
+                                lastSnapshot = value
+                                updatesMutable.tryEmit(PiRuntimeUpdate.Snapshot(value))
+                            }
+                        }
+                        if (!committed) continue
                     } else {
                         failures++
                         updatesMutable.emit(PiRuntimeUpdate.Reconnecting(snapshot.exceptionOrNull()!!))
                         delay(500L)
                     }
                 } else {
-                    synchronized(stateLock) { eventCursor = batch.latest }
+                    val committed = synchronized(stateLock) {
+                        if (closed || conversationGeneration != generation) false
+                        else {
+                            eventCursor = batch.latest
+                            updatesMutable.tryEmit(PiRuntimeUpdate.Events(batch))
+                        }
+                    }
+                    if (!committed) continue
                     if (batch.events.any {
                             it.uiRequest?.method == "notify" && it.uiRequest.message == "ANDROID_PI_QUIT"
                         }) {
                         disableRecovery()
                     }
-                    updatesMutable.emit(PiRuntimeUpdate.Events(batch))
                     if (batch.events.any { it.type == "process_exit" }) {
                         if (!canRecover()) {
                             synchronized(stateLock) { connected = false }
@@ -499,13 +635,53 @@ internal class PiSessionRuntimeManager(context: Context) {
     private val appContext = context.applicationContext
     private val managerJob = SupervisorJob()
     private val runtimes = LinkedHashMap<String, PiSessionRuntime>()
+    private val conversationOwners = LinkedHashMap<String, String>()
+
+    @Volatile
+    var activeAndroidSessionId: String? = null
+        private set
 
     @Synchronized
-    fun activate(record: PiSessionRecord): PiSessionRuntime = runtime(record)
+    fun activate(record: PiSessionRecord): PiSessionRuntime {
+        val target = runtime(record)
+        check(target.runtimeOwnerSessionId == record.androidSessionId) {
+            "Runtime owner mismatch: target=${record.androidSessionId} owner=${target.runtimeOwnerSessionId}"
+        }
+        activeAndroidSessionId = record.androidSessionId
+        return target
+    }
+
+    @Synchronized
+    fun register(records: List<PiSessionRecord>) {
+        records.forEach { record ->
+            val file = conversationFileKey(record.sessionFile)
+            if (file.isNotBlank()) {
+                check(conversationOwners[file].let { it == null || it == record.androidSessionId }) {
+                    "Pi conversation already has another Android owner: $file"
+                }
+                conversationOwners[file] = record.androidSessionId
+            }
+        }
+    }
+
+    @Synchronized
+    fun canBindConversation(androidSessionId: String, sessionFile: String): Boolean {
+        val owner = conversationOwners[conversationFileKey(sessionFile)]
+        return owner == null || owner == androidSessionId
+    }
+
+    @Synchronized
+    private fun claimConversation(androidSessionId: String, sessionFile: String): Boolean {
+        if (!canBindConversation(androidSessionId, sessionFile)) return false
+        conversationOwners.entries.removeAll { it.value == androidSessionId }
+        val file = conversationFileKey(sessionFile)
+        if (file.isNotBlank()) conversationOwners[file] = androidSessionId
+        return true
+    }
 
     @Synchronized
     fun runtime(record: PiSessionRecord): PiSessionRuntime {
-        val existing = runtimes[record.id]
+        val existing = runtimes[record.androidSessionId]
         if (existing != null) {
             existing.update(record)
             return existing
@@ -513,13 +689,31 @@ internal class PiSessionRuntimeManager(context: Context) {
         // Always use the persisted endpoint tuple. The old default bridge used an
         // implicit token and was the source of default-session reconnect failures
         // after registry migration.
-        val bridge = PiBridge(appContext, record.port, record.token, record.id)
-        return PiSessionRuntime(record, managerJob, bridge).also { runtimes[record.id] = it }
+        claimConversation(record.androidSessionId, record.sessionFile)
+        val bridge = PiBridge(appContext, record.port, record.token, record.androidSessionId)
+        return PiSessionRuntime(record, managerJob, bridge, ::claimConversation)
+            .also { runtimes[record.androidSessionId] = it }
     }
 
     @Synchronized
+    fun activeIdentity(): PiRuntimeIdentity? =
+        activeAndroidSessionId?.let { runtimes[it]?.identitySnapshot() }
+
+    @Synchronized
     fun remove(record: PiSessionRecord): Job {
-        val runtime = runtimes.remove(record.id) ?: runtime(record).also { runtimes.remove(record.id) }
+        val runtime = runtimes.remove(record.androidSessionId)
+            ?: runtime(record).also { runtimes.remove(record.androidSessionId) }
+        if (activeAndroidSessionId == record.androidSessionId) activeAndroidSessionId = null
+        conversationOwners.entries.removeAll { it.value == record.androidSessionId }
         return runtime.closeAndCleanup(record.ownedSessionFile)
+    }
+
+    @Synchronized
+    fun close() {
+        runtimes.values.forEach { it.closeClient() }
+        runtimes.clear()
+        conversationOwners.clear()
+        activeAndroidSessionId = null
+        managerJob.cancel()
     }
 }

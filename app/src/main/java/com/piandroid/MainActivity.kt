@@ -158,6 +158,11 @@ class MainActivity : ComponentActivity() {
         setContent { PiTouchApp(runtimeManager) }
     }
 
+    override fun onDestroy() {
+        runtimeManager.close()
+        super.onDestroy()
+    }
+
     private fun requestTermuxPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val requested = mutableListOf<String>()
@@ -372,7 +377,7 @@ private fun bridgeHealthDiagnostic(health: PiHealth): String = listOf(
 ).filterNotNull().joinToString("\n")
 
 private suspend fun pollPiSession(context: Context, record: PiSessionRecord): PiSessionRecord {
-    val bridge = PiBridge(context, record.port, record.token, record.id)
+    val bridge = PiBridge(context, record.port, record.token, record.androidSessionId)
     val health = bridge.health(timeoutMs = 2_500).getOrNull()
         ?: return record.copy(
             status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
@@ -390,14 +395,17 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
         val detail = listOf(it.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
         return record.copy(status = PiSessionStatus.ERROR, lastError = detail.ifBlank { "无法读取 Pi 状态" })
     }
+    if (health.runtimeOwnerSessionId != record.androidSessionId || !runtimeConversationMatches(record, state)) {
+        return record.copy(
+            status = PiSessionStatus.ERROR,
+            lastError = "Session ownership mismatch: android=${record.androidSessionId}, " +
+                "runtime=${health.runtimeOwnerSessionId}, expectedPi=${record.piConversationId}, " +
+                "actualPi=${state.piConversationId}"
+        )
+    }
     return record.copy(
         name = state.sessionName.ifBlank { record.name },
         cwd = health.cwd.ifBlank { record.cwd },
-        sessionFile = state.sessionFile.ifBlank { record.sessionFile },
-        piSessionId = state.sessionId.ifBlank { record.piSessionId },
-        legacySessionFile = state.sessionFile
-            .ifBlank { record.sessionFile }
-            .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
         status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
         lastActivity = record.lastActivity,
         lastError = ""
@@ -409,10 +417,14 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     val context = LocalContext.current
     val sessionStore = remember { PiSessionStore(context) }
     val initialSessions = remember { sessionStore.loadOrCreateDefault() }
+    remember(initialSessions) { runtimeManager.register(initialSessions) }
     var sessions by remember { mutableStateOf(initialSessions) }
-    var activeSessionId by rememberSaveable {
+    var activeAndroidSessionId by rememberSaveable {
         val saved = sessionStore.activeId()
-        mutableStateOf(saved?.takeIf { id -> initialSessions.any { it.id == id } } ?: initialSessions.firstOrNull()?.id.orEmpty())
+        mutableStateOf(
+            saved?.takeIf { id -> initialSessions.any { it.androidSessionId == id } }
+                ?: initialSessions.firstOrNull()?.androidSessionId.orEmpty()
+        )
     }
     var createSessionOpen by remember { mutableStateOf(false) }
     var createSessionName by remember { mutableStateOf("") }
@@ -426,44 +438,50 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     var renameSessionText by remember { mutableStateOf("") }
     var deleteSession by remember { mutableStateOf<PiSessionRecord?>(null) }
     val latestSessions by rememberUpdatedState(sessions)
-    val latestActiveId by rememberUpdatedState(activeSessionId)
+    val latestActiveId by rememberUpdatedState(activeAndroidSessionId)
 
     fun updateSession(id: String, transform: (PiSessionRecord) -> PiSessionRecord) {
-        val updated = orderPiSessions(sessions.map { if (it.id == id) transform(it) else it })
+        val updated = orderPiSessions(sessions.map { if (it.androidSessionId == id) transform(it) else it })
         sessions = updated
-        updated.firstOrNull { it.id == id }?.let { runtimeManager.runtime(it).update(it) }
-        sessionStore.save(updated, activeSessionId)
+        updated.firstOrNull { it.androidSessionId == id }?.let { runtimeManager.runtime(it).update(it) }
+        sessionStore.save(updated, activeAndroidSessionId)
     }
 
     fun selectSession(id: String): Boolean {
-        val before = activeSessionId
+        val before = activeAndroidSessionId
         Log.d(SESSION_SELECTION_TAG, "SESSION_CLICK target=$id ACTIVE_BEFORE=$before")
         val selectedId = selectPiSessionId(sessions, id)
         if (selectedId == null) {
             Log.w(SESSION_SELECTION_TAG, "SESSION_CLICK target=$id ACTIVE_BEFORE=$before ACTIVE_AFTER=$before RUNTIME_SESSION=")
             return false
         }
-        activeSessionId = selectedId
-        val targetRecord = sessions.first { it.id == selectedId }
+        activeAndroidSessionId = selectedId
+        val targetRecord = sessions.first { it.androidSessionId == selectedId }
         val activeRuntime = runtimeManager.activate(targetRecord)
         sessionStore.save(orderPiSessions(sessions), selectedId)
-        val runtimeSession = activeRuntime.id
-        val accepted = activeSessionId == selectedId && runtimeSession == selectedId
+        val runtimeOwnerSessionId = activeRuntime.runtimeOwnerSessionId
+        val accepted = activeAndroidSessionId == selectedId &&
+            runtimeManager.activeAndroidSessionId == selectedId &&
+            runtimeOwnerSessionId == selectedId
         Log.d(
             SESSION_SELECTION_TAG,
-            "SESSION_CLICK target=$id ACTIVE_BEFORE=$before ACTIVE_AFTER=$activeSessionId RUNTIME_SESSION=$runtimeSession"
+            "SESSION_CLICK target=$id ACTIVE_BEFORE=$before ACTIVE_AFTER=$activeAndroidSessionId " +
+                "RUNTIME_OWNER_SESSION=$runtimeOwnerSessionId PI_CONVERSATION=${activeRuntime.identitySnapshot().piConversationId}"
         )
         return accepted
     }
+
+    fun canBindConversation(androidSessionId: String, sessionFile: String): Boolean =
+        runtimeManager.canBindConversation(androidSessionId, sessionFile)
 
     fun requestSessionManagement(record: PiSessionRecord) {
         managedSession = record
     }
 
     fun confirmDeleteSession(record: PiSessionRecord) {
-        val deletion = deletePiSessionState(sessions, record.id, activeSessionId)
+        val deletion = deletePiSessionState(sessions, record.androidSessionId, activeAndroidSessionId)
         sessions = deletion.remaining
-        activeSessionId = deletion.activeId.orEmpty()
+        activeAndroidSessionId = deletion.activeId.orEmpty()
         emptySessionDrawerOpen = deletion.keepDrawerOpen
         sessionStore.save(deletion.remaining, deletion.activeId)
         runtimeManager.remove(record)
@@ -476,14 +494,17 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         val record = sessionStore.create(
             name = createSessionName,
             cwd = createSessionCwd,
-            launchCommand = sessions.firstOrNull { it.id == activeSessionId }?.launchCommand.orEmpty(),
+            launchCommand = sessions.firstOrNull {
+                it.androidSessionId == activeAndroidSessionId
+            }?.launchCommand.orEmpty(),
             records = sessions,
             startupArguments = createSessionStartupArguments
         )
         val updated = sessions + record
         sessions = updated
-        activeSessionId = record.id
-        sessionStore.save(updated, record.id)
+        activeAndroidSessionId = record.androidSessionId
+        runtimeManager.activate(record)
+        sessionStore.save(updated, record.androidSessionId)
         createSessionOpen = false
     }
 
@@ -508,7 +529,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         }
     }
 
-    val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.firstOrNull()
+    val activeSession = sessions.firstOrNull {
+        it.androidSessionId == activeAndroidSessionId
+    } ?: sessions.firstOrNull()
 
     var themeKey by rememberSaveable {
         mutableStateOf(context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE).getString("theme", "dark") ?: "dark")
@@ -557,18 +580,21 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                         }
                     )
                 } else {
-                    // Keep every Session screen composed. Its per-session runtime
-                    // is Activity-owned, and this keeps the existing screen state
-                    // visible without making it responsible for Pi/Bridge lifetime.
+                    // Each retained screen has one owner-specific Runtime. Only
+                    // the active Android Session is allowed to present dialogs.
                     sessions.forEach { record ->
-                        key(record.id) {
-                            val runtime = runtimeManager.runtime(record)
-                            val active = record.id == activeSession.id
+                        key(record.androidSessionId) {
+                            val active = record.androidSessionId == activeSession.androidSessionId
+                            val runtime = if (active) {
+                                runtimeManager.activate(record)
+                            } else {
+                                runtimeManager.runtime(record)
+                            }
                             PiScreen(
                                 runtime = runtime,
                                 session = record,
                                 sessions = sessions,
-                                activeSessionId = activeSessionId,
+                                activeAndroidSessionId = activeAndroidSessionId,
                                 autoStart = active,
                                 hostModifier = if (active) Modifier.fillMaxSize() else Modifier.size(0.dp),
                                 themeMode = themeMode,
@@ -585,6 +611,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                                     createSessionOpen = true
                                 },
                                 onSessionUpdate = ::updateSession,
+                                onCanBindConversation = ::canBindConversation,
                                 onManageSession = ::requestSessionManagement
                             )
                         }
@@ -613,7 +640,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                         managedSession = null
                     },
                     onTogglePinned = {
-                        updateSession(target.id) { it.copy(pinned = !it.pinned) }
+                        updateSession(target.androidSessionId) { it.copy(pinned = !it.pinned) }
                         managedSession = null
                     },
                     onDelete = {
@@ -628,9 +655,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                     onName = { renameSessionText = it },
                     onDismiss = { renameSession = null },
                     onConfirm = {
-                        val updated = renamePiSession(sessions, target.id, renameSessionText)
+                        val updated = renamePiSession(sessions, target.androidSessionId, renameSessionText)
                         sessions = orderPiSessions(updated)
-                        sessionStore.save(sessions, activeSessionId)
+                        sessionStore.save(sessions, activeAndroidSessionId)
                         renameSession = null
                     }
                 )
@@ -651,7 +678,7 @@ private fun PiScreen(
     runtime: PiSessionRuntime,
     session: PiSessionRecord,
     sessions: List<PiSessionRecord>,
-    activeSessionId: String,
+    activeAndroidSessionId: String,
     autoStart: Boolean,
     hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
@@ -659,12 +686,13 @@ private fun PiScreen(
     onSelectSession: (String) -> Boolean,
     onNewSession: () -> Unit,
     onSessionUpdate: (String, (PiSessionRecord) -> PiSessionRecord) -> Unit,
+    onCanBindConversation: (String, String) -> Boolean,
     onManageSession: (PiSessionRecord) -> Unit
 ) {
     val bridge = runtime.bridge
-    var cwd by rememberSaveable(session.id) { mutableStateOf(session.cwd) }
-    var launchCommand by rememberSaveable(session.id) { mutableStateOf(session.launchCommand) }
-    var input by rememberSaveable(session.id) { mutableStateOf("") }
+    var cwd by rememberSaveable(session.androidSessionId) { mutableStateOf(session.cwd) }
+    var launchCommand by rememberSaveable(session.androidSessionId) { mutableStateOf(session.launchCommand) }
+    var input by rememberSaveable(session.androidSessionId) { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
@@ -717,7 +745,7 @@ private fun PiScreen(
     var attachmentNotice by remember { mutableStateOf("") }
 
     fun updateSessionRecord(transform: (PiSessionRecord) -> PiSessionRecord) {
-        onSessionUpdate(session.id, transform)
+        onSessionUpdate(session.androidSessionId, transform)
     }
 
     LaunchedEffect(Unit) {
@@ -839,32 +867,18 @@ private fun PiScreen(
     }
 
     suspend fun loadHistory(preservePending: Boolean = false) {
-        bridge.history().onSuccess { restoreHistory(it, preservePending) }
+        val conversationVersion = runtime.conversationVersion()
+        bridge.history().onSuccess {
+            if (runtime.isConversationVersion(conversationVersion)) restoreHistory(it, preservePending)
+        }
     }
 
     suspend fun refreshMeta() = coroutineScope {
-        val state = async { bridge.state().getOrNull() }
+        val state = async { runtime.refreshState().getOrNull() }
         val stats = async { bridge.stats().getOrNull() }
         val availableModels = async { bridge.models().getOrNull() }
         val availableCommands = async { bridge.commands().getOrNull() }
-        state.await()?.let {
-            currentState = it
-            updateSessionRecord { record ->
-                record.copy(
-                    name = it.sessionName.ifBlank { record.name },
-                    sessionFile = it.sessionFile.ifBlank { record.sessionFile },
-                    ownedSessionFile = record.ownedSessionFile.ifBlank { it.sessionFile },
-                    piSessionId = it.sessionId.ifBlank { record.piSessionId },
-                    legacySessionFile = it.sessionFile
-                        .ifBlank { record.sessionFile }
-                        .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
-                    sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
-                    status = if (it.streaming || it.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
-                    lastActivity = if (it.streaming || it.compacting) System.currentTimeMillis() else record.lastActivity,
-                    lastError = ""
-                )
-            }
-        }
+        state.await()
         stats.await()?.let { currentStats = it }
         availableModels.await()?.let { models = it }
         availableCommands.await()?.let { remoteCommands = it }
@@ -1182,26 +1196,24 @@ private fun PiScreen(
         }
     }
 
-    suspend fun applyRuntimeReady(ready: PiRuntimeReady) {
-        val state = ready.state
+    fun applyRuntimeState(state: PiState, runtimeCwd: String = "") {
         currentState = state
-        if (ready.runtimeCwd.isNotBlank()) cwd = ready.runtimeCwd
+        if (runtimeCwd.isNotBlank()) cwd = runtimeCwd
         updateSessionRecord { record ->
-            record.copy(
-                cwd = ready.runtimeCwd.ifBlank { record.cwd },
+            bindPiConversation(record, state, record.sessionFile).copy(
+                cwd = runtimeCwd.ifBlank { record.cwd },
                 name = state.sessionName.ifBlank { record.name },
-                sessionFile = state.sessionFile.ifBlank { record.sessionFile },
                 ownedSessionFile = record.ownedSessionFile.ifBlank { state.sessionFile },
-                piSessionId = state.sessionId.ifBlank { record.piSessionId },
-                legacySessionFile = state.sessionFile
-                    .ifBlank { record.sessionFile }
-                    .let { file -> file.isNotBlank() && !isPrivatePiSessionFile(record.id, file) },
-                sessionDirectory = record.sessionDirectory.ifBlank { PiSessionStore.sessionDirectory(record.id) },
-                status = if (state.streaming || state.compacting) PiSessionStatus.WORKING else PiSessionStatus.IDLE,
-                lastActivity = if (state.streaming || state.compacting) System.currentTimeMillis() else record.lastActivity,
-                lastError = ""
+                sessionDirectory = record.sessionDirectory.ifBlank {
+                    PiSessionStore.sessionDirectory(record.androidSessionId)
+                }
             )
         }
+    }
+
+    suspend fun applyRuntimeReady(ready: PiRuntimeReady) {
+        val state = ready.state
+        applyRuntimeState(state, ready.runtimeCwd)
         status = "Restoring session"
         restoreHistory(ready.snapshot.history, preservePending = ready.reconnecting)
         ready.snapshot.events.forEach { applyEvent(it, recovering = true) }
@@ -1242,6 +1254,7 @@ private fun PiScreen(
         runtime.updates.collect { update ->
             when (update) {
                 is PiRuntimeUpdate.Ready -> applyRuntimeReady(update.value)
+                is PiRuntimeUpdate.State -> applyRuntimeState(update.value)
                 is PiRuntimeUpdate.Snapshot -> {
                     restoreHistory(update.value.history, preservePending = true)
                     update.value.events.forEach { applyEvent(it, recovering = true) }
@@ -1444,7 +1457,10 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.8
+                """Pi Android v5.19.9
+                |• 重建 Android Session / Runtime owner / Pi conversation 三层状态模型
+                |• 修复重复 legacy conversation 所有权与仅按 cwd 重连造成的串会话
+                |• Runtime 独占 history/state 提交并隔离重建客户端与过期事件
                 |• 修复 /resume 把 Pi conversation.id 错当 Android session.id 导致的身份错误
                 |• /resume 显式携带 Android session.id，并阻止其他 runtime 认领切换
                 |• 丢弃 /resume 期间过期的后台 poll，避免覆盖当前 conversation 绑定
@@ -1632,23 +1648,10 @@ private fun PiScreen(
         if (followOutput) showScrollControls = false
     }
 
-    LaunchedEffect(runtime) {
-        var knownSession = currentState?.sessionId.orEmpty()
-        while (isActive) {
-            delay(10_000)
-            if (!runtime.isConnected()) continue
-            bridge.state().onSuccess { state ->
-                if (knownSession.isNotBlank() && state.sessionId.isNotBlank() && state.sessionId != knownSession) {
-                    loadHistory()
-                }
-                knownSession = state.sessionId
-                currentState = state
-            }
-            bridge.stats().onSuccess { currentStats = it }
-        }
-    }
+    // Conversation state/history is published only by PiSessionRuntime. A
+    // second Compose-owned poll previously raced /resume and restored stale data.
 
-    pendingUi?.let { request ->
+    if (autoStart) pendingUi?.let { request ->
         fun sendUiResponse(action: suspend () -> Result<Unit>) {
             pendingUi = null
             runtime.launchTask {
@@ -1670,7 +1673,7 @@ private fun PiScreen(
     }
 
 
-    if (resumeOpen) {
+    if (autoStart && resumeOpen) {
         AlertDialog(
             onDismissRequest = { resumeOpen = false },
             title = { Text("/resume · 选择会话") },
@@ -1699,20 +1702,28 @@ private fun PiScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .clickable(enabled = !session.current) {
-                                        resumeOpen = false
-                                        runtime.launchTask {
-                                            status = "Switching session"
-                                            runtime.switchPiConversation(runtime.id, session.id, session.path).fold(
-                                                onSuccess = {
-                                                    // switchPiConversation() publishes the authoritative
-                                                    // switched snapshot for this Android session only.
-                                                    status = "Ready"
-                                                },
-                                                onFailure = {
-                                                    addSystem("切换 session 失败：${it.message}")
-                                                    status = "Ready"
-                                                }
-                                            )
+                                        if (!onCanBindConversation(runtime.runtimeOwnerSessionId, session.path)) {
+                                            addSystem("该 Pi conversation 已由另一个 Android Session 使用")
+                                        } else {
+                                            resumeOpen = false
+                                            runtime.launchTask {
+                                                status = "Switching session"
+                                                runtime.switchPiConversation(
+                                                    runtime.runtimeOwnerSessionId,
+                                                    session.piConversationId,
+                                                    session.path
+                                                ).fold(
+                                                    onSuccess = {
+                                                        // Runtime publishes the authoritative snapshot
+                                                        // without changing its Android owner.
+                                                        status = "Ready"
+                                                    },
+                                                    onFailure = {
+                                                        addSystem("切换 session 失败：${it.message}")
+                                                        status = "Ready"
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                     .padding(vertical = 10.dp)
@@ -2111,14 +2122,14 @@ private fun PiScreen(
         }
         SessionDrawer(
             sessions = sessions,
-            activeSessionId = activeSessionId,
+            activeAndroidSessionId = activeAndroidSessionId,
             modifier = Modifier
                 .width(drawerWidth)
                 .fillMaxHeight()
                 .offset { IntOffset((-drawerWidthPx * (1f - drawerProgress)).roundToInt(), 0) }
                 .zIndex(2f),
             onSelect = {
-                Log.d(SESSION_SELECTION_TAG, "DRAWER_ITEM_CLICK target=$it ACTIVE_BEFORE=$activeSessionId")
+                Log.d(SESSION_SELECTION_TAG, "DRAWER_ITEM_CLICK target=$it ACTIVE_BEFORE=$activeAndroidSessionId")
                 // Commit the active Android Session first. A failed/unknown
                 // selection must not dismiss the drawer or hide the failure.
                 if (onSelectSession(it)) settleDrawer(0f)
@@ -2143,7 +2154,7 @@ private fun sessionStatusLabel(record: PiSessionRecord): String = when (record.s
 @Composable
 private fun SessionDrawer(
     sessions: List<PiSessionRecord>,
-    activeSessionId: String,
+    activeAndroidSessionId: String,
     modifier: Modifier = Modifier,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
@@ -2176,14 +2187,14 @@ private fun SessionDrawer(
             Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
             contentPadding = PaddingValues(bottom = 12.dp)
         ) {
-            items(sessions, key = { it.id }) { record ->
-                val selected = record.id == activeSessionId
+            items(sessions, key = { it.androidSessionId }) { record ->
+                val selected = record.androidSessionId == activeAndroidSessionId
                 Column(
                     Modifier
                         .fillMaxWidth()
                         .background(if (selected) CardBg else Color.Transparent)
                         .combinedClickable(
-                            onClick = { onSelect(record.id) },
+                            onClick = { onSelect(record.androidSessionId) },
                             onLongClick = { onManage(record) }
                         )
                         .padding(horizontal = 14.dp, vertical = 11.dp)
@@ -2447,7 +2458,7 @@ private fun EmptySessionHost(
         }
         SessionDrawer(
             sessions = emptyList(),
-            activeSessionId = "",
+            activeAndroidSessionId = "",
             modifier = Modifier
                 .width(drawerWidth)
                 .fillMaxHeight()
@@ -3212,7 +3223,7 @@ private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         PanelHeader("/session", onBack)
         val rows = listOf(
-            "Session" to (state?.sessionName?.ifBlank { state.sessionId }.orEmpty()),
+            "Session" to (state?.sessionName?.ifBlank { state.piConversationId }.orEmpty()),
             "File" to (stats?.sessionFile ?: state?.sessionFile.orEmpty()),
             "Messages" to (stats?.totalMessages?.toString() ?: "—"),
             "Input tokens" to (stats?.inputTokens?.toString() ?: "—"),

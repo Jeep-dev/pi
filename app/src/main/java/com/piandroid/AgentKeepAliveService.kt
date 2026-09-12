@@ -56,7 +56,12 @@ class AgentKeepAliveService : Service() {
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
                 val probes = records.map { record ->
                     async {
-                        val endpoint = PiBridge(applicationContext, record.port, record.token, record.id)
+                        val endpoint = PiBridge(
+                            applicationContext,
+                            record.port,
+                            record.token,
+                            record.androidSessionId
+                        )
                         val health = endpoint.health(timeoutMs = 2_500).getOrNull()
                         val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
                         record to (health to state)

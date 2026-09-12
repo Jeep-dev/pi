@@ -146,6 +146,7 @@ const child = spawn(process.execPath, [bridgePath], {
     PREFIX: prefix,
     PI_ANDROID_PORT: String(port),
     PI_ANDROID_TOKEN: token,
+    PI_ANDROID_ENDPOINT_KEY: "auth-test",
     PI_ANDROID_MAX_EVENT_BYTES: String(1024 * 1024),
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -169,7 +170,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-12.2");
+  assert.equal(health.bridgeVersion, "2026-09-12.3");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
@@ -178,6 +179,7 @@ try {
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
   assert.ok(health.capabilities.includes("bounded-event-cache-v1"));
   assert.ok(health.capabilities.includes("hard-stop-v1"));
+  assert.ok(health.capabilities.includes("conversation-owner-v1"));
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -232,7 +234,7 @@ try {
   const sessionDirectory = path.join(home, ".pi", "agent", "sessions", sessionDirectoryName);
   const activeSession = path.join(sessionDirectory, "active.jsonl");
   await mkdir(sessionDirectory, { recursive: true });
-  await writeFile(activeSession, "{}\n");
+  await writeFile(activeSession, JSON.stringify({ type: "session", version: 3, id: "test", cwd: home }) + "\n");
   await symlink("/etc/passwd", path.join(sessionDirectory, "leak.jsonl"));
   const listedSessions = await fetch(`http://127.0.0.1:${port}/sessions`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -244,7 +246,11 @@ try {
   const switched = await fetch(`http://127.0.0.1:${port}/switch-session`, {
     method: "POST",
     headers: startHeaders,
-    body: JSON.stringify({ path: activeSession }),
+    body: JSON.stringify({
+      androidSessionId: "auth-test",
+      piConversationId: "test",
+      path: activeSession,
+    }),
   });
   assert.equal(switched.status, 200, `session switch failed: ${await switched.text()}`);
   const switchedHealth = await fetch(`http://127.0.0.1:${port}/health`, {

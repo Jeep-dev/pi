@@ -252,7 +252,11 @@ function userTexts(items) {
 async function switchPath(record, androidSessionId, targetPath) {
   const response = await request(record, "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId, path: targetPath }),
+    body: JSON.stringify({
+      androidSessionId,
+      piConversationId: path.basename(targetPath, ".jsonl"),
+      path: targetPath,
+    }),
   });
   const text = await response.text();
   assert.equal(response.status, 200, text);
@@ -284,16 +288,26 @@ try {
   assert.equal(listedLegacyPath, legacyPath);
   const wrongOwner = await request(records[0], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "B", path: a1Path }),
+    body: JSON.stringify({ androidSessionId: "B", piConversationId: "A1", path: a1Path }),
   });
   assert.equal(wrongOwner.status, 500, "a Bridge must reject a resume tagged for another Android Session");
+  const wrongConversation = await request(records[0], "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({
+      androidSessionId: "A",
+      piConversationId: "conversation-that-is-not-A1",
+      path: a1Path,
+    }),
+  });
+  assert.equal(wrongConversation.status, 500, "a Bridge must reject a mismatched Pi conversation ID before switching");
+  assert.deepEqual(userTexts(await history(records[0])), ["BBB"]);
   const aHealthBefore = await request(records[0], "/health").then(response => response.json());
   const bHealthBefore = await request(records[1], "/health").then(response => response.json());
   const cHealthBefore = await request(records[2], "/health").then(response => response.json());
 
   const switchedA1 = await request(records[0], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "A", path: a1Path }),
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "A1", path: a1Path }),
   }).then(async response => {
     const text = await response.text();
     assert.equal(response.status, 200, text);
@@ -313,7 +327,7 @@ try {
 
   const switchedA2 = await request(records[0], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "A", path: a2Path }),
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "A2", path: a2Path }),
   }).then(async response => {
     const text = await response.text();
     assert.equal(response.status, 200, text);
@@ -324,7 +338,7 @@ try {
 
   const switchedLegacy = await request(records[0], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "A", path: listedLegacyPath }),
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "LEGACY", path: listedLegacyPath }),
   }).then(async response => {
     const text = await response.text();
     assert.equal(response.status, 200, text);
@@ -354,7 +368,7 @@ try {
   const c2Path = cSessions.sessions.find(session => path.basename(session.path) === "C2.jsonl").path;
   const switchedB1 = await request(records[1], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "B", path: b1Path }),
+    body: JSON.stringify({ androidSessionId: "B", piConversationId: "B1", path: b1Path }),
   });
   assert.equal(switchedB1.status, 200);
   const switchedB1State = (await switchedB1.clone().json()).state;
@@ -367,7 +381,7 @@ try {
   assert.deepEqual(userTexts(await history(records[1])), ["B-first"]);
   const switchedC1 = await request(records[2], "/switch-session", {
     method: "POST",
-    body: JSON.stringify({ androidSessionId: "C", path: c1Path }),
+    body: JSON.stringify({ androidSessionId: "C", piConversationId: "C1", path: c1Path }),
   });
   assert.equal(switchedC1.status, 200);
   const switchedC1State = (await switchedC1.clone().json()).state;

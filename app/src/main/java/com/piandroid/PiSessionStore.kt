@@ -13,7 +13,7 @@ internal enum class PiSessionStatus {
 }
 
 internal data class PiSessionRecord(
-    val id: String,
+    val androidSessionId: String,
     val name: String,
     val cwd: String,
     val launchCommand: String,
@@ -21,7 +21,7 @@ internal data class PiSessionRecord(
     val token: String,
     val startupArguments: String = "",
     val sessionFile: String = "",
-    val piSessionId: String = "",
+    val piConversationId: String = "",
     val status: PiSessionStatus = PiSessionStatus.NOT_STARTED,
     val lastActivity: Long = 0L,
     val lastError: String = "",
@@ -42,6 +42,59 @@ internal fun isPrivatePiSessionFile(androidSessionId: String, sessionFile: Strin
     return normalized.contains("/.pi/android/sessions/$androidSessionId/pi-sessions/")
 }
 
+private fun isAnyPrivatePiSessionFile(sessionFile: String): Boolean =
+    sessionFile.replace('\\', '/').contains("/.pi/android/sessions/")
+
+internal fun conversationFileKey(sessionFile: String): String =
+    sessionFile.trim().replace('\\', '/').replace(Regex("/{2,}"), "/")
+
+internal fun samePiConversationFile(left: String, right: String): Boolean =
+    left.isNotBlank() && right.isNotBlank() && conversationFileKey(left) == conversationFileKey(right)
+
+/**
+ * A Pi conversation file has exactly one Android owner. Legacy files remain in
+ * place and discoverable, but an old contaminated registry cannot bind the
+ * same JSONL file to several Android Sessions.
+ */
+internal fun isolatePiConversationOwnership(
+    records: List<PiSessionRecord>,
+    preferredAndroidSessionId: String? = null
+): List<PiSessionRecord> {
+    val prepared = records.map { record ->
+        val file = conversationFileKey(record.sessionFile)
+        val privateForOwner = file.isBlank() || isPrivatePiSessionFile(record.androidSessionId, file)
+        if (file.isNotBlank() && !privateForOwner && record.androidSessionId == PiSessionStore.DEFAULT_ID) {
+            record.copy(legacySessionFile = true)
+        } else {
+            record
+        }
+    }
+    val winnerByFile = prepared
+        .filter { it.sessionFile.isNotBlank() }
+        .groupBy { conversationFileKey(it.sessionFile) }
+        .mapValues { (_, owners) ->
+            owners.firstOrNull { it.androidSessionId == preferredAndroidSessionId }?.androidSessionId
+                ?: owners.first().androidSessionId
+        }
+    return prepared.map { record ->
+        val file = conversationFileKey(record.sessionFile)
+        val privateForOwner = file.isBlank() || isPrivatePiSessionFile(record.androidSessionId, file)
+        val pointsIntoAnotherPrivateNamespace = file.isNotBlank() && isAnyPrivatePiSessionFile(file) && !privateForOwner
+        val untrustedLegacyPointer = file.isNotBlank() && !privateForOwner && !record.legacySessionFile
+        val duplicateOwner = file.isNotBlank() && winnerByFile[file] != record.androidSessionId
+        if (pointsIntoAnotherPrivateNamespace || untrustedLegacyPointer || duplicateOwner) {
+            record.copy(
+                sessionFile = "",
+                ownedSessionFile = "",
+                piConversationId = record.androidSessionId,
+                legacySessionFile = false
+            )
+        } else {
+            record
+        }
+    }
+}
+
 internal fun sessionDisplayName(record: PiSessionRecord): String =
     record.displayName.trim().ifBlank { record.name.trim().ifBlank { "Pi" } }
 
@@ -56,30 +109,30 @@ internal fun renamePiSession(
     id: String,
     displayName: String
 ): List<PiSessionRecord> = records.map { record ->
-    if (record.id == id) record.copy(displayName = displayName.trim().replace(Regex("[\\r\\n]+"), " ")) else record
+    if (record.androidSessionId == id) record.copy(displayName = displayName.trim().replace(Regex("[\\r\\n]+"), " ")) else record
 }
 
 internal fun togglePiSessionPinned(records: List<PiSessionRecord>, id: String): List<PiSessionRecord> =
-    orderPiSessions(records.map { record -> if (record.id == id) record.copy(pinned = !record.pinned) else record })
+    orderPiSessions(records.map { record -> if (record.androidSessionId == id) record.copy(pinned = !record.pinned) else record })
 
 internal fun removePiSession(records: List<PiSessionRecord>, id: String): List<PiSessionRecord> =
-    records.filterNot { it.id == id }
+    records.filterNot { it.androidSessionId == id }
 
 internal fun selectPiSessionId(records: List<PiSessionRecord>, requestedId: String): String? =
-    requestedId.takeIf { id -> records.any { it.id == id } }
+    requestedId.takeIf { id -> records.any { it.androidSessionId == id } }
 
 /** Poll results may be stale when /resume updates the record concurrently. */
 internal fun sessionPollIdentityMatches(
     pollSnapshot: PiSessionRecord,
     current: PiSessionRecord
-): Boolean = pollSnapshot.id == current.id &&
+): Boolean = pollSnapshot.androidSessionId == current.androidSessionId &&
     pollSnapshot.cwd == current.cwd &&
     pollSnapshot.launchCommand == current.launchCommand &&
     pollSnapshot.port == current.port &&
     pollSnapshot.token == current.token &&
     pollSnapshot.startupArguments == current.startupArguments &&
     pollSnapshot.sessionFile == current.sessionFile &&
-    pollSnapshot.piSessionId == current.piSessionId &&
+    pollSnapshot.piConversationId == current.piConversationId &&
     pollSnapshot.ownedSessionFile == current.ownedSessionFile &&
     pollSnapshot.sessionDirectory == current.sessionDirectory &&
     pollSnapshot.legacySessionFile == current.legacySessionFile
@@ -89,11 +142,11 @@ internal fun mergePolledSessions(
     current: List<PiSessionRecord>,
     refreshed: List<PiSessionRecord>
 ): List<PiSessionRecord> {
-    val beforeById = pollSnapshot.associateBy { it.id }
-    val refreshedById = refreshed.associateBy { it.id }
+    val beforeById = pollSnapshot.associateBy { it.androidSessionId }
+    val refreshedById = refreshed.associateBy { it.androidSessionId }
     return current.map { record ->
-        val polled = refreshedById[record.id]
-        val before = beforeById[record.id]
+        val polled = refreshedById[record.androidSessionId]
+        val before = beforeById[record.androidSessionId]
         if (polled != null && before != null && sessionPollIdentityMatches(before, record)) {
             polled.copy(
                 displayName = record.displayName,
@@ -110,7 +163,7 @@ internal fun nextPiSessionIdAfterDelete(
     recordsAfterDelete: List<PiSessionRecord>,
     deletedId: String,
     activeId: String?
-): String? = if (activeId == deletedId) recordsAfterDelete.firstOrNull()?.id else activeId
+): String? = if (activeId == deletedId) recordsAfterDelete.firstOrNull()?.androidSessionId else activeId
 
 internal data class PiSessionDeleteResult(
     val remaining: List<PiSessionRecord>,
@@ -145,23 +198,23 @@ internal class PiSessionStore(context: Context) {
         if (loaded.isNotEmpty()) {
             // Persist migrations (private session namespace, repaired ports/tokens,
             // and pinned/display metadata) before any runtime is started.
-            save(loaded, activeId()?.takeIf { id -> loaded.any { it.id == id } })
+            save(loaded, activeId()?.takeIf { id -> loaded.any { it.androidSessionId == id } })
             return loaded
         }
         // An explicit [] means the user deleted the last Session. Do not
         // silently recreate it on the next Activity/process start.
         if (preferences.contains(KEY_RECORDS)) return emptyList()
         val default = PiSessionRecord(
-            id = DEFAULT_ID,
+            androidSessionId = DEFAULT_ID,
             name = "Pi",
             cwd = DEFAULT_CWD,
             launchCommand = defaultLaunchCommand(DEFAULT_ID),
             port = DEFAULT_PORT,
             token = PiBridge.endpointToken(context = appContext, key = DEFAULT_ID),
-            piSessionId = DEFAULT_ID,
+            piConversationId = DEFAULT_ID,
             sessionDirectory = sessionDirectory(DEFAULT_ID)
         )
-        save(listOf(default), default.id)
+        save(listOf(default), default.androidSessionId)
         return listOf(default)
     }
 
@@ -195,7 +248,7 @@ internal class PiSessionStore(context: Context) {
                     val command = ensurePiSessionIdentity(rawCommand, id, directory)
                     add(
                         PiSessionRecord(
-                            id = id,
+                            androidSessionId = id,
                             name = item.optString("name").ifBlank { "Pi" },
                             cwd = cwd,
                             launchCommand = command,
@@ -203,7 +256,9 @@ internal class PiSessionStore(context: Context) {
                             token = token,
                             startupArguments = item.optString("startupArguments").trim(),
                             sessionFile = sessionFile,
-                            piSessionId = item.optString("piSessionId").trim().ifBlank {
+                            piConversationId = item.optString("piConversationId")
+                                .ifBlank { item.optString("piSessionId") }
+                                .trim().ifBlank {
                                 if (sessionFile.isBlank()) id else ""
                             },
                             // Process handles are intentionally not persisted. A new App
@@ -220,24 +275,10 @@ internal class PiSessionStore(context: Context) {
                     )
                 }
             }
-            val claimedFiles = mutableSetOf<String>()
-            val isolated = loaded.map { record ->
-                val file = record.sessionFile.replace('\\', '/')
-                val privateMarker = "/.pi/android/sessions/${record.id}/pi-sessions/"
-                val isPrivate = file.isBlank() || file.contains(privateMarker)
-                val duplicate = file.isNotBlank() && isPrivate && !claimedFiles.add(file)
-                val unsafeLegacyPointer = file.isNotBlank() && !isPrivate && !record.legacySessionFile && record.id != DEFAULT_ID
-                if ((unsafeLegacyPointer || duplicate) && file.isNotBlank()) {
-                    // Old registries could point several Android records at Pi's
-                    // cwd-wide latest session. Drop only the unsafe pointer; the
-                    // old JSONL remains untouched and this record gets a new
-                    // exact --session-id in its private directory.
-                    record.copy(sessionFile = "", ownedSessionFile = "", piSessionId = record.id)
-                } else {
-                    record
-                }
-            }
-            orderPiSessions(isolated)
+            // Preserve the active owner's selected legacy conversation when an
+            // old registry contains duplicate pointers. Other records are reset
+            // to their own private identity; no legacy file is moved or deleted.
+            orderPiSessions(isolatePiConversationOwnership(loaded, activeId()))
         }.getOrDefault(emptyList())
     }
 
@@ -248,7 +289,7 @@ internal class PiSessionStore(context: Context) {
         records.forEach { record ->
             array.put(
                 JSONObject()
-                    .put("id", record.id)
+                    .put("id", record.androidSessionId)
                     .put("name", record.name)
                     .put("displayName", record.displayName)
                     .put("cwd", record.cwd)
@@ -259,7 +300,7 @@ internal class PiSessionStore(context: Context) {
                     .put("sessionFile", record.sessionFile)
                     .put("ownedSessionFile", record.ownedSessionFile)
                     .put("sessionDirectory", record.sessionDirectory)
-                    .put("piSessionId", record.piSessionId)
+                    .put("piConversationId", record.piConversationId)
                     .put("pinned", record.pinned)
                     .put("legacySessionFile", record.legacySessionFile)
                     .put("status", record.status.name)
@@ -297,7 +338,7 @@ internal class PiSessionStore(context: Context) {
             ensurePiSessionIdentity(inherited, id, directory)
         }
         return PiSessionRecord(
-            id = id,
+            androidSessionId = id,
             name = visibleName,
             displayName = visibleName,
             cwd = cwd.trim().ifBlank { DEFAULT_CWD },
@@ -305,7 +346,7 @@ internal class PiSessionStore(context: Context) {
             port = port,
             token = PiBridge.endpointToken(context = appContext, key = id),
             startupArguments = startupArguments.trim(),
-            piSessionId = id,
+            piConversationId = id,
             sessionDirectory = directory
         )
     }
