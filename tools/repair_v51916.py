@@ -3,8 +3,6 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "app/src/main/java/com/piandroid/MainActivity.kt"
-GRADLE = ROOT / "app/build.gradle.kts"
-ANDROID_YML = ROOT / ".github/workflows/android.yml"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -139,14 +137,4 @@ main = replace_once(
     'changelog version',
 )
 MAIN.write_text(main)
-
-gradle = GRADLE.read_text()
-gradle = replace_once(gradle, 'versionCode = 115', 'versionCode = 116', 'versionCode')
-gradle = replace_once(gradle, 'versionName = "5.19.16"', 'versionName = "5.19.17"', 'versionName')
-GRADLE.write_text(gradle)
-
-workflow = ANDROID_YML.read_text()
-workflow = replace_once(workflow, 'pi-android-v5.19.16-apks', 'pi-android-v5.19.17-apks', 'artifact version')
-ANDROID_YML.write_text(workflow)
-
 print("v5.19.17 startup settings repair applied")
