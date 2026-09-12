@@ -511,17 +511,26 @@ internal class PiSessionRuntime(
             )
         }
         val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()
+        // The app-level default model is global for every newly created Android
+        // Session. Recovery keeps the model already stored in that Pi conversation.
+        val startedState = if (!preserveSession && bridge.defaultModelKey().isNotBlank()) {
+            val availableModels = bridge.models().getOrThrow()
+            bridge.applyDefaultModel(availableModels).getOrThrow()
+            bridge.state(timeoutMs = 8_000).getOrThrow()
+        } else {
+            started
+        }
         val runtimeHealth = bridge.health(timeoutMs = 8_000).getOrThrow()
         check(runtimeHealth.runtimeOwnerSessionId == runtimeOwnerSessionId) {
             "Bridge owner mismatch: expected=$runtimeOwnerSessionId actual=${runtimeHealth.runtimeOwnerSessionId}"
         }
-        check(runtimeConversationMatches(configuredRecord, started)) {
+        check(runtimeConversationMatches(configuredRecord, startedState)) {
             "Pi conversation mismatch after start: expected=${configuredRecord.piConversationId}/${configuredRecord.sessionFile} " +
-                "actual=${started.piConversationId}/${started.sessionFile}"
+                "actual=${startedState.piConversationId}/${startedState.sessionFile}"
         }
         val snapshot = bridge.recoverySnapshot().getOrThrow()
         return PiRuntimeReady(
-            state = started,
+            state = startedState,
             snapshot = snapshot,
             runtimeCwd = runtimeHealth.cwd,
             reconnecting = true

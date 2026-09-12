@@ -1777,7 +1777,7 @@ private fun PiScreen(
             .statusBarsPadding()
             .background(Bg)
             .pointerInput(Unit) {
-                val edgeExclusion = with(density) { 72.dp.toPx() }
+                val edgeExclusion = with(density) { 24.dp.toPx() }
                 val contentTop = with(density) { 32.dp.toPx() }
                 val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
@@ -2406,7 +2406,7 @@ private fun EmptySessionHost(
             .statusBarsPadding()
             .background(Bg)
             .pointerInput(Unit) {
-                val edgeExclusion = with(density) { 72.dp.toPx() }
+                val edgeExclusion = with(density) { 24.dp.toPx() }
                 val contentTop = with(density) { 32.dp.toPx() }
                 val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
