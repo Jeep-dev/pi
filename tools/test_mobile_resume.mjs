@@ -259,6 +259,9 @@ try {
   assert.equal(aStart.state.sessionId, "A2");
   assert.equal(bStart.state.sessionId, "B2");
   assert.equal(cStart.state.sessionId, "C2");
+  assert.equal(path.basename(aStart.state.sessionFile), "A2.jsonl");
+  assert.equal(path.basename(bStart.state.sessionFile), "B2.jsonl");
+  assert.equal(path.basename(cStart.state.sessionFile), "C2.jsonl");
 
   const listed = await request(records[0], "/sessions").then(response => response.json());
   assert.deepEqual(
@@ -324,10 +327,12 @@ try {
   assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"]);
 
   const bHealthAfterSwitch = await request(records[1], "/health").then(response => response.json());
+  assert.equal(bHealthAfterSwitch.port, bHealthBefore.port);
   assert.equal(bHealthAfterSwitch.bridgePid, bHealthBefore.bridgePid, "switching A must not replace B's Bridge");
   assert.equal(bHealthAfterSwitch.piPid, bHealthBefore.piPid, "switching A must not replace B's Pi");
   assert.deepEqual(userTexts(await history(records[1])), ["B-current"], "B remains independent while A resumes");
   const cHealthAfterA = await request(records[2], "/health").then(response => response.json());
+  assert.equal(cHealthAfterA.port, cHealthBefore.port);
   assert.equal(cHealthAfterA.bridgePid, cHealthBefore.bridgePid, "switching A must not replace C's Bridge");
   assert.equal(cHealthAfterA.piPid, cHealthBefore.piPid, "switching A must not replace C's Pi");
   assert.deepEqual(userTexts(await history(records[2])), ["C-current"], "C remains independent while A resumes");
@@ -341,12 +346,26 @@ try {
     body: JSON.stringify({ androidSessionId: "B", path: b1Path }),
   });
   assert.equal(switchedB1.status, 200);
+  const switchedB1State = (await switchedB1.clone().json()).state;
+  assert.equal(switchedB1State.sessionId, "B1");
+  assert.equal(switchedB1State.sessionFile, b1Path);
+  const bHealthAfterResume = await request(records[1], "/health").then(response => response.json());
+  assert.equal(bHealthAfterResume.port, bHealthBefore.port);
+  assert.equal(bHealthAfterResume.bridgePid, bHealthBefore.bridgePid);
+  assert.equal(bHealthAfterResume.piPid, bHealthBefore.piPid);
   assert.deepEqual(userTexts(await history(records[1])), ["B-first"]);
   const switchedC1 = await request(records[2], "/switch-session", {
     method: "POST",
     body: JSON.stringify({ androidSessionId: "C", path: c1Path }),
   });
   assert.equal(switchedC1.status, 200);
+  const switchedC1State = (await switchedC1.clone().json()).state;
+  assert.equal(switchedC1State.sessionId, "C1");
+  assert.equal(switchedC1State.sessionFile, c1Path);
+  const cHealthAfterResume = await request(records[2], "/health").then(response => response.json());
+  assert.equal(cHealthAfterResume.port, cHealthBefore.port);
+  assert.equal(cHealthAfterResume.bridgePid, cHealthBefore.bridgePid);
+  assert.equal(cHealthAfterResume.piPid, cHealthBefore.piPid);
   assert.deepEqual(userTexts(await history(records[2])), ["C-first"]);
   assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"], "B/C resume must not change A");
 
@@ -362,6 +381,14 @@ try {
   assert.equal(aHealthAfterRestart.port, records[0].port);
   assert.notEqual(aHealthAfterRestart.bridgePid, aHealthBefore.bridgePid);
   assert.deepEqual(userTexts(await history(records[0])), ["LEGACY", "after-legacy"]);
+  const bHealthAfterARebuild = await request(records[1], "/health").then(response => response.json());
+  const cHealthAfterARebuild = await request(records[2], "/health").then(response => response.json());
+  assert.equal(bHealthAfterARebuild.port, bHealthBefore.port);
+  assert.equal(bHealthAfterARebuild.bridgePid, bHealthBefore.bridgePid);
+  assert.equal(bHealthAfterARebuild.piPid, bHealthBefore.piPid);
+  assert.equal(cHealthAfterARebuild.port, cHealthBefore.port);
+  assert.equal(cHealthAfterARebuild.bridgePid, cHealthBefore.bridgePid);
+  assert.equal(cHealthAfterARebuild.piPid, cHealthBefore.piPid);
   assert.deepEqual(userTexts(await history(records[1])), ["B-first"], "B must remain unaffected by A restart and resume");
   assert.deepEqual(userTexts(await history(records[2])), ["C-first"], "C must remain unaffected by A restart and resume");
 
