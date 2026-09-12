@@ -362,7 +362,7 @@ internal class PiSessionRuntime(
         val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()
         val runtimeHealth = bridge.health(timeoutMs = 8_000).getOrThrow()
         val snapshot = bridge.recoverySnapshot().getOrThrow()
-        PiRuntimeReady(
+        return PiRuntimeReady(
             state = started,
             snapshot = snapshot,
             runtimeCwd = runtimeHealth.cwd,
