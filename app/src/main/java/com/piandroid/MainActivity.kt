@@ -494,8 +494,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 async(Dispatchers.IO) { pollPiSession(context, record) }
             }.awaitAll()
             val current = latestSessions
-            val byId = refreshed.associateBy { it.id }
-            val merged = current.map { byId[it.id] ?: it }
+            val merged = mergePolledSessions(snapshot, current, refreshed)
             if (merged != current) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
@@ -1445,7 +1444,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.6
+                """Pi Android v5.19.7
+                |• /resume 显式携带 Android session.id，并阻止其他 runtime 认领切换
+                |• 丢弃 /resume 期间过期的后台 poll，避免覆盖当前 conversation 绑定
                 |• Session 选择全链路只使用 Android session.id，并记录切换诊断日志
                 |• Session 条目先提交 activeSession，再关闭侧栏，修复点击无效
                 |• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史
@@ -1700,10 +1701,10 @@ private fun PiScreen(
                                         resumeOpen = false
                                         runtime.launchTask {
                                             status = "Switching session"
-                                            runtime.switchPiConversation(session.path).fold(
+                                            runtime.switchPiConversation(session.id, session.path).fold(
                                                 onSuccess = {
                                                     // switchPiConversation() publishes the authoritative
-                                                    // switched snapshot through the runtime collector.
+                                                    // switched snapshot for this Android session only.
                                                     status = "Ready"
                                                 },
                                                 onFailure = {

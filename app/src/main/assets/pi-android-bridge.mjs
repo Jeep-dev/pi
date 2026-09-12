@@ -1076,6 +1076,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/switch-session") {
       if (stopFence) throw new Error("Stop in progress; session switch rejected");
       const input = JSON.parse(await readBody(req) || "{}");
+      const requestedAndroidSessionId = String(input.androidSessionId || "").trim();
+      const endpointAndroidSessionId = String(process.env.PI_ANDROID_ENDPOINT_KEY || "").trim();
+      if (requestedAndroidSessionId && endpointAndroidSessionId && requestedAndroidSessionId !== endpointAndroidSessionId) {
+        throw new Error("Android Session identity mismatch");
+      }
       const target = path.resolve(String(input.path || ""));
       const sessionRoots = [];
       for (const directory of sessionDiscoveryDirectories()) {

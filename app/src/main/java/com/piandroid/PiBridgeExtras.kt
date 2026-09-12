@@ -87,10 +87,16 @@ suspend fun PiBridge.sessions(): Result<List<PiSession>> = request("/sessions", 
     }
 }
 
-suspend fun PiBridge.switchSession(sessionPath: String): Result<PiState> = withContext(Dispatchers.IO) {
+suspend fun PiBridge.switchSession(sessionPath: String): Result<PiState> =
+    switchSession("", sessionPath)
+
+suspend fun PiBridge.switchSession(androidSessionId: String, sessionPath: String): Result<PiState> = withContext(Dispatchers.IO) {
     request(
         "/switch-session",
-        JSONObject().put("path", sessionPath).toString(),
+        JSONObject()
+            .put("androidSessionId", androidSessionId)
+            .put("path", sessionPath)
+            .toString(),
         70_000
     ).mapCatching { raw ->
         val state = JSONObject(raw).optJSONObject("state")

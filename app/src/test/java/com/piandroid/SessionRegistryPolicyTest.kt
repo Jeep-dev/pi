@@ -113,6 +113,20 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
+    fun stalePollCannotOverwriteAResumedConversationBinding() {
+        val before = listOf(
+            PiSessionRecord("a", "A", "/tmp", "pi", 17650, "token-a", sessionFile = "/tmp/A1.jsonl", piSessionId = "A1"),
+            PiSessionRecord("b", "B", "/tmp", "pi", 17651, "token-b", sessionFile = "/tmp/B1.jsonl", piSessionId = "B1")
+        )
+        val current = before.map { if (it.id == "a") it.copy(sessionFile = "/tmp/A2.jsonl", piSessionId = "A2") else it }
+        val staleRefresh = before.map { it.copy(status = PiSessionStatus.IDLE) }
+        val merged = mergePolledSessions(before, current, staleRefresh)
+        assertEquals("/tmp/A2.jsonl", merged.single { it.id == "a" }.sessionFile)
+        assertEquals("A2", merged.single { it.id == "a" }.piSessionId)
+        assertEquals("/tmp/B1.jsonl", merged.single { it.id == "b" }.sessionFile)
+    }
+
+    @Test
     fun resumingChangesOnlyThePiConversationBinding() {
         val original = PiSessionRecord(
             id = "android-a",

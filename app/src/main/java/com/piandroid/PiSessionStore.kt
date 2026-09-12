@@ -68,6 +68,44 @@ internal fun removePiSession(records: List<PiSessionRecord>, id: String): List<P
 internal fun selectPiSessionId(records: List<PiSessionRecord>, requestedId: String): String? =
     requestedId.takeIf { id -> records.any { it.id == id } }
 
+/** Poll results may be stale when /resume updates the record concurrently. */
+internal fun sessionPollIdentityMatches(
+    pollSnapshot: PiSessionRecord,
+    current: PiSessionRecord
+): Boolean = pollSnapshot.id == current.id &&
+    pollSnapshot.cwd == current.cwd &&
+    pollSnapshot.launchCommand == current.launchCommand &&
+    pollSnapshot.port == current.port &&
+    pollSnapshot.token == current.token &&
+    pollSnapshot.startupArguments == current.startupArguments &&
+    pollSnapshot.sessionFile == current.sessionFile &&
+    pollSnapshot.piSessionId == current.piSessionId &&
+    pollSnapshot.ownedSessionFile == current.ownedSessionFile &&
+    pollSnapshot.sessionDirectory == current.sessionDirectory &&
+    pollSnapshot.legacySessionFile == current.legacySessionFile
+
+internal fun mergePolledSessions(
+    pollSnapshot: List<PiSessionRecord>,
+    current: List<PiSessionRecord>,
+    refreshed: List<PiSessionRecord>
+): List<PiSessionRecord> {
+    val beforeById = pollSnapshot.associateBy { it.id }
+    val refreshedById = refreshed.associateBy { it.id }
+    return current.map { record ->
+        val polled = refreshedById[record.id]
+        val before = beforeById[record.id]
+        if (polled != null && before != null && sessionPollIdentityMatches(before, record)) {
+            polled.copy(
+                displayName = record.displayName,
+                pinned = record.pinned,
+                ownedSessionFile = record.ownedSessionFile
+            )
+        } else {
+            record
+        }
+    }
+}
+
 internal fun nextPiSessionIdAfterDelete(
     recordsAfterDelete: List<PiSessionRecord>,
     deletedId: String,

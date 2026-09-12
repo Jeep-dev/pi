@@ -214,8 +214,9 @@ internal class PiSessionRuntime(
         }
     }
 
-    /** Switch the Pi conversation while preserving this Android Session runtime. */
-    suspend fun switchPiConversation(sessionPath: String): Result<PiRuntimeReady> = runCatching {
+    /** Switch only the conversation owned by the initiating Android Session. */
+    suspend fun switchPiConversation(androidSessionId: String, sessionPath: String): Result<PiRuntimeReady> = runCatching {
+        check(id == androidSessionId) { "Pi Session identity mismatch" }
         connectMutex.withLock {
             synchronized(stateLock) {
                 check(!closed) { "Pi Session runtime is closed" }
@@ -223,7 +224,7 @@ internal class PiSessionRuntime(
                 // Invalidate any in-flight event poll for the old conversation.
                 conversationGeneration++
             }
-            val switched = bridge.switchSession(sessionPath).getOrThrow()
+            val switched = bridge.switchSession(androidSessionId, sessionPath).getOrThrow()
             val snapshot = bridge.recoverySnapshot().getOrThrow()
             synchronized(stateLock) {
                 check(!closed) { "Pi Session runtime is closed" }
