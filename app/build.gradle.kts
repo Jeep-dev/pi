@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.20 hotfix (120): deterministic bottom-follow state and layout watcher.
+// v5.19.20 hotfix build 120: deterministic bottom-follow state plus measured-layout watcher.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
