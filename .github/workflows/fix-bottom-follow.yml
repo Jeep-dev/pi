@@ -25,6 +25,7 @@ jobs:
 
           main_path = Path('app/src/main/java/com/piandroid/MainActivity.kt')
           build_path = Path('app/build.gradle.kts')
+          test_path = Path('tools/test_active_session_ui.mjs')
           main = main_path.read_text()
 
           start_marker = '    val userScrollLock = remember(listState) {'
@@ -43,7 +44,8 @@ jobs:
                   }
 
                   override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                      val userActuallyMoved = source == NestedScrollSource.UserInput && abs(consumed.y) > 0.5f
+                      val verticalMovement = abs(consumed.y) > abs(consumed.x) && abs(consumed.y) > 0.5f
+                      val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement
                       if (userActuallyMoved) {
                           onUserScrollActivity()
                           onFollowChange(isAtBottom())
@@ -111,7 +113,6 @@ jobs:
                   + changelog_line,
                   1,
               )
-
           main_path.write_text(main)
 
           build = build_path.read_text()
@@ -125,11 +126,22 @@ jobs:
               1,
           )
           build_path.write_text(build)
+
+          test = test_path.read_text()
+          old = 'assert.ok(main.includes("abs(available.y) > abs(available.x)"), "horizontal table/code scrolling must not disable bottom follow");'
+          new = '''assert.ok(main.includes("val verticalMovement = abs(consumed.y) > abs(consumed.x)"), "only real vertical list movement may change bottom follow");
+          assert.ok(main.includes("val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement"), "bottom follow must ignore non-user/programmatic scrolling");
+          assert.ok(main.includes("Observe measured LazyColumn geometry as well as message data"), "late tool/Markdown layout growth must retrigger bottom follow");'''
+          if old in test:
+              test = test.replace(old, new, 1)
+          elif 'late tool/Markdown layout growth must retrigger bottom follow' not in test:
+              raise SystemExit('could not update bottom-follow test guard')
+          test_path.write_text(test)
           PY
       - name: Verify patch
         run: |
           git diff --check
-          grep -q 'val userActuallyMoved = source == NestedScrollSource.UserInput' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'Observe measured LazyColumn geometry as well as message data' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'chatListState.isScrollInProgress' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'versionCode = 120' app/build.gradle.kts
@@ -142,6 +154,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts tools/test_active_session_ui.mjs
           git commit -m "Make bottom follow deterministic across delayed tool reflow"
           git push origin HEAD:fix/security-lifecycle-build
