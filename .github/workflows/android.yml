@@ -1,4 +1,5 @@
 name: Build Pi Android
+
 on:
   workflow_dispatch:
   push:
@@ -17,22 +18,10 @@ on:
       - "settings.gradle.kts"
       - "gradle/**"
       - ".github/workflows/android.yml"
-  pull_request:
-    paths:
-      - "app/**"
-      - "tools/test_bridge_auth.mjs"
-      - "tools/test_mobile_tree.mjs"
-      - "tools/test_mobile_fork.mjs"
-      - "tools/test_mobile_resources.mjs"
-      - "tools/test_multi_session_bridge.mjs"
-      - "tools/test_active_session_ui.mjs"
-      - "tools/test_mobile_resume.mjs"
-      - "tools/test_stop_fence.mjs"
-      - "tools/test_themes.mjs"
-      - "build.gradle.kts"
-      - "settings.gradle.kts"
-      - "gradle/**"
-      - ".github/workflows/android.yml"
+
+concurrency:
+  group: build-pi-android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
