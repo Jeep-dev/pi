@@ -178,7 +178,7 @@ private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
         val chars = rows.maxOf { it.getOrNull(column)?.length ?: 0 }.coerceIn(8, 32)
         (chars * 7 + 18).dp
     }
-    Column(Modifier.horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {
+    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {
         rows.forEachIndexed { rowIndex, row ->
             Row {
                 for (column in 0 until columns) {

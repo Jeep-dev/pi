@@ -1499,7 +1499,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.17
+                """Pi Android v5.19.18
+                |• Markdown 表格和代码块优先接管横向滑动，不再误触 Session 侧栏
+                |• 宽表格使用完整屏幕宽度作为横向滚动视口，可左右查看全部列
                 |• /settings 显示并可编辑每个 Session 的附加启动参数
                 |• 按 Pi 原生 CLI 分类提示常用模型、工具、资源和提示词启动参数
                 |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面
@@ -1834,7 +1836,7 @@ private fun PiScreen(
                 val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
                     val startProgress = currentDrawerProgress.value
                     val chatArea = size.height * 0.86f
                     val inSessionGestureZone =
@@ -1844,8 +1846,11 @@ private fun PiScreen(
                     var dragging = false
                     if (drawerWidthPx <= 0f) return@awaitEachGesture
                     while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val event = awaitPointerEvent(PointerEventPass.Final)
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        // Horizontal child surfaces (Markdown tables/code blocks, attachment rows, etc.)
+                        // get first refusal. The Session drawer only owns an unconsumed horizontal drag.
+                        if (startProgress <= 0.01f && change.isConsumed) return@awaitEachGesture
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
                         val dx = change.position.x - down.position.x
                         val dy = change.position.y - down.position.y

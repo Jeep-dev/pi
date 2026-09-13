@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const main = await readFile("app/src/main/java/com/piandroid/MainActivity.kt", "utf8");
 const runtime = await readFile("app/src/main/java/com/piandroid/PiSessionRuntime.kt", "utf8");
+const markdown = await readFile("app/src/main/java/com/piandroid/MarkdownContent.kt", "utf8");
 
 assert.ok(main.includes("key(activeSession.androidSessionId)"), "active Session must own the only PiScreen");
 assert.ok(main.includes("session = activeSession"), "PiScreen must receive the selected Session record");
@@ -11,3 +12,7 @@ assert.ok(!main.includes("sessions.forEach { record ->\\n                       
 assert.ok(runtime.includes("val generation = ++conversationGeneration"), "activation must fence stale event batches");
 assert.ok(runtime.includes("connectCurrent(true, generation)"), "activation must refresh from its own Bridge endpoint");
 console.log("Active-session UI ownership guards passed");
+
+assert.ok(main.includes("awaitPointerEvent(PointerEventPass.Final)"), "Session drawer must wait for horizontal child scroll surfaces");
+assert.ok(main.includes("change.isConsumed"), "consumed child drags must not open the Session drawer");
+assert.ok(markdown.includes("Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())"), "wide Markdown tables need a full-width horizontal viewport");

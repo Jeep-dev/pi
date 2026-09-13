@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.17: expose editable per-Session startup arguments in /settings.
+// v5.19.18: reserve horizontal child scrolling before the Session drawer gesture.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 116
-        versionName = "5.19.17"
+        versionCode = 117
+        versionName = "5.19.18"
     }
 
     signingConfigs {
