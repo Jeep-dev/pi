@@ -20,7 +20,9 @@ assert.ok(markdown.includes("Modifier.fillMaxWidth().horizontalScroll(rememberSc
 assert.ok(main.includes("stableBottomFrames"), "bottom follow must survive delayed Compose remeasurement");
 assert.ok(main.includes("repeat(16)"), "bottom follow must wait across multiple layout frames");
 assert.ok(main.includes("scrollToRealBottom { followOutput }"), "automatic scrolling must stop immediately after the user disables follow");
-assert.ok(main.includes("abs(available.y) > abs(available.x)"), "horizontal table/code scrolling must not disable bottom follow");
+assert.ok(main.includes("val verticalMovement = abs(consumed.y) > abs(consumed.x)"), "only real vertical list movement may change bottom follow");
+assert.ok(main.includes("val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement"), "bottom follow must ignore non-user/programmatic scrolling");
+assert.ok(main.includes("Observe measured LazyColumn geometry as well as message data"), "late tool/Markdown layout growth must retrigger bottom follow");
 
 assert.ok(main.includes("val collapseInfo = when"), "tool footer must derive Pi-style hidden-line metadata");
 assert.ok(main.includes("contentAlignment = Alignment.CenterStart"), "tool footer must show hidden-line metadata on the left");

@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.20: make bottom-follow resilient to delayed Compose remeasurement.
+// v5.19.20 hotfix (120): deterministic bottom-follow state and layout watcher.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,7 +19,7 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 119
+        versionCode = 120
         versionName = "5.19.20"
     }
 

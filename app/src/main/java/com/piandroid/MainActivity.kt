@@ -1500,6 +1500,8 @@ private fun PiScreen(
             )
             "/changelog" -> addSystem(
                 """Pi Android v5.19.20
+                |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow
+                |• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底
                 |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
                 |• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效
                 |• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底
@@ -1696,6 +1698,39 @@ private fun PiScreen(
                 }
             }
     }
+
+    // Observe measured LazyColumn geometry as well as message data. Tool cards,
+// Markdown and web-search output may grow after the ChatLine mutation has already
+// been processed. Any late remeasure that opens space below is followed again.
+// While the user is physically scrolling, this watcher stays idle.
+LaunchedEffect(chatListState) {
+    snapshotFlow {
+        val layout = chatListState.layoutInfo
+        val last = layout.visibleItemsInfo.lastOrNull()
+        listOf(
+            layout.totalItemsCount,
+            layout.viewportEndOffset,
+            last?.index ?: -1,
+            last?.offset ?: 0,
+            last?.size ?: 0,
+            if (chatListState.canScrollForward) 1 else 0,
+            if (chatListState.isScrollInProgress) 1 else 0,
+            if (followOutput) 1 else 0
+        )
+    }
+        .distinctUntilChanged()
+        .conflate()
+        .collect {
+            if (
+                followOutput &&
+                lines.isNotEmpty() &&
+                chatListState.canScrollForward &&
+                !chatListState.isScrollInProgress
+            ) {
+                chatListState.scrollToRealBottom { followOutput }
+            }
+        }
+}
 
     LaunchedEffect(imeBottom) {
         if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
@@ -2099,24 +2134,29 @@ private suspend fun LazyListState.scrollToRealBottom(keepFollowing: () -> Boolea
 private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, status: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, onConnect: () -> Unit, onSettings: () -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
     val userScrollLock = remember(listState) {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                val verticalInput = abs(available.y) > abs(available.x) && abs(available.y) > 0.5f
-                if (source == NestedScrollSource.UserInput && verticalInput) {
-                    onFollowChange(false)
-                    onUserScrollActivity()
-                }
-                return Offset.Zero
-            }
+    object : NestedScrollConnection {
+        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+            // Merely touching/dragging at the bottom must not disable follow.
+            // Persistent follow state changes only after real list movement.
+            return Offset.Zero
+        }
 
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                val verticalInput = abs(consumed.y) > abs(consumed.x) || abs(available.y) > abs(available.x)
-                if (source == NestedScrollSource.UserInput && verticalInput && isAtBottom()) onFollowChange(true)
-                return Offset.Zero
+        override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+            val verticalMovement = abs(consumed.y) > abs(consumed.x) && abs(consumed.y) > 0.5f
+            val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement
+            if (userActuallyMoved) {
+                onUserScrollActivity()
+                onFollowChange(isAtBottom())
             }
+            return Offset.Zero
         }
     }
-    LaunchedEffect(listState) { snapshotFlow { isAtBottom() }.distinctUntilChanged().collect { atBottom -> if (atBottom) onFollowChange(true) } }
+}
+LaunchedEffect(listState) {
+    snapshotFlow { isAtBottom() }
+        .distinctUntilChanged()
+        .collect { atBottom -> if (atBottom) onFollowChange(true) }
+}
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 3.dp).nestedScroll(userScrollLock), contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item(key = "session-meta") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 2.dp)) {
