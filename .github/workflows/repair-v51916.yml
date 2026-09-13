@@ -1,4 +1,4 @@
-name: Repair v5.19.16 source
+name: Repair v5.19.18 table scroll
 
 on:
   workflow_dispatch:
@@ -24,9 +24,11 @@ jobs:
       - name: Verify patch
         run: |
           git diff --check
-          grep -q 'versionName = "5.19.16"' app/build.gradle.kts
-          grep -q 'lastAppliedEventSeq' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'line.toolOutput.hashCode()' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'versionName = "5.19.18"' app/build.gradle.kts
+          grep -q 'awaitPointerEvent(PointerEventPass.Final)' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'change.isConsumed' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'fillMaxWidth().horizontalScroll(rememberScrollState())' app/src/main/java/com/piandroid/MarkdownContent.kt
+          node tools/test_active_session_ui.mjs
       - name: Commit repair
         run: |
           if git diff --quiet; then
@@ -35,6 +37,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts .github/workflows/android.yml
-          git commit -m "Fix stale chat replay and bottom follow"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/MarkdownContent.kt app/build.gradle.kts .github/workflows/android.yml tools/test_active_session_ui.mjs
+          git commit -m "Fix Markdown horizontal scrolling gesture conflict"
           git push origin HEAD:fix/security-lifecycle-build

@@ -1,8 +1,11 @@
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "app/src/main/java/com/piandroid/MainActivity.kt"
+MARKDOWN = ROOT / "app/src/main/java/com/piandroid/MarkdownContent.kt"
+BUILD = ROOT / "app/build.gradle.kts"
+ANDROID = ROOT / ".github/workflows/android.yml"
+TEST = ROOT / "tools/test_active_session_ui.mjs"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -13,128 +16,56 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 main = MAIN.read_text()
-main = replace_once(
-    main,
-    '    var launchCommand by rememberSaveable(session.androidSessionId) { mutableStateOf(session.launchCommand) }\n',
-    '    var launchCommand by rememberSaveable(session.androidSessionId) { mutableStateOf(session.launchCommand) }\n'
-    '    var startupArguments by rememberSaveable(session.androidSessionId) { mutableStateOf(session.startupArguments) }\n',
-    'startup argument state',
-)
-
-pattern = re.compile(r'^\s{20}Panel\.Settings -> SettingsPanel\(.*\)$', re.M)
-replacement = '''                    Panel.Settings -> SettingsPanel(
-                        cwd = cwd,
-                        launchCommand = launchCommand,
-                        startupArguments = startupArguments,
-                        connected = connected,
-                        autoCompaction = currentState?.autoCompactionEnabled ?: true,
-                        onCwd = { value ->
-                            cwd = value
-                            updateSessionRecord { record -> record.copy(cwd = value) }
-                        },
-                        onLaunch = { value ->
-                            launchCommand = value
-                            updateSessionRecord { record -> record.copy(launchCommand = value) }
-                        },
-                        onStartupArguments = { value ->
-                            startupArguments = value
-                            updateSessionRecord { record -> record.copy(startupArguments = value) }
-                        },
-                        onConnect = connect,
-                        onAutoCompaction = { enabled ->
-                            runtime.launchTask {
-                                bridge.setAutoCompaction(enabled).fold(
-                                    onSuccess = {
-                                        refreshMeta()
-                                        addSystem("自动压缩：${if (enabled) "开启" else "关闭"}")
-                                    },
-                                    onFailure = { addSystem("自动压缩设置失败：${it.message}") }
-                                )
-                            }
-                        },
-                        onBack = { panel = Panel.Chat }
-                    )'''
-main, count = pattern.subn(replacement, main, count=1)
-if count != 1:
-    raise SystemExit(f"settings call: expected exactly one match, got {count}")
-
-start = main.index('@Composable\nprivate fun SettingsPanel(')
-end = main.index('\n\n@Composable\nprivate fun ExtensionDialog', start)
-settings = r'''@Composable
-private fun SettingsPanel(
-    cwd: String,
-    launchCommand: String,
-    startupArguments: String,
-    connected: Boolean,
-    autoCompaction: Boolean,
-    onCwd: (String) -> Unit,
-    onLaunch: (String) -> Unit,
-    onStartupArguments: (String) -> Unit,
-    onConnect: () -> Unit,
-    onAutoCompaction: (Boolean) -> Unit,
-    onBack: () -> Unit
-) {
-    val startupError = startupArgumentsError(startupArguments)
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        PanelHeader("/settings", onBack)
-        OutlinedTextField(cwd, onCwd, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi 工作目录") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
-        OutlinedTextField(launchCommand, onLaunch, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), label = { Text("Pi RPC 基础启动命令") }, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
-        OutlinedTextField(
-            startupArguments,
-            onStartupArguments,
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            label = { Text("附加启动参数") },
-            placeholder = { Text("例如：--no-tools") },
-            minLines = 1,
-            maxLines = 4,
-            isError = startupError != null,
-            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-        )
-        startupError?.let { Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) }
-        Text(
-            "模型：--provider / --model / --thinking / --models\n" +
-                "工具：--tools / --exclude-tools / --no-builtin-tools / --no-tools\n" +
-                "资源：-e / --no-extensions / --skill / --no-skills / --prompt-template / --no-prompt-templates / --no-context-files\n" +
-                "提示：--system-prompt / --append-system-prompt\n" +
-                "其他：--name / --verbose / --approve / --no-approve",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            lineHeight = 15.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
-        )
-        Text(
-            "附加参数会在启动时追加到上面的基础命令；两个输入框都可以编辑。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
-        )
-        Row(Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp)
-            }
-            Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace)
-        }
-        Text(
-            "默认直接使用 Termux 中的 Pi。--mode rpc、Android Session 身份和私有 session-dir 由 App 维持；其他 Pi 原生启动参数可在上方编辑。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 17.sp,
-            modifier = Modifier.padding(14.dp)
-        )
-        Button(onClick = onConnect, enabled = startupError == null, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") }
-    }
-}'''
-main = main[:start] + settings + main[end:]
-
-main = replace_once(
-    main,
-    '"""Pi Android v5.19.16\n                |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面',
-    '"""Pi Android v5.19.17\n                |• /settings 显示并可编辑每个 Session 的附加启动参数\n                |• 按 Pi 原生 CLI 分类提示常用模型、工具、资源和提示词启动参数\n                |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面',
-    'changelog version',
-)
+if "Pi Android v5.19.18" not in main:
+    main = replace_once(
+        main,
+        "val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)",
+        "val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)",
+        "drawer first-down pass",
+    )
+    main = replace_once(
+        main,
+        "val event = awaitPointerEvent(PointerEventPass.Initial)\n                        val change = event.changes.firstOrNull { it.id == down.id } ?: break\n                        velocityTracker.addPosition(change.uptimeMillis, change.position)",
+        "val event = awaitPointerEvent(PointerEventPass.Final)\n                        val change = event.changes.firstOrNull { it.id == down.id } ?: break\n                        // Horizontal child surfaces (Markdown tables/code blocks, attachment rows, etc.)\n                        // get first refusal. The Session drawer only owns an unconsumed horizontal drag.\n                        if (startProgress <= 0.01f && change.isConsumed) return@awaitEachGesture\n                        velocityTracker.addPosition(change.uptimeMillis, change.position)",
+        "drawer child-consumption guard",
+    )
+    main = replace_once(
+        main,
+        '"""Pi Android v5.19.17\n                |• /settings 显示并可编辑每个 Session 的附加启动参数',
+        '"""Pi Android v5.19.18\n                |• Markdown 表格和代码块优先接管横向滑动，不再误触 Session 侧栏\n                |• 宽表格使用完整屏幕宽度作为横向滚动视口，可左右查看全部列\n                |• /settings 显示并可编辑每个 Session 的附加启动参数',
+        "changelog version",
+    )
 MAIN.write_text(main)
-print("v5.19.17 startup settings repair applied")
+
+markdown = MARKDOWN.read_text()
+if "Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).border" not in markdown:
+    markdown = replace_once(
+        markdown,
+        "Column(Modifier.horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {",
+        "Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {",
+        "table horizontal viewport",
+    )
+MARKDOWN.write_text(markdown)
+
+build = BUILD.read_text()
+build = build.replace("// v5.19.17: expose editable per-Session startup arguments in /settings.", "// v5.19.18: reserve horizontal child scrolling before the Session drawer gesture.")
+build = build.replace("versionCode = 116", "versionCode = 117")
+build = build.replace('versionName = "5.19.17"', 'versionName = "5.19.18"')
+BUILD.write_text(build)
+
+android = ANDROID.read_text().replace("pi-android-v5.19.17-apks", "pi-android-v5.19.18-apks")
+ANDROID.write_text(android)
+
+test = TEST.read_text()
+if "MarkdownContent.kt" not in test:
+    test = test.replace(
+        'const runtime = await readFile("app/src/main/java/com/piandroid/PiSessionRuntime.kt", "utf8");\n',
+        'const runtime = await readFile("app/src/main/java/com/piandroid/PiSessionRuntime.kt", "utf8");\nconst markdown = await readFile("app/src/main/java/com/piandroid/MarkdownContent.kt", "utf8");\n',
+    )
+if "Session drawer must wait for horizontal child scroll surfaces" not in test:
+    test += '\nassert.ok(main.includes("awaitPointerEvent(PointerEventPass.Final)"), "Session drawer must wait for horizontal child scroll surfaces");\n'
+    test += 'assert.ok(main.includes("change.isConsumed"), "consumed child drags must not open the Session drawer");\n'
+    test += 'assert.ok(markdown.includes("Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())"), "wide Markdown tables need a full-width horizontal viewport");\n'
+TEST.write_text(test)
+
+print("v5.19.18 table-scroll gesture repair applied")
