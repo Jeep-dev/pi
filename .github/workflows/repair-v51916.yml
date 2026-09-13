@@ -1,4 +1,4 @@
-name: Repair v5.19.20 bottom follow
+name: Repair v5.19.21 tool footer
 
 on:
   workflow_dispatch:
@@ -24,10 +24,11 @@ jobs:
       - name: Verify patch
         run: |
           git diff --check
-          grep -q 'versionName = "5.19.20"' app/build.gradle.kts
-          grep -q 'stableBottomFrames' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'scrollToRealBottom { followOutput }' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'abs(available.y) > abs(available.x)' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'versionName = "5.19.21"' app/build.gradle.kts
+          grep -q 'val collapseInfo = when' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'contentAlignment = Alignment.CenterStart' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'contentAlignment = Alignment.CenterEnd' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'pi-android-v5.19.21-apks' .github/workflows/android.yml
           node tools/test_active_session_ui.mjs
       - name: Commit repair
         run: |
@@ -37,6 +38,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts tools/test_active_session_ui.mjs
-          git commit -m "Fix delayed bottom follow after tool and Markdown reflow"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts .github/workflows/android.yml tools/test_active_session_ui.mjs
+          git commit -m "Center tool expand action and show hidden line count"
           git push origin HEAD:fix/security-lifecycle-build
