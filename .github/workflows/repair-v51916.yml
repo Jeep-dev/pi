@@ -1,4 +1,4 @@
-name: Repair v5.19.21 tool footer
+name: Repair centered tool footer
 
 on:
   workflow_dispatch:
@@ -24,11 +24,9 @@ jobs:
       - name: Verify patch
         run: |
           git diff --check
-          grep -q 'versionName = "5.19.21"' app/build.gradle.kts
           grep -q 'val collapseInfo = when' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'contentAlignment = Alignment.CenterStart' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'contentAlignment = Alignment.CenterEnd' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'pi-android-v5.19.21-apks' .github/workflows/android.yml
           node tools/test_active_session_ui.mjs
       - name: Commit repair
         run: |
@@ -38,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts .github/workflows/android.yml tools/test_active_session_ui.mjs
+          git add app/src/main/java/com/piandroid/MainActivity.kt tools/test_active_session_ui.mjs
           git commit -m "Center tool expand action and show hidden line count"
           git push origin HEAD:fix/security-lifecycle-build
