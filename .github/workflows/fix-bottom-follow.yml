@@ -37,9 +37,8 @@ jobs:
           new_scroll_lock = '''    val userScrollLock = remember(listState) {
               object : NestedScrollConnection {
                   override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                      // Touching or dragging at the bottom is not enough to disable follow.
-                      // Only an actual user-driven list movement may change the persistent
-                      // follow state; this prevents tool/search growth from racing pre-scroll.
+                      // Merely touching/dragging at the bottom must not disable follow.
+                      // Persistent follow state changes only after real list movement.
                       return Offset.Zero
                   }
 
@@ -61,20 +60,15 @@ jobs:
           '''
           main = main[:start] + new_scroll_lock + main[end:]
 
-          ime_marker = '''    LaunchedEffect(imeBottom) {
-              if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
-                  delay(80)
-                  chatListState.scrollToRealBottom { followOutput }
-              }
-          }
-          '''
-          if ime_marker not in main:
+          watcher_marker = '    LaunchedEffect(imeBottom) {'
+          watcher_pos = main.find(watcher_marker)
+          if watcher_pos < 0:
               raise SystemExit('could not locate IME follow effect')
 
-          watcher = '''    // Observe the measured LazyColumn layout itself. Tool cards, Markdown and
-          // web-search output may become taller after the ChatLine mutation was already handled.
-          // If late remeasurement opens new scrollable space while follow=true, catch up again.
-          // During a real user scroll this watcher stays idle so it never fights the finger.
+          watcher = '''    // Observe measured LazyColumn geometry as well as message data. Tool cards,
+          // Markdown and web-search output may grow after the ChatLine mutation has already
+          // been processed. Any late remeasure that opens space below is followed again.
+          // While the user is physically scrolling, this watcher stays idle.
           LaunchedEffect(chatListState) {
               snapshotFlow {
                   val layout = chatListState.layoutInfo
@@ -105,15 +99,15 @@ jobs:
           }
 
           '''
-          if 'Observe the measured LazyColumn layout itself' not in main:
-              main = main.replace(ime_marker, watcher + ime_marker, 1)
+          if 'Observe measured LazyColumn geometry as well as message data' not in main:
+              main = main[:watcher_pos] + watcher + main[watcher_pos:]
 
           changelog_line = '                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间\n'
           if changelog_line in main and '自动跟随只在用户实际滚离底部后关闭' not in main:
               main = main.replace(
                   changelog_line,
                   '                |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow\n'
-                  '                |• 直接监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底\n'
+                  '                |• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底\n'
                   + changelog_line,
                   1,
               )
@@ -136,7 +130,7 @@ jobs:
         run: |
           git diff --check
           grep -q 'val userActuallyMoved = source == NestedScrollSource.UserInput' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'Observe the measured LazyColumn layout itself' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'Observe measured LazyColumn geometry as well as message data' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'chatListState.isScrollInProgress' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'versionCode = 120' app/build.gradle.kts
           node tools/test_active_session_ui.mjs
