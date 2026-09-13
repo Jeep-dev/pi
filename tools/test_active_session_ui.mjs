@@ -21,3 +21,7 @@ assert.ok(main.includes("stableBottomFrames"), "bottom follow must survive delay
 assert.ok(main.includes("repeat(16)"), "bottom follow must wait across multiple layout frames");
 assert.ok(main.includes("scrollToRealBottom { followOutput }"), "automatic scrolling must stop immediately after the user disables follow");
 assert.ok(main.includes("abs(available.y) > abs(available.x)"), "horizontal table/code scrolling must not disable bottom follow");
+
+assert.ok(main.includes("val collapseInfo = when"), "tool footer must derive Pi-style hidden-line metadata");
+assert.ok(main.includes("contentAlignment = Alignment.CenterStart"), "tool footer must show hidden-line metadata on the left");
+assert.ok(main.includes("contentAlignment = Alignment.CenterEnd"), "tool footer must keep execution duration on the right");

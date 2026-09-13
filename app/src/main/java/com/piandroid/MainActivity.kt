@@ -1500,6 +1500,7 @@ private fun PiScreen(
             )
             "/changelog" -> addSystem(
                 """Pi Android v5.19.20
+                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
                 |• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效
                 |• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底
                 |• 只有纵向手势会暂停自动跟随，横向表格/代码滑动不再误关 follow
@@ -2146,6 +2147,13 @@ private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: Stri
                         val name = line.toolName.ifBlank { "tool" }
                         val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; else -> colors.toolSuccessBg }
                         val expandable = argsHint.isNotBlank() || outputHint.isNotBlank()
+                        val collapseInfo = when {
+                            line.collapsed && outputHint.isNotBlank() -> outputHint
+                            line.collapsed && argsHint.isNotBlank() -> argsHint
+                            toolOutput.isNotBlank() -> "${toolOutput.trimEnd().lines().size} lines"
+                            line.toolArgs.isNotBlank() -> "${line.toolArgs.trimEnd().lines().size} lines"
+                            else -> ""
+                        }
                         Column(Modifier.fillMaxWidth().background(background, RoundedCornerShape(3.dp)).padding(horizontal = 9.dp, vertical = 8.dp)) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Text(if (name == "bash") "$ bash" else name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -2162,9 +2170,19 @@ private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: Stri
                             }
                             if (expandable) {
                                 Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    TextButton(onClick = { onToggleLine(lineIndex) }, contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)) { Text(if (line.collapsed) "Show all" else "Collapse", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
-                                    Spacer(Modifier.weight(1f))
-                                    if (duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
+                                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                                        if (collapseInfo.isNotBlank()) Text(collapseInfo, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
+                                    }
+                                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                        TextButton(
+                                            onClick = { onToggleLine(lineIndex) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)
+                                        ) { Text(if (line.collapsed) "Show all" else "Collapse", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+                                    }
+                                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                                        if (duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
+                                    }
                                 }
                             } else if (duration.isNotBlank()) {
                                 Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp, modifier = Modifier.align(Alignment.End).padding(top = 4.dp))
