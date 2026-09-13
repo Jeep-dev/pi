@@ -1,4 +1,4 @@
-name: Repair v5.19.18 table scroll
+name: Repair v5.19.20 bottom follow
 
 on:
   workflow_dispatch:
@@ -24,10 +24,10 @@ jobs:
       - name: Verify patch
         run: |
           git diff --check
-          grep -q 'versionName = "5.19.18"' app/build.gradle.kts
-          grep -q 'awaitPointerEvent(PointerEventPass.Final)' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'change.isConsumed' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'fillMaxWidth().horizontalScroll(rememberScrollState())' app/src/main/java/com/piandroid/MarkdownContent.kt
+          grep -q 'versionName = "5.19.20"' app/build.gradle.kts
+          grep -q 'stableBottomFrames' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'scrollToRealBottom { followOutput }' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'abs(available.y) > abs(available.x)' app/src/main/java/com/piandroid/MainActivity.kt
           node tools/test_active_session_ui.mjs
       - name: Commit repair
         run: |
@@ -37,6 +37,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/MarkdownContent.kt app/build.gradle.kts tools/test_active_session_ui.mjs
-          git commit -m "Fix Markdown horizontal scrolling gesture conflict"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts tools/test_active_session_ui.mjs
+          git commit -m "Fix delayed bottom follow after tool and Markdown reflow"
           git push origin HEAD:fix/security-lifecycle-build
