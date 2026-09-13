@@ -6,14 +6,18 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -180,17 +184,25 @@ private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
     }
     Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {
         rows.forEachIndexed { rowIndex, row ->
-            Row {
+            Row(Modifier.height(IntrinsicSize.Min)) {
                 for (column in 0 until columns) {
-                    Text(
-                        inlineMarkdown(row.getOrNull(column).orEmpty(), colors),
-                        color = if (rowIndex == 0) colors.markdownAccent else colors.markdownText,
-                        fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.width(widths[column]).border(0.5.dp, colors.markdownBorder).padding(horizontal = 8.dp, vertical = 6.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .width(widths[column])
+                            .fillMaxHeight()
+                            .border(0.5.dp, colors.markdownBorder)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Text(
+                            inlineMarkdown(row.getOrNull(column).orEmpty(), colors),
+                            color = if (rowIndex == 0) colors.markdownAccent else colors.markdownText,
+                            fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp
+                        )
+                    }
                 }
             }
         }
