@@ -5,22 +5,129 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal fun normalizeRecoveredToolArgs(toolName: String, raw: String): String {
+    val text = raw.trim()
+    if (text.isBlank()) return ""
+
+    fun valueAfter(vararg prefixes: String): String? = text.lineSequence()
+        .map(String::trim)
+        .firstNotNullOfOrNull { line ->
+            prefixes.firstNotNullOfOrNull { prefix ->
+                line.takeIf { it.startsWith(prefix) }?.removePrefix(prefix)?.trim()
+            }
+        }
+
+    fun compactFromJson(args: JSONObject): String {
+        fun path(): String = args.optString("path")
+        return when (toolName) {
+            "bash" -> buildString {
+                append(args.optString("command"))
+                val timeout = args.optInt("timeout", 0)
+                if (timeout > 0) append("  (${timeout}s timeout)")
+            }
+            "read" -> buildString {
+                append(path())
+                val offset = args.optInt("offset", 0)
+                val limit = args.optInt("limit", 0)
+                if (offset > 0 || limit > 0) append("  [${if (offset > 0) "offset $offset" else ""}${if (offset > 0 && limit > 0) ", " else ""}${if (limit > 0) "limit $limit" else ""}]")
+            }
+            "write" -> buildString {
+                append(path())
+                val count = args.optString("content").length
+                if (count > 0) append("  ·  $count chars")
+            }
+            "edit" -> buildString {
+                append(path())
+                val count = args.optJSONArray("edits")?.length() ?: 0
+                if (count > 0) append("  ·  $count edits")
+            }
+            "grep" -> buildString {
+                append(args.optString("pattern"))
+                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
+            }
+            "find" -> buildString {
+                append(args.optString("pattern", args.optString("query")))
+                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
+            }
+            "ls" -> path()
+            "subagent" -> {
+                val tasks = args.optJSONArray("tasks")
+                if (tasks != null && tasks.length() > 0) {
+                    val agents = buildList {
+                        for (i in 0 until tasks.length()) {
+                            tasks.optJSONObject(i)?.optString("agent")?.takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }.distinct()
+                    if (tasks.length() == 1) agents.firstOrNull().orEmpty()
+                    else "${tasks.length()} tasks${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
+                } else {
+                    args.optString("agent")
+                }
+            }
+            else -> args.toString().replace('\n', ' ').let { if (it.length > 800) it.take(800) + " …" else it }
+        }
+    }
+
+    runCatching { JSONObject(text) }.getOrNull()?.let { return compactFromJson(it) }
+
+    return when (toolName) {
+        "bash" -> valueAfter("命令：", "命令:") ?: text
+        "edit" -> {
+            val target = valueAfter("目标：", "目标:") ?: return text
+            val count = valueAfter("修改块：", "修改块:")?.toIntOrNull() ?: 0
+            buildString {
+                append(target)
+                if (count > 0) append("  ·  $count edits")
+            }
+        }
+        "write" -> {
+            val target = valueAfter("目标：", "目标:") ?: return text
+            val count = valueAfter("内容：", "内容:")
+                ?.substringBefore(' ')
+                ?.toIntOrNull()
+                ?: 0
+            buildString {
+                append(target)
+                if (count > 0) append("  ·  $count chars")
+            }
+        }
+        else -> text
+    }
+}
+
 /** Session helpers share PiBridge's authenticated transport. */
 private fun parseHistory(messages: JSONArray): List<PiHistoryMessage> = buildList {
     for (i in 0 until messages.length()) {
         val message = messages.optJSONObject(i) ?: continue
-        val text = message.optString("text")
+        val role = message.optString("role", "system")
+        val toolName = message.optString("toolName")
+        val toolOutput = message.optString("toolOutput")
+        val toolArgs = if (role == "tool") {
+            normalizeRecoveredToolArgs(toolName, message.optString("toolArgs"))
+        } else {
+            message.optString("toolArgs")
+        }
+        val originalText = message.optString("text")
+        val text = if (role == "tool" && toolName.isNotBlank()) {
+            buildString {
+                append(toolName)
+                if (toolArgs.isNotBlank()) append(' ').append(toolArgs)
+                if (toolOutput.isNotBlank()) append("\n\n").append(toolOutput)
+            }
+        } else {
+            originalText
+        }
         if (text.isBlank()) continue
         add(
             PiHistoryMessage(
-                role = message.optString("role", "system"),
+                role = role,
                 text = text,
                 toolCallId = message.optString("toolCallId"),
                 collapsed = message.optBoolean("collapsed", true),
                 tokensBefore = message.optLong("tokensBefore"),
-                toolName = message.optString("toolName"),
-                toolArgs = message.optString("toolArgs"),
-                toolOutput = message.optString("toolOutput"),
+                toolName = toolName,
+                toolArgs = toolArgs,
+                toolOutput = toolOutput,
                 toolIsError = message.optBoolean("toolIsError", false),
                 toolDurationMs = if (message.has("toolDurationMs")) message.optLong("toolDurationMs", -1L) else -1L
             )
