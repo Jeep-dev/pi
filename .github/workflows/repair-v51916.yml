@@ -37,6 +37,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/MarkdownContent.kt app/build.gradle.kts .github/workflows/android.yml tools/test_active_session_ui.mjs
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/MarkdownContent.kt app/build.gradle.kts tools/test_active_session_ui.mjs
           git commit -m "Fix Markdown horizontal scrolling gesture conflict"
           git push origin HEAD:fix/security-lifecycle-build
