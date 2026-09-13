@@ -15,9 +15,15 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_first(text: str, old: str, new: str, label: str) -> str:
+    if old not in text:
+        raise SystemExit(f"{label}: no match")
+    return text.replace(old, new, 1)
+
+
 main = MAIN.read_text()
 if "Pi Android v5.19.18" not in main:
-    main = replace_once(
+    main = replace_first(
         main,
         "val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)",
         "val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)",
