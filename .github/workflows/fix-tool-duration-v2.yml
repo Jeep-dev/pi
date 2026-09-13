@@ -1,0 +1,110 @@
+name: Apply durable tool-duration repair v2
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-tool-duration-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - name: Persist structured tool history metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, got {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          main = 'app/src/main/java/com/piandroid/MainActivity.kt'
+          extras = 'app/src/main/java/com/piandroid/PiBridgeExtras.kt'
+          bridge_kt = 'app/src/main/java/com/piandroid/PiBridge.kt'
+          bridge_js = 'app/src/main/assets/pi-android-bridge.mjs'
+          build = 'app/build.gradle.kts'
+          test = 'tools/test_active_session_ui.mjs'
+
+          replace_once(main, '''    val toolStartedAt: Long = 0L,\n    val toolEndedAt: Long = 0L\n''', '''    val toolStartedAt: Long = 0L,\n    val toolEndedAt: Long = 0L,\n    val toolDurationMs: Long = -1L\n''', 'ChatLine duration field')
+
+          replace_once(main, '''                    toolCallId = message.toolCallId,\n                    collapsed = message.collapsed,\n                    tokensBefore = message.tokensBefore\n''', '''                    toolCallId = message.toolCallId,\n                    collapsed = message.collapsed,\n                    tokensBefore = message.tokensBefore,\n                    toolName = message.toolName,\n                    toolArgs = message.toolArgs,\n                    toolOutput = message.toolOutput,\n                    toolIsError = message.toolIsError,\n                    toolDurationMs = message.toolDurationMs\n''', 'restore structured tool history')
+
+          replace_once(main, '''                toolIsError = event.isError,\n                toolEndedAt = endedAt\n''', '''                toolIsError = event.isError,\n                toolEndedAt = endedAt,\n                toolDurationMs = if (line.toolStartedAt > 0L) (endedAt - line.toolStartedAt).coerceAtLeast(0L) else line.toolDurationMs\n''', 'live tool duration finalization')
+
+          replace_once(main, '''                        val toolOutput = line.toolOutput.ifBlank { fullText }\n                        val outputHint = toolHiddenHint(toolOutput)\n''', '''                        val hasStructuredTool = line.toolName.isNotBlank() || line.toolArgs.isNotBlank() || line.toolOutput.isNotBlank() || line.toolDurationMs >= 0L\n                        val toolOutput = if (hasStructuredTool) line.toolOutput else fullText\n                        val outputHint = toolHiddenHint(toolOutput)\n''', 'structured tool output rendering')
+
+          replace_once(main, '''                        val duration = if (line.toolStartedAt > 0L) formatToolDuration((if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt) else ""\n''', '''                        val durationMs = when {\n                            line.toolDurationMs >= 0L -> line.toolDurationMs\n                            line.toolStartedAt > 0L -> (if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt\n                            else -> -1L\n                        }\n                        val duration = if (durationMs >= 0L) formatToolDuration(durationMs) else ""\n''', 'duration rendering fallback')
+
+          p = Path(main)
+          text = p.read_text()
+          if 'Pi Android v5.19.20' not in text:
+              raise SystemExit('changelog version marker missing')
+          text = text.replace('Pi Android v5.19.20', 'Pi Android v5.19.21', 1)
+          marker = '                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间\n'
+          if marker in text and '工具执行时间写入 durable history' not in text:
+              text = text.replace(marker, '                |• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留\n' + marker, 1)
+          p.write_text(text)
+
+          replace_once(extras, '''                toolCallId = message.optString("toolCallId"),\n                collapsed = message.optBoolean("collapsed", true),\n                tokensBefore = message.optLong("tokensBefore")\n''', '''                toolCallId = message.optString("toolCallId"),\n                collapsed = message.optBoolean("collapsed", true),\n                tokensBefore = message.optLong("tokensBefore"),\n                toolName = message.optString("toolName"),\n                toolArgs = message.optString("toolArgs"),\n                toolOutput = message.optString("toolOutput"),\n                toolIsError = message.optBoolean("toolIsError", false),\n                toolDurationMs = if (message.has("toolDurationMs")) message.optLong("toolDurationMs", -1L) else -1L\n''', 'parse structured history metadata')
+
+          replace_once(extras, '''data class PiHistoryMessage(\n    val role: String,\n    val text: String,\n    val toolCallId: String = "",\n    val collapsed: Boolean = true,\n    val tokensBefore: Long = 0\n)\n''', '''data class PiHistoryMessage(\n    val role: String,\n    val text: String,\n    val toolCallId: String = "",\n    val collapsed: Boolean = true,\n    val tokensBefore: Long = 0,\n    val toolName: String = "",\n    val toolArgs: String = "",\n    val toolOutput: String = "",\n    val toolIsError: Boolean = false,\n    val toolDurationMs: Long = -1L\n)\n''', 'PiHistoryMessage schema')
+
+          replace_once(bridge_kt, '    private val expectedBridgeVersion = "2026-09-12.3"\n', '    private val expectedBridgeVersion = "2026-09-13.1"\n', 'Kotlin bridge version')
+          replace_once(bridge_kt, '''        "hard-stop-v1",\n        "conversation-owner-v1"\n''', '''        "hard-stop-v1",\n        "conversation-owner-v1",\n        "tool-history-metadata-v1"\n''', 'Kotlin bridge capability')
+
+          replace_once(bridge_js, 'const bridgeVersion = "2026-09-12.3";\n', 'const bridgeVersion = "2026-09-13.1";\n', 'JS bridge version')
+          replace_once(bridge_js, '''  "hard-stop-v1",\n  "conversation-owner-v1",\n];\n''', '''  "hard-stop-v1",\n  "conversation-owner-v1",\n  "tool-history-metadata-v1",\n];\n''', 'JS bridge capability')
+
+          replace_once(bridge_js, '''function toolResultText(name, message) {\n  const output = contentText(message?.content, "[图片输出]");\n  const isError = Boolean(message?.isError);\n  const sections = [isError ? `工具执行失败：${name}` : `工具完成：${name}`];\n  const diff = !isError && name === "edit" ? String(message?.details?.diff || "") : "";\n  if (diff.trim() && !output.includes(diff)) sections.push(diff);\n  if (output.trim()) sections.push(output);\n  return sections.join("\\n\\n");\n}\n''', '''function entryTimestampMs(entry, message = {}) {\n  const entryValue = Date.parse(String(entry?.timestamp || ""));\n  if (Number.isFinite(entryValue)) return entryValue;\n  const messageValue = Number(message?.timestamp);\n  return Number.isFinite(messageValue) && messageValue > 0 ? messageValue : 0;\n}\n\nfunction toolResultOutput(name, message) {\n  const output = contentText(message?.content, "[图片输出]");\n  const isError = Boolean(message?.isError);\n  const sections = [];\n  const diff = !isError && name === "edit" ? String(message?.details?.diff || "") : "";\n  if (diff.trim() && !output.includes(diff)) sections.push(diff);\n  if (output.trim()) sections.push(output);\n  if (isError && sections.length === 0) sections.push("Error");\n  return sections.join("\\n\\n");\n}\n\nfunction toolResultText(name, message) {\n  const isError = Boolean(message?.isError);\n  const sections = [isError ? `工具执行失败：${name}` : `工具完成：${name}`];\n  const output = toolResultOutput(name, message);\n  if (output.trim()) sections.push(output);\n  return sections.join("\\n\\n");\n}\n''', 'bridge tool result helpers')
+
+          replace_once(bridge_js, '''            const details = toolArgumentsText(name, part.arguments);\n            add("tool", `执行工具：${name}${details ? `\\n\\n${details}` : ""}`, callId, true);\n            if (callId) toolLines.set(callId, history.length - 1);\n''', '''            const details = toolArgumentsText(name, part.arguments);\n            const startedAtMs = entryTimestampMs(entry, message);\n            add(\n              "tool",\n              `执行工具：${name}${details ? `\\n\\n${details}` : ""}`,\n              callId,\n              true,\n              {\n                toolName: name,\n                toolArgs: details,\n                toolOutput: "",\n                toolIsError: false,\n                toolStartedAtMs: startedAtMs,\n                toolDurationMs: -1,\n              },\n            );\n            if (callId) toolLines.set(callId, history.length - 1);\n''', 'assistant tool-call history metadata')
+
+          replace_once(bridge_js, '''        const result = toolResultText(name, message);\n        const index = toolLines.get(callId);\n        if (index != null && history[index]) history[index].text += `\\n\\n${result}`;\n        else add("tool", result, callId, true);\n''', '''        const result = toolResultText(name, message);\n        const output = toolResultOutput(name, message);\n        const isError = Boolean(message.isError);\n        const endedAtMs = entryTimestampMs(entry, message);\n        const index = toolLines.get(callId);\n        if (index != null && history[index]) {\n          const row = history[index];\n          row.text += `\\n\\n${result}`;\n          row.toolName = name;\n          row.toolOutput = output;\n          row.toolIsError = isError;\n          const startedAtMs = Number(row.toolStartedAtMs || 0);\n          row.toolDurationMs = startedAtMs > 0 && endedAtMs >= startedAtMs ? endedAtMs - startedAtMs : -1;\n          delete row.toolStartedAtMs;\n        } else {\n          add("tool", result, callId, true, { toolName: name, toolOutput: output, toolIsError: isError, toolDurationMs: -1 });\n        }\n''', 'tool-result history metadata')
+
+          p = Path(build)
+          text = p.read_text()
+          if 'versionCode = 120' not in text or 'versionName = "5.19.20"' not in text:
+              raise SystemExit('unexpected Android version before duration repair')
+          text = text.replace('versionCode = 120', 'versionCode = 121', 1)
+          text = text.replace('versionName = "5.19.20"', 'versionName = "5.19.21"', 1)
+          text = text.replace('// v5.19.20 hotfix (120): deterministic bottom-follow state and layout watcher.', '// v5.19.21 (121): persist structured tool metadata and execution duration across history restores.', 1)
+          p.write_text(text)
+
+          p = Path(test)
+          text = p.read_text()
+          anchor = 'const markdown = await readFile("app/src/main/java/com/piandroid/MarkdownContent.kt", "utf8");\n'
+          if anchor not in text:
+              raise SystemExit('test read anchor missing')
+          text = text.replace(anchor, anchor + 'const bridge = await readFile("app/src/main/assets/pi-android-bridge.mjs", "utf8");\nconst extras = await readFile("app/src/main/java/com/piandroid/PiBridgeExtras.kt", "utf8");\n', 1)
+          text += '''\nassert.ok(main.includes("toolDurationMs = message.toolDurationMs"), "restored tool cards must retain durable execution duration");\nassert.ok(main.includes("toolName = message.toolName"), "restored tool cards must retain their real tool name");\nassert.ok(main.includes("line.toolDurationMs >= 0L"), "tool renderer must prefer durable duration after history restore");\nassert.ok(extras.includes("val toolDurationMs: Long = -1L"), "history DTO must carry tool duration metadata");\nassert.ok(bridge.includes("tool-history-metadata-v1"), "bridge must advertise durable tool-history metadata");\nassert.ok(bridge.includes("row.toolDurationMs = startedAtMs > 0"), "durable history must derive tool duration from persisted session timestamps");\n'''
+          p.write_text(text)
+          PY
+      - name: Verify durable repair
+        run: |
+          git diff --check
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_active_session_ui.mjs
+          grep -q 'versionCode = 121' app/build.gradle.kts
+          grep -q 'versionName = "5.19.21"' app/build.gradle.kts
+          grep -q 'tool-history-metadata-v1' app/src/main/java/com/piandroid/PiBridge.kt
+          grep -q 'toolDurationMs = message.toolDurationMs' app/src/main/java/com/piandroid/MainActivity.kt
+      - name: Commit repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/piandroid/MainActivity.kt app/src/main/java/com/piandroid/PiBridgeExtras.kt app/src/main/java/com/piandroid/PiBridge.kt app/src/main/assets/pi-android-bridge.mjs app/build.gradle.kts tools/test_active_session_ui.mjs
+          git commit -m "Persist tool duration across history restores [skip ci]"
+          git push origin HEAD:fix/security-lifecycle-build
