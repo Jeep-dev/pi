@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.19: keep every Markdown table row equal-height when cells wrap.
+// v5.19.20: make bottom-follow resilient to delayed Compose remeasurement.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 118
-        versionName = "5.19.19"
+        versionCode = 119
+        versionName = "5.19.20"
     }
 
     signingConfigs {

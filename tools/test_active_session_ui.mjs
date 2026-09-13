@@ -16,3 +16,8 @@ console.log("Active-session UI ownership guards passed");
 assert.ok(main.includes("awaitPointerEvent(PointerEventPass.Final)"), "Session drawer must wait for horizontal child scroll surfaces");
 assert.ok(main.includes("change.isConsumed"), "consumed child drags must not open the Session drawer");
 assert.ok(markdown.includes("Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())"), "wide Markdown tables need a full-width horizontal viewport");
+
+assert.ok(main.includes("stableBottomFrames"), "bottom follow must survive delayed Compose remeasurement");
+assert.ok(main.includes("repeat(16)"), "bottom follow must wait across multiple layout frames");
+assert.ok(main.includes("scrollToRealBottom { followOutput }"), "automatic scrolling must stop immediately after the user disables follow");
+assert.ok(main.includes("abs(available.y) > abs(available.x)"), "horizontal table/code scrolling must not disable bottom follow");

@@ -1499,7 +1499,10 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.18
+                """Pi Android v5.19.20
+                |• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效
+                |• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底
+                |• 只有纵向手势会暂停自动跟随，横向表格/代码滑动不再误关 follow
                 |• Markdown 表格和代码块优先接管横向滑动，不再误触 Session 侧栏
                 |• 宽表格使用完整屏幕宽度作为横向滚动视口，可左右查看全部列
                 |• /settings 显示并可编辑每个 Session 的附加启动参数
@@ -1688,7 +1691,7 @@ private fun PiScreen(
             .collect { (lineCount, _, shouldFollow) ->
                 if (shouldFollow && lineCount > 0) {
                     delay(24)
-                    if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom()
+                    if (followOutput && lines.isNotEmpty()) chatListState.scrollToRealBottom { followOutput }
                 }
             }
     }
@@ -1696,7 +1699,7 @@ private fun PiScreen(
     LaunchedEffect(imeBottom) {
         if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
             delay(80)
-            chatListState.scrollToRealBottom()
+            chatListState.scrollToRealBottom { followOutput }
         }
     }
 
@@ -2063,14 +2066,55 @@ private fun TerminalHeader(cwd: String, model: String, status: String, connected
     }
 }
 
-private suspend fun LazyListState.scrollToRealBottom() {
-    repeat(3) { withFrameNanos { }; val count = layoutInfo.totalItemsCount; if (count == 0) return; val target = count - 1; val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1; if (lastVisible < target - 1) { scrollToItem(target); withFrameNanos { } }; if (!canScrollForward) return; val moved = scrollBy(1_000_000f); if (kotlin.math.abs(moved) < 0.5f || !canScrollForward) return }
+private suspend fun LazyListState.scrollToRealBottom(keepFollowing: () -> Boolean = { true }) {
+    // A visible-content mutation is observed before Compose necessarily finishes measuring
+    // the new tool/Markdown height. Wait for several stable frames instead of returning on
+    // the first frame that still reports the old "already at bottom" layout.
+    var stableBottomFrames = 0
+    repeat(16) {
+        if (!keepFollowing()) return
+        withFrameNanos { }
+        val count = layoutInfo.totalItemsCount
+        if (count == 0) return
+        val target = count - 1
+        val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (lastVisible < target) {
+            scrollToItem(target)
+            stableBottomFrames = 0
+            return@repeat
+        }
+        if (!keepFollowing()) return
+        if (canScrollForward) {
+            scrollBy(1_000_000f)
+            stableBottomFrames = 0
+        } else {
+            stableBottomFrames += 1
+            if (stableBottomFrames >= 4) return
+        }
+    }
 }
 
 @Composable
 private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, status: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, onConnect: () -> Unit, onSettings: () -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
-    val userScrollLock = remember(listState) { object : NestedScrollConnection { override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset { if (source == NestedScrollSource.UserInput) { onFollowChange(false); onUserScrollActivity() }; return Offset.Zero }; override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset { if (source == NestedScrollSource.UserInput && isAtBottom()) onFollowChange(true); return Offset.Zero } } }
+    val userScrollLock = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val verticalInput = abs(available.y) > abs(available.x) && abs(available.y) > 0.5f
+                if (source == NestedScrollSource.UserInput && verticalInput) {
+                    onFollowChange(false)
+                    onUserScrollActivity()
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                val verticalInput = abs(consumed.y) > abs(consumed.x) || abs(available.y) > abs(available.x)
+                if (source == NestedScrollSource.UserInput && verticalInput && isAtBottom()) onFollowChange(true)
+                return Offset.Zero
+            }
+        }
+    }
     LaunchedEffect(listState) { snapshotFlow { isAtBottom() }.distinctUntilChanged().collect { atBottom -> if (atBottom) onFollowChange(true) } }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 3.dp).nestedScroll(userScrollLock), contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item(key = "session-meta") {
