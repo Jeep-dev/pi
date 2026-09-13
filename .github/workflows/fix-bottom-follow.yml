@@ -23,39 +23,23 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          root = Path('.')
-          main_path = root / 'app/src/main/java/com/piandroid/MainActivity.kt'
-          build_path = root / 'app/build.gradle.kts'
+          main_path = Path('app/src/main/java/com/piandroid/MainActivity.kt')
+          build_path = Path('app/build.gradle.kts')
           main = main_path.read_text()
 
-          old_scroll_lock = '''    val userScrollLock = remember(listState) {
-              object : NestedScrollConnection {
-                  override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                      val verticalInput = abs(available.y) > abs(available.x) && abs(available.y) > 0.5f
-                      if (source == NestedScrollSource.UserInput && verticalInput) {
-                          onFollowChange(false)
-                          onUserScrollActivity()
-                      }
-                      return Offset.Zero
-                  }
-
-                  override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                      val verticalInput = abs(consumed.y) > abs(consumed.x) || abs(available.y) > abs(available.x)
-                      if (source == NestedScrollSource.UserInput && verticalInput && isAtBottom()) onFollowChange(true)
-                      return Offset.Zero
-                  }
-              }
-          }
-          LaunchedEffect(listState) { snapshotFlow { isAtBottom() }.distinctUntilChanged().collect { atBottom -> if (atBottom) onFollowChange(true) } }
-          '''
+          start_marker = '    val userScrollLock = remember(listState) {'
+          end_marker = '    LazyColumn(state = listState'
+          start = main.find(start_marker)
+          end = main.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('could not locate ChatPanel scroll lock')
 
           new_scroll_lock = '''    val userScrollLock = remember(listState) {
               object : NestedScrollConnection {
                   override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                      // Do not disable follow merely because a finger touched/dragged vertically.
-                      // Persistently leave follow mode only after the list actually moved away
-                      // from the bottom. This avoids a race where new tool/search content grows
-                      // between pre-scroll and post-scroll and falsely latches follow=false.
+                      // Touching or dragging at the bottom is not enough to disable follow.
+                      // Only an actual user-driven list movement may change the persistent
+                      // follow state; this prevents tool/search growth from racing pre-scroll.
                       return Offset.Zero
                   }
 
@@ -75,24 +59,22 @@ jobs:
                   .collect { atBottom -> if (atBottom) onFollowChange(true) }
           }
           '''
+          main = main[:start] + new_scroll_lock + main[end:]
 
-          if old_scroll_lock not in main:
-              raise SystemExit('user scroll lock block did not match current source')
-          main = main.replace(old_scroll_lock, new_scroll_lock, 1)
-
-          marker = '''    LaunchedEffect(imeBottom) {
+          ime_marker = '''    LaunchedEffect(imeBottom) {
               if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
                   delay(80)
                   chatListState.scrollToRealBottom { followOutput }
               }
           }
           '''
+          if ime_marker not in main:
+              raise SystemExit('could not locate IME follow effect')
 
-          layout_watcher = '''    // Follow the measured LazyColumn layout itself, not only message data mutations.
-          // Tool cards, Markdown and web-search results can become taller a frame (or several
-          // frames) after the backing ChatLine changed. If that late remeasure opens scrollable
-          // space while follow=true, immediately catch up to the real bottom. While the user is
-          // physically scrolling, this watcher stays out of the way.
+          watcher = '''    // Observe the measured LazyColumn layout itself. Tool cards, Markdown and
+          // web-search output may become taller after the ChatLine mutation was already handled.
+          // If late remeasurement opens new scrollable space while follow=true, catch up again.
+          // During a real user scroll this watcher stays idle so it never fights the finger.
           LaunchedEffect(chatListState) {
               snapshotFlow {
                   val layout = chatListState.layoutInfo
@@ -122,40 +104,48 @@ jobs:
                   }
           }
 
-          ''' + marker
-
-          if marker not in main:
-              raise SystemExit('IME follow marker did not match current source')
-          main = main.replace(marker, layout_watcher, 1)
-
-          changelog_marker = '''                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
           '''
-          changelog_new = '''                |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow
-                  |• 直接监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底
-                  |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
-          '''
-          if changelog_marker not in main:
-              raise SystemExit('changelog marker did not match current source')
-          main = main.replace(changelog_marker, changelog_new, 1)
+          if 'Observe the measured LazyColumn layout itself' not in main:
+              main = main.replace(ime_marker, watcher + ime_marker, 1)
+
+          changelog_line = '                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间\n'
+          if changelog_line in main and '自动跟随只在用户实际滚离底部后关闭' not in main:
+              main = main.replace(
+                  changelog_line,
+                  '                |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow\n'
+                  '                |• 直接监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底\n'
+                  + changelog_line,
+                  1,
+              )
+
           main_path.write_text(main)
 
           build = build_path.read_text()
-          if 'versionCode = 119' not in build:
-              raise SystemExit('expected versionCode 119')
-          build = build.replace('versionCode = 119', 'versionCode = 120', 1)
-          build = build.replace('// v5.19.20: make bottom-follow resilient to delayed Compose remeasurement.', '// v5.19.20 hotfix (120): deterministic bottom-follow state and layout watcher.', 1)
+          if 'versionCode = 119' in build:
+              build = build.replace('versionCode = 119', 'versionCode = 120', 1)
+          elif 'versionCode = 120' not in build:
+              raise SystemExit('unexpected versionCode')
+          build = build.replace(
+              '// v5.19.20: make bottom-follow resilient to delayed Compose remeasurement.',
+              '// v5.19.20 hotfix (120): deterministic bottom-follow state and layout watcher.',
+              1,
+          )
           build_path.write_text(build)
           PY
       - name: Verify patch
         run: |
           git diff --check
           grep -q 'val userActuallyMoved = source == NestedScrollSource.UserInput' app/src/main/java/com/piandroid/MainActivity.kt
-          grep -q 'Follow the measured LazyColumn layout itself' app/src/main/java/com/piandroid/MainActivity.kt
+          grep -q 'Observe the measured LazyColumn layout itself' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'chatListState.isScrollInProgress' app/src/main/java/com/piandroid/MainActivity.kt
           grep -q 'versionCode = 120' app/build.gradle.kts
           node tools/test_active_session_ui.mjs
       - name: Commit hotfix
         run: |
+          if git diff --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/src/main/java/com/piandroid/MainActivity.kt app/build.gradle.kts
