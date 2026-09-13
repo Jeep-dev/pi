@@ -24,7 +24,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-12.3"
+    private val expectedBridgeVersion = "2026-09-13.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -34,7 +34,8 @@ class PiBridge(
         "consistent-recovery-v1",
         "bounded-event-cache-v1",
         "hard-stop-v1",
-        "conversation-owner-v1"
+        "conversation-owner-v1",
+        "tool-history-metadata-v1"
     )
     private val authToken: String by lazy {
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)

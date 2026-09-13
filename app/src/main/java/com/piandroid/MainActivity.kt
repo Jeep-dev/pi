@@ -234,7 +234,8 @@ private data class ChatLine(
     val toolMeta: String = "",
     val toolIsError: Boolean = false,
     val toolStartedAt: Long = 0L,
-    val toolEndedAt: Long = 0L
+    val toolEndedAt: Long = 0L,
+    val toolDurationMs: Long = -1L
 )
 private data class LocalCommand(val name: String, val description: String)
 
@@ -863,7 +864,12 @@ private fun PiScreen(
                     text = message.text,
                     toolCallId = message.toolCallId,
                     collapsed = message.collapsed,
-                    tokensBefore = message.tokensBefore
+                    tokensBefore = message.tokensBefore,
+                    toolName = message.toolName,
+                    toolArgs = message.toolArgs,
+                    toolOutput = message.toolOutput,
+                    toolIsError = message.toolIsError,
+                    toolDurationMs = message.toolDurationMs
                 )
             )
         }
@@ -1020,7 +1026,8 @@ private fun PiScreen(
                 toolOutput = event.text.trimEnd().ifBlank { line.toolOutput },
                 toolMeta = event.metaText.ifBlank { line.toolMeta },
                 toolIsError = event.isError,
-                toolEndedAt = endedAt
+                toolEndedAt = endedAt,
+                toolDurationMs = if (line.toolStartedAt > 0L) (endedAt - line.toolStartedAt).coerceAtLeast(0L) else line.toolDurationMs
             )
         } else {
             lines.add(
@@ -1499,9 +1506,10 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.20
+                """Pi Android v5.19.21
                 |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow
                 |• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底
+                |• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留
                 |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
                 |• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效
                 |• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底
@@ -2178,12 +2186,18 @@ LaunchedEffect(listState) {
                         val colors = LocalPiColors.current
                         var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
                         LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(250) } }
-                        val toolOutput = line.toolOutput.ifBlank { fullText }
+                        val hasStructuredTool = line.toolName.isNotBlank() || line.toolArgs.isNotBlank() || line.toolOutput.isNotBlank() || line.toolDurationMs >= 0L
+                        val toolOutput = if (hasStructuredTool) line.toolOutput else fullText
                         val outputHint = toolHiddenHint(toolOutput)
                         val argsHint = toolArgsHiddenHint(line.toolArgs)
                         val renderedOutput = if (line.collapsed && outputHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
                         val renderedArgs = if (line.collapsed && argsHint.isNotBlank()) toolArgsPreview(line.toolArgs) else line.toolArgs
-                        val duration = if (line.toolStartedAt > 0L) formatToolDuration((if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt) else ""
+                        val durationMs = when {
+                            line.toolDurationMs >= 0L -> line.toolDurationMs
+                            line.toolStartedAt > 0L -> (if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt
+                            else -> -1L
+                        }
+                        val duration = if (durationMs >= 0L) formatToolDuration(durationMs) else ""
                         val name = line.toolName.ifBlank { "tool" }
                         val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; else -> colors.toolSuccessBg }
                         val expandable = argsHint.isNotBlank() || outputHint.isNotBlank()

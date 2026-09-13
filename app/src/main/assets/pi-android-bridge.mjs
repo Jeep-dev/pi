@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-12.3";
+const bridgeVersion = "2026-09-13.1";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -23,6 +23,7 @@ const bridgeCapabilities = [
   "bounded-event-cache-v1",
   "hard-stop-v1",
   "conversation-owner-v1",
+  "tool-history-metadata-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -410,12 +411,28 @@ function toolArgumentsText(name, args) {
   return formatted.length > 4000 ? `${formatted.slice(0, 4000)}\n… 参数显示已截断` : formatted;
 }
 
-function toolResultText(name, message) {
+function entryTimestampMs(entry, message = {}) {
+  const entryValue = Date.parse(String(entry?.timestamp || ""));
+  if (Number.isFinite(entryValue)) return entryValue;
+  const messageValue = Number(message?.timestamp);
+  return Number.isFinite(messageValue) && messageValue > 0 ? messageValue : 0;
+}
+
+function toolResultOutput(name, message) {
   const output = contentText(message?.content, "[图片输出]");
   const isError = Boolean(message?.isError);
-  const sections = [isError ? `工具执行失败：${name}` : `工具完成：${name}`];
+  const sections = [];
   const diff = !isError && name === "edit" ? String(message?.details?.diff || "") : "";
   if (diff.trim() && !output.includes(diff)) sections.push(diff);
+  if (output.trim()) sections.push(output);
+  if (isError && sections.length === 0) sections.push("Error");
+  return sections.join("\n\n");
+}
+
+function toolResultText(name, message) {
+  const isError = Boolean(message?.isError);
+  const sections = [isError ? `工具执行失败：${name}` : `工具完成：${name}`];
+  const output = toolResultOutput(name, message);
   if (output.trim()) sections.push(output);
   return sections.join("\n\n");
 }
@@ -481,7 +498,21 @@ function historyFromEntries(data) {
             const callId = String(part.id || "");
             const name = String(part.name || "tool");
             const details = toolArgumentsText(name, part.arguments);
-            add("tool", `执行工具：${name}${details ? `\n\n${details}` : ""}`, callId, true);
+            const startedAtMs = entryTimestampMs(entry, message);
+            add(
+              "tool",
+              `执行工具：${name}${details ? `\n\n${details}` : ""}`,
+              callId,
+              true,
+              {
+                toolName: name,
+                toolArgs: details,
+                toolOutput: "",
+                toolIsError: false,
+                toolStartedAtMs: startedAtMs,
+                toolDurationMs: -1,
+              },
+            );
             if (callId) toolLines.set(callId, history.length - 1);
           }
         }
@@ -494,9 +525,22 @@ function historyFromEntries(data) {
         const callId = String(message.toolCallId || "");
         const name = String(message.toolName || "tool");
         const result = toolResultText(name, message);
+        const output = toolResultOutput(name, message);
+        const isError = Boolean(message.isError);
+        const endedAtMs = entryTimestampMs(entry, message);
         const index = toolLines.get(callId);
-        if (index != null && history[index]) history[index].text += `\n\n${result}`;
-        else add("tool", result, callId, true);
+        if (index != null && history[index]) {
+          const row = history[index];
+          row.text += `\n\n${result}`;
+          row.toolName = name;
+          row.toolOutput = output;
+          row.toolIsError = isError;
+          const startedAtMs = Number(row.toolStartedAtMs || 0);
+          row.toolDurationMs = startedAtMs > 0 && endedAtMs >= startedAtMs ? endedAtMs - startedAtMs : -1;
+          delete row.toolStartedAtMs;
+        } else {
+          add("tool", result, callId, true, { toolName: name, toolOutput: output, toolIsError: isError, toolDurationMs: -1 });
+        }
       } else if (role === "bashExecution") {
         const output = contentText(message.content) || String(message.output || "");
         add("tool", `执行 Bash：${String(message.command || "")}${output ? `\n\n${output}` : ""}`, String(message.toolCallId || entry.id || ""), true);

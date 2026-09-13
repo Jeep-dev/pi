@@ -17,7 +17,12 @@ private fun parseHistory(messages: JSONArray): List<PiHistoryMessage> = buildLis
                 text = text,
                 toolCallId = message.optString("toolCallId"),
                 collapsed = message.optBoolean("collapsed", true),
-                tokensBefore = message.optLong("tokensBefore")
+                tokensBefore = message.optLong("tokensBefore"),
+                toolName = message.optString("toolName"),
+                toolArgs = message.optString("toolArgs"),
+                toolOutput = message.optString("toolOutput"),
+                toolIsError = message.optBoolean("toolIsError", false),
+                toolDurationMs = if (message.has("toolDurationMs")) message.optLong("toolDurationMs", -1L) else -1L
             )
         )
     }
@@ -58,7 +63,12 @@ data class PiHistoryMessage(
     val text: String,
     val toolCallId: String = "",
     val collapsed: Boolean = true,
-    val tokensBefore: Long = 0
+    val tokensBefore: Long = 0,
+    val toolName: String = "",
+    val toolArgs: String = "",
+    val toolOutput: String = "",
+    val toolIsError: Boolean = false,
+    val toolDurationMs: Long = -1L
 )
 
 data class PiRecoverySnapshot(
