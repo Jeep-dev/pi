@@ -1,0 +1,204 @@
+name: Fix closed Session resume
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-closed-session-resume.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Patch trusted shared resume roots
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"anchor count for {path}: {count}, expected 1")
+              p.write_text(text.replace(old, new, 1))
+
+          bridge_path = Path("app/src/main/assets/pi-android-bridge.mjs")
+          bridge = bridge_path.read_text()
+          bridge = bridge.replace('const bridgeVersion = "2026-09-14.2";', 'const bridgeVersion = "2026-09-14.3";', 1)
+          bridge = bridge.replace('  "cwd-shared-resume-v1",\n];', '  "cwd-shared-resume-v1",\n  "closed-session-resume-v1",\n];', 1)
+          old = '''      const target = path.resolve(String(input.path || ""));
+      const sessionRoots = [];
+      for (const directory of sessionDiscoveryDirectories()) {
+        try { sessionRoots.push(await realpath(directory)); } catch {}
+      }
+      if (sessionRoots.length === 0) throw new Error("Pi session persistence is disabled");
+      const canonicalTarget = await realpath(target);
+      if (!canonicalTarget.endsWith(".jsonl") || !sessionRoots.some(root =>
+        canonicalTarget === root || canonicalTarget.startsWith(`${root}${path.sep}`)
+      )) {
+        throw new Error("session path outside trusted Pi session directories");
+      }
+      if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
+      const targetSummary = await summarizeSession(canonicalTarget, "");
+      if (targetSummary.id !== targetPiConversationId) {
+        throw new Error(`Pi conversation identity mismatch: expected=${targetPiConversationId} actual=${targetSummary.id}`);
+      }
+'''
+          new = '''      const target = path.resolve(String(input.path || ""));
+      const baseDirectories = sessionDiscoveryDirectories().map(directory => path.resolve(directory));
+      const allDirectories = [...new Set([
+        ...baseDirectories,
+        ...(await androidPrivateSessionDirectories()),
+      ].filter(Boolean).map(directory => path.resolve(directory)))];
+      const sessionRoots = [];
+      const trustedUnscopedRoots = new Set();
+      for (const directory of allDirectories) {
+        try {
+          const root = await realpath(directory);
+          sessionRoots.push(root);
+          if (baseDirectories.includes(path.resolve(directory))) trustedUnscopedRoots.add(root);
+        } catch {}
+      }
+      if (sessionRoots.length === 0) throw new Error("Pi session persistence is disabled");
+      const canonicalTarget = await realpath(target);
+      if (!canonicalTarget.endsWith(".jsonl") || !sessionRoots.some(root =>
+        canonicalTarget === root || canonicalTarget.startsWith(`${root}${path.sep}`)
+      )) {
+        throw new Error("session path outside trusted Pi session directories");
+      }
+      if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
+      const targetSummary = await summarizeSession(canonicalTarget, "");
+      const sessionCwd = String(targetSummary.cwd || "").trim();
+      const sourceDirectory = path.resolve(path.dirname(canonicalTarget));
+      const sameCwd = sessionCwd
+        ? path.resolve(expandHome(sessionCwd)) === path.resolve(cwd)
+        : trustedUnscopedRoots.has(sourceDirectory);
+      if (!sameCwd) throw new Error("session cwd does not match this Android Session");
+      if (targetSummary.id !== targetPiConversationId) {
+        throw new Error(`Pi conversation identity mismatch: expected=${targetPiConversationId} actual=${targetSummary.id}`);
+      }
+'''
+          if bridge.count(old) != 1:
+              raise SystemExit(f"switch-session anchor count: {bridge.count(old)}")
+          bridge_path.write_text(bridge.replace(old, new, 1))
+
+          kotlin = Path("app/src/main/java/com/piandroid/PiBridge.kt")
+          k = kotlin.read_text()
+          k = k.replace('private val expectedBridgeVersion = "2026-09-14.2"', 'private val expectedBridgeVersion = "2026-09-14.3"', 1)
+          k = k.replace('        "cwd-shared-resume-v1"\n    )', '        "cwd-shared-resume-v1",\n        "closed-session-resume-v1"\n    )', 1)
+          if 'expectedBridgeVersion = "2026-09-14.3"' not in k or '"closed-session-resume-v1"' not in k:
+              raise SystemExit("PiBridge version/capability patch failed")
+          kotlin.write_text(k)
+
+          auth = Path("tools/test_bridge_auth.mjs")
+          a = auth.read_text().replace('2026-09-14.2', '2026-09-14.3')
+          auth.write_text(a)
+
+          test = Path("tools/test_mobile_resume.mjs")
+          t = test.read_text()
+          anchor = '''  const [aStart, bStart, cStart] = await Promise.all(records.map(record => startPi(record)));
+  assert.equal(aStart.state.sessionId, "A2");
+'''
+          insertion = '''  const [aStart, bStart, cStart] = await Promise.all(records.map(record => startPi(record)));
+
+  // Simulate an Android Session window that was explicitly closed. Its runtime
+  // record is gone, but its private Pi JSONL history remains on disk and must be
+  // resumable from any other Session with the same cwd.
+  const closedDir = path.join(home, ".pi", "android", "sessions", "CLOSED", "pi-sessions");
+  await mkdir(closedDir, { recursive: true });
+  const closedPath = path.join(closedDir, "CLOSED1.jsonl");
+  const closedTimestamp = new Date().toISOString();
+  await writeFile(closedPath, [
+    { type: "session", version: 3, id: "CLOSED1", timestamp: closedTimestamp, cwd },
+    { type: "message", id: "closed-user", parentId: null, timestamp: closedTimestamp, message: { role: "user", content: "CLOSED-HISTORY" } },
+    { type: "message", id: "closed-assistant", parentId: "closed-user", timestamp: closedTimestamp, message: { role: "assistant", content: [{ type: "text", text: "reply-CLOSED-HISTORY" }] } },
+  ].map(entry => JSON.stringify(entry)).join("\\n") + "\\n");
+  const otherPath = path.join(closedDir, "OTHER1.jsonl");
+  await writeFile(otherPath, JSON.stringify({
+    type: "session", version: 3, id: "OTHER1", timestamp: closedTimestamp, cwd: path.join(home, "other-project"),
+  }) + "\\n");
+
+  assert.equal(aStart.state.sessionId, "A2");
+'''
+          if t.count(anchor) != 1:
+              raise SystemExit("mobile resume setup anchor mismatch")
+          t = t.replace(anchor, insertion, 1)
+          old_list = '''    ["A1.jsonl", "A2.jsonl", "legacy.jsonl"],
+    "/resume must list both private and legacy Pi sessions",
+'''
+          new_list = '''    ["A1.jsonl", "A2.jsonl", "CLOSED1.jsonl", "legacy.jsonl"],
+    "/resume must list current, closed same-cwd, and legacy Pi sessions",
+'''
+          if t.count(old_list) != 1:
+              raise SystemExit("mobile resume list anchor mismatch")
+          t = t.replace(old_list, new_list, 1)
+          anchor2 = '''  assert.equal(wrongConversation.status, 500, "a Bridge must reject a mismatched Pi conversation ID before switching");
+  assert.deepEqual(userTexts(await history(records[0])), ["BBB"]);
+'''
+          insertion2 = '''  assert.equal(wrongConversation.status, 500, "a Bridge must reject a mismatched Pi conversation ID before switching");
+
+  const wrongCwd = await request(records[0], "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "OTHER1", path: otherPath }),
+  });
+  assert.equal(wrongCwd.status, 500, "shared private history must still be restricted to the same cwd");
+
+  const switchedClosed = await request(records[0], "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "CLOSED1", path: closedPath }),
+  }).then(async response => {
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return JSON.parse(text);
+  });
+  assert.equal(switchedClosed.state.sessionId, "CLOSED1");
+  assert.equal(switchedClosed.state.sessionFile, closedPath);
+  assert.deepEqual(userTexts(await history(records[0])), ["CLOSED-HISTORY"]);
+
+  const returnedA2 = await request(records[0], "/switch-session", {
+    method: "POST",
+    body: JSON.stringify({ androidSessionId: "A", piConversationId: "A2", path: a2Path }),
+  });
+  assert.equal(returnedA2.status, 200);
+  assert.deepEqual(userTexts(await history(records[0])), ["BBB"]);
+'''
+          if t.count(anchor2) != 1:
+              raise SystemExit("mobile resume switch anchor mismatch")
+          test.write_text(t.replace(anchor2, insertion2, 1))
+
+          gradle = Path("app/build.gradle.kts")
+          g = gradle.read_text()
+          g = g.replace('// v5.19.26 build 126: restore and restart every persisted open Session window after App restart.',
+                        '// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.', 1)
+          g = g.replace('        versionCode = 126', '        versionCode = 127', 1)
+          g = g.replace('        versionName = "5.19.26"', '        versionName = "5.19.27"', 1)
+          if 'versionCode = 127' not in g or 'versionName = "5.19.27"' not in g:
+              raise SystemExit("version bump failed")
+          gradle.write_text(g)
+          PY
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_mobile_resume.mjs
+          node tools/test_bridge_auth.mjs
+          git diff --check
+          grep -q 'closed-session-resume-v1' app/src/main/assets/pi-android-bridge.mjs
+          grep -q 'versionName = "5.19.27"' app/build.gradle.kts
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/assets/pi-android-bridge.mjs app/src/main/java/com/piandroid/PiBridge.kt tools/test_bridge_auth.mjs tools/test_mobile_resume.mjs app/build.gradle.kts
+          git commit -m "Allow resume from closed same-cwd Session history"
+          git push origin HEAD:fix/security-lifecycle-build
