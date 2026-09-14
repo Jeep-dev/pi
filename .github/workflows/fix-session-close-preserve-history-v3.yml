@@ -1,0 +1,38 @@
+name: Fix terminal-style Session close v3
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-session-close-preserve-history-v3.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Apply and validate repair
+        run: |
+          python tools/patch_session_close_semantics.py
+          git checkout -- .github/workflows/android.yml
+          node tools/test_session_close_preserves_history.mjs
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_bridge_auth.mjs
+          git diff --check
+          grep -q 'versionName = "5.19.25"' app/build.gradle.kts
+      - name: Commit repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/piandroid/PiBridge.kt app/src/main/java/com/piandroid/PiSessionRuntime.kt app/src/main/java/com/piandroid/MainActivity.kt tools/test_session_close_preserves_history.mjs app/build.gradle.kts
+          git commit -m "Preserve Pi history when closing Android Session"
+          git push origin HEAD:fix/security-lifecycle-build
