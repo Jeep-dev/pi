@@ -2,6 +2,12 @@
 
 一个给 Pi Coding Agent 使用的 Android 原生 GUI。Pi 本体继续运行在 Termux，App 通过本机 bridge 连接 Pi 的 RPC 模式，不把 Node.js、Linux 环境或模型打进 APK。
 
+## 下载
+
+当前可用版本：**v5.19.27**
+
+[下载 Release APK](https://github.com/Jeep-dev/pi/releases/download/v5.19.27/Pi-Android-v5.19.27-release.apk)
+
 ## 当前功能
 
 - Pi RPC 聊天和流式事件
@@ -36,7 +42,7 @@ termux-setup-storage
 
 ## GitHub Actions 构建
 
-将本目录上传为 GitHub 仓库后，打开 `Actions → Build Pi Android → Run workflow`。工作流会自动准备 JDK 21、Android SDK，并上传 `app-debug.apk`。
+将本目录上传为 GitHub 仓库后，打开 `Actions → Build Pi Android → Run workflow`。工作流会自动准备 JDK 21、Android SDK，并上传构建产物。
 
 ## 项目目录
 
