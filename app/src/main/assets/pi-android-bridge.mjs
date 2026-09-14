@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-14.1";
+const bridgeVersion = "2026-09-14.2";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -25,6 +25,7 @@ const bridgeCapabilities = [
   "conversation-owner-v1",
   "tool-history-metadata-v1",
   "tool-args-lossless-v1",
+  "cwd-shared-resume-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -375,6 +376,20 @@ function sessionDiscoveryDirectories() {
   )];
 }
 
+async function androidPrivateSessionDirectories() {
+  const root = path.join(termuxHome, ".pi", "android", "sessions");
+  let owners;
+  try {
+    owners = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  return owners
+    .filter(owner => owner.isDirectory())
+    .map(owner => path.join(root, owner.name, "pi-sessions"));
+}
+
 function visibleText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -674,12 +689,16 @@ async function summarizeSession(file, currentFile) {
     const tail = tailOffset > 0 ? await readSlice(handle, tailOffset, tailLen) : "";
 
     let id = "";
+    let sessionCwd = "";
     let firstUser = "";
     for (const line of head.split("\n")) {
       if (!line.trim()) continue;
       let entry;
       try { entry = JSON.parse(line); } catch { continue; }
-      if (!id && entry?.type === "session") id = String(entry.id || "");
+      if (entry?.type === "session") {
+        if (!id) id = String(entry.id || "");
+        if (!sessionCwd) sessionCwd = String(entry.cwd || "").trim();
+      }
       if (!firstUser && entry?.type === "message" && entry?.message?.role === "user") {
         firstUser = visibleText(entry.message.content);
       }
@@ -699,6 +718,7 @@ async function summarizeSession(file, currentFile) {
     return {
       path: file,
       id,
+      cwd: sessionCwd,
       title: title.length > 120 ? title.slice(0, 120) + "…" : title,
       modified: info.mtimeMs,
       current: !!currentFile && path.resolve(file) === path.resolve(currentFile),
@@ -709,7 +729,12 @@ async function summarizeSession(file, currentFile) {
 }
 
 async function listSessions() {
-  const directories = sessionDiscoveryDirectories();
+  const baseDirectories = sessionDiscoveryDirectories();
+  const directories = [...new Set([
+    ...baseDirectories,
+    ...(await androidPrivateSessionDirectories()),
+  ].filter(Boolean).map(directory => path.resolve(directory)))];
+  const trustedUnscopedDirectories = new Set(baseDirectories.map(directory => path.resolve(directory)));
   const seen = new Set();
   const files = [];
   for (const dir of directories) {
@@ -739,10 +764,20 @@ async function listSessions() {
   } catch {}
 
   files.sort((a, b) => b.modified - a.modified);
+  const targetCwd = path.resolve(cwd);
   const summaries = [];
-  for (const item of files.slice(0, 80)) {
-    try { summaries.push(await summarizeSession(item.file, currentFile)); }
-    catch {}
+  for (const item of files) {
+    try {
+      const summary = await summarizeSession(item.file, currentFile);
+      const sessionCwd = String(summary.cwd || "").trim();
+      const sourceDirectory = path.resolve(path.dirname(summary.path));
+      const sameCwd = sessionCwd
+        ? path.resolve(expandHome(sessionCwd)) === targetCwd
+        : trustedUnscopedDirectories.has(sourceDirectory);
+      if (!sameCwd) continue;
+      summaries.push(summary);
+      if (summaries.length >= 80) break;
+    } catch {}
   }
   return summaries;
 }

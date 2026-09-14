@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.23 build 123: preserve complete tool arguments for live and restored tool cards.
+// v5.19.24 build 124: share /resume discovery across Android Sessions with the same cwd.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 123
-        versionName = "5.19.23"
+        versionCode = 124
+        versionName = "5.19.24"
     }
 
     signingConfigs {

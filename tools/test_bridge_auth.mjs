@@ -170,7 +170,7 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-14.1");
+  assert.equal(health.bridgeVersion, "2026-09-14.2");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
@@ -182,6 +182,7 @@ try {
   assert.ok(health.capabilities.includes("conversation-owner-v1"));
   assert.ok(health.capabilities.includes("tool-history-metadata-v1"));
   assert.ok(health.capabilities.includes("tool-args-lossless-v1"));
+  assert.ok(health.capabilities.includes("cwd-shared-resume-v1"));
 
   const waitStarted = Date.now();
   const idleEvents = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=120`, {
@@ -238,12 +239,30 @@ try {
   await mkdir(sessionDirectory, { recursive: true });
   await writeFile(activeSession, JSON.stringify({ type: "session", version: 3, id: "test", cwd: home }) + "\n");
   await symlink("/etc/passwd", path.join(sessionDirectory, "leak.jsonl"));
+  const siblingDirectory = path.join(home, ".pi", "android", "sessions", "sibling-android", "pi-sessions");
+  await mkdir(siblingDirectory, { recursive: true });
+  await writeFile(path.join(siblingDirectory, "same-cwd.jsonl"), [
+    JSON.stringify({ type: "session", version: 3, id: "same-cwd", cwd: home }),
+    JSON.stringify({ type: "message", id: "same-user", parentId: null, message: { role: "user", content: [{ type: "text", text: "shared sibling conversation" }] } }),
+  ].join("\n") + "\n");
+  await writeFile(path.join(siblingDirectory, "other-cwd.jsonl"), [
+    JSON.stringify({ type: "session", version: 3, id: "other-cwd", cwd: path.join(home, "other-project") }),
+    JSON.stringify({ type: "message", id: "other-user", parentId: null, message: { role: "user", content: [{ type: "text", text: "must stay in another cwd" }] } }),
+  ].join("\n") + "\n");
   const listedSessions = await fetch(`http://127.0.0.1:${port}/sessions`, {
     headers: { Authorization: `Bearer ${token}` },
   }).then(response => response.json());
   assert.ok(
     !listedSessions.sessions.some(session => session.path.endsWith("leak.jsonl")),
     "session discovery must not follow symlinks outside the session directory",
+  );
+  assert.ok(
+    listedSessions.sessions.some(session => session.id === "same-cwd" && session.title === "shared sibling conversation"),
+    "sessions from another Android Session with the same cwd must appear in /resume",
+  );
+  assert.ok(
+    !listedSessions.sessions.some(session => session.id === "other-cwd"),
+    "sessions from a different cwd must stay out of /resume",
   );
   const switched = await fetch(`http://127.0.0.1:${port}/switch-session`, {
     method: "POST",
