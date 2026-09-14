@@ -1,0 +1,204 @@
+name: Fix shared cwd resume
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-shared-resume-cwd.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Patch resume discovery
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"anchor not found in {path}: {old[:120]!r}")
+              if text.count(old) != 1:
+                  raise SystemExit(f"anchor count != 1 in {path}: {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          bridge = "app/src/main/assets/pi-android-bridge.mjs"
+          replace_once(bridge,
+              'const bridgeVersion = "2026-09-14.1";',
+              'const bridgeVersion = "2026-09-14.2";')
+          replace_once(bridge,
+              '  "tool-args-lossless-v1",\n];',
+              '  "tool-args-lossless-v1",\n  "cwd-shared-resume-v1",\n];')
+
+          discovery_old = '''function sessionDiscoveryDirectories() {
+            return [...new Set(
+              [sessionDirForRuntime(), sessionDirForCwd(cwd)]
+                .filter(Boolean)
+                .map(directory => path.resolve(directory)),
+            )];
+          }
+          '''.replace('          ', '')
+          discovery_new = discovery_old + '''
+          async function androidPrivateSessionDirectories() {
+            const root = path.join(termuxHome, ".pi", "android", "sessions");
+            let owners;
+            try {
+              owners = await readdir(root, { withFileTypes: true });
+            } catch (error) {
+              if (error?.code === "ENOENT") return [];
+              throw error;
+            }
+            return owners
+              .filter(owner => owner.isDirectory())
+              .map(owner => path.join(root, owner.name, "pi-sessions"));
+          }
+          '''.replace('          ', '')
+          replace_once(bridge, discovery_old, discovery_new)
+
+          replace_once(bridge,
+              '    let id = "";\n    let firstUser = "";',
+              '    let id = "";\n    let sessionCwd = "";\n    let firstUser = "";')
+          replace_once(bridge,
+              '      if (!id && entry?.type === "session") id = String(entry.id || "");',
+              '      if (entry?.type === "session") {\n        if (!id) id = String(entry.id || "");\n        if (!sessionCwd) sessionCwd = String(entry.cwd || "").trim();\n      }')
+          replace_once(bridge,
+              '      id,\n      title:',
+              '      id,\n      cwd: sessionCwd,\n      title:')
+
+          replace_once(bridge,
+              'async function listSessions() {\n  const directories = sessionDiscoveryDirectories();\n  const seen = new Set();',
+              '''async function listSessions() {
+          const baseDirectories = sessionDiscoveryDirectories();
+          const directories = [...new Set([
+            ...baseDirectories,
+            ...(await androidPrivateSessionDirectories()),
+          ].filter(Boolean).map(directory => path.resolve(directory)))];
+          const trustedUnscopedDirectories = new Set(baseDirectories.map(directory => path.resolve(directory)));
+          const seen = new Set();'''.replace('          ', ''))
+
+          old_tail = '''  files.sort((a, b) => b.modified - a.modified);
+          const summaries = [];
+          for (const item of files.slice(0, 80)) {
+            try { summaries.push(await summarizeSession(item.file, currentFile)); }
+            catch {}
+          }
+          return summaries;
+          '''.replace('          ', '')
+          new_tail = '''  files.sort((a, b) => b.modified - a.modified);
+          const targetCwd = path.resolve(cwd);
+          const summaries = [];
+          for (const item of files) {
+            try {
+              const summary = await summarizeSession(item.file, currentFile);
+              const sessionCwd = String(summary.cwd || "").trim();
+              const sourceDirectory = path.resolve(path.dirname(summary.path));
+              const sameCwd = sessionCwd
+                ? path.resolve(expandHome(sessionCwd)) === targetCwd
+                : trustedUnscopedDirectories.has(sourceDirectory);
+              if (!sameCwd) continue;
+              summaries.push(summary);
+              if (summaries.length >= 80) break;
+            } catch {}
+          }
+          return summaries;
+          '''.replace('          ', '')
+          replace_once(bridge, old_tail, new_tail)
+
+          kotlin = "app/src/main/java/com/piandroid/PiBridge.kt"
+          replace_once(kotlin,
+              '    private val expectedBridgeVersion = "2026-09-14.1"',
+              '    private val expectedBridgeVersion = "2026-09-14.2"')
+          replace_once(kotlin,
+              '        "tool-args-lossless-v1"\n    )',
+              '        "tool-args-lossless-v1",\n        "cwd-shared-resume-v1"\n    )')
+
+          test = "tools/test_bridge_auth.mjs"
+          replace_once(test,
+              '  assert.equal(health.bridgeVersion, "2026-09-14.1");',
+              '  assert.equal(health.bridgeVersion, "2026-09-14.2");')
+          replace_once(test,
+              '  assert.ok(health.capabilities.includes("tool-args-lossless-v1"));',
+              '  assert.ok(health.capabilities.includes("tool-args-lossless-v1"));\n  assert.ok(health.capabilities.includes("cwd-shared-resume-v1"));')
+
+          session_anchor = '''  await symlink("/etc/passwd", path.join(sessionDirectory, "leak.jsonl"));
+          const listedSessions = await fetch(`http://127.0.0.1:${port}/sessions`, {
+          '''.replace('          ', '')
+          session_insert = '''  await symlink("/etc/passwd", path.join(sessionDirectory, "leak.jsonl"));
+          const siblingDirectory = path.join(home, ".pi", "android", "sessions", "sibling-android", "pi-sessions");
+          await mkdir(siblingDirectory, { recursive: true });
+          await writeFile(
+            path.join(siblingDirectory, "same-cwd.jsonl"),
+            [
+              JSON.stringify({ type: "session", version: 3, id: "same-cwd", cwd: home }),
+              JSON.stringify({ type: "message", id: "same-user", parentId: null, message: { role: "user", content: [{ type: "text", text: "shared sibling conversation" }] } }),
+            ].join("\\n") + "\\n",
+          );
+          await writeFile(
+            path.join(siblingDirectory, "other-cwd.jsonl"),
+            [
+              JSON.stringify({ type: "session", version: 3, id: "other-cwd", cwd: path.join(home, "other-project") }),
+              JSON.stringify({ type: "message", id: "other-user", parentId: null, message: { role: "user", content: [{ type: "text", text: "must stay in another cwd" }] } }),
+            ].join("\\n") + "\\n",
+          );
+          const listedSessions = await fetch(`http://127.0.0.1:${port}/sessions`, {
+          '''.replace('          ', '')
+          replace_once(test, session_anchor, session_insert)
+
+          assertion_anchor = '''  assert.ok(
+            !listedSessions.sessions.some(session => session.path.endsWith("leak.jsonl")),
+            "session discovery must not follow symlinks outside the session directory",
+          );
+          '''.replace('          ', '')
+          assertion_new = assertion_anchor + '''  assert.ok(
+            listedSessions.sessions.some(session => session.id === "same-cwd" && session.title === "shared sibling conversation"),
+            "sessions from another Android Session with the same cwd must appear in /resume",
+          );
+          assert.ok(
+            !listedSessions.sessions.some(session => session.id === "other-cwd"),
+            "sessions from a different cwd must stay out of /resume",
+          );
+          '''.replace('          ', '')
+          replace_once(test, assertion_anchor, assertion_new)
+
+          gradle = "app/build.gradle.kts"
+          replace_once(gradle,
+              '// v5.19.23 build 123: preserve complete tool arguments for live and restored tool cards.',
+              '// v5.19.24 build 124: share /resume discovery across Android Sessions with the same cwd.')
+          replace_once(gradle, '        versionCode = 123', '        versionCode = 124')
+          replace_once(gradle, '        versionName = "5.19.23"', '        versionName = "5.19.24"')
+
+          workflow = ".github/workflows/android.yml"
+          replace_once(workflow,
+              '# v5.19.23 lossless tool-argument and write-content validation',
+              '# v5.19.24 same-cwd shared /resume discovery validation')
+          replace_once(workflow,
+              '          name: pi-android-v5.19.23-apks',
+              '          name: pi-android-v5.19.24-apks')
+          PY
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_bridge_auth.mjs
+          git diff --check
+          grep -q 'cwd-shared-resume-v1' app/src/main/assets/pi-android-bridge.mjs
+          grep -q 'cwd-shared-resume-v1' app/src/main/java/com/piandroid/PiBridge.kt
+          grep -q 'versionName = "5.19.24"' app/build.gradle.kts
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/assets/pi-android-bridge.mjs app/src/main/java/com/piandroid/PiBridge.kt tools/test_bridge_auth.mjs app/build.gradle.kts .github/workflows/android.yml
+          git commit -m "Share resume history across matching working directories"
+          git push origin HEAD:fix/security-lifecycle-build
