@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.25 build 125: closing an Android Session preserves all Pi history and on-disk data.
+// v5.19.26 build 126: restore and restart every persisted open Session window after App restart.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 125
-        versionName = "5.19.25"
+        versionCode = 126
+        versionName = "5.19.26"
     }
 
     signingConfigs {

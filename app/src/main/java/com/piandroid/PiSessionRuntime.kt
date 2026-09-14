@@ -695,6 +695,13 @@ internal class PiSessionRuntimeManager(context: Context) {
                 conversationOwners[file] = record.androidSessionId
             }
         }
+        // The durable Session registry is the set of open terminal-like windows.
+        // After an Activity/process restart, every persisted window must attach to
+        // its surviving runtime or restart it. Explicitly closed windows were removed
+        // from the registry already, so they are intentionally not restarted.
+        records.forEach { record ->
+            runtime(record).ensureConnected(record, autoStart = true)
+        }
     }
 
     @Synchronized
