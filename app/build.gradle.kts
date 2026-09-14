@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.23 build 123: preserve complete tool arguments for live/restored cards; final CI rebuild.
+// v5.19.23 build 123: preserve complete tool arguments for live and restored tool cards.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
