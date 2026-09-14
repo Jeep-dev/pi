@@ -1,0 +1,35 @@
+name: Publish v5.19.27
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-v5.19.27.yml"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download successful Android artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir artifact
+          gh run download 34825170716 --repo Jeep-dev/pi --name pi-android-v5.19.27-apks --dir artifact
+          RELEASE_APK="$(find artifact -type f -name '*release*.apk' | head -n 1)"
+          test -n "$RELEASE_APK"
+          cp "$RELEASE_APK" Pi-Android-v5.19.27-release.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v5.19.27 Pi-Android-v5.19.27-release.apk \
+            --repo Jeep-dev/pi \
+            --target fix/security-lifecycle-build \
+            --title "Pi Android v5.19.27" \
+            --notes "当前可用版本。Release APK 已签名，可直接覆盖安装。"
