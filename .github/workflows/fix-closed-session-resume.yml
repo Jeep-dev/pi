@@ -1,0 +1,80 @@
+name: Fix closed Session resume
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-closed-session-resume.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Patch and validate
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          bridge_path = Path('app/src/main/assets/pi-android-bridge.mjs')
+          text = bridge_path.read_text()
+          text = text.replace('const bridgeVersion = "2026-09-14.2";', 'const bridgeVersion = "2026-09-14.3";', 1)
+          text = text.replace('  "cwd-shared-resume-v1",\n];', '  "cwd-shared-resume-v1",\n  "closed-session-resume-v1",\n];', 1)
+          old_roots = '      const sessionRoots = [];\n      for (const directory of sessionDiscoveryDirectories()) {\n        try { sessionRoots.push(await realpath(directory)); } catch {}\n      }'
+          new_roots = '      const baseDirectories = sessionDiscoveryDirectories().map(directory => path.resolve(directory));\n      const trustedDirectories = [...new Set([...baseDirectories, ...(await androidPrivateSessionDirectories())].filter(Boolean).map(directory => path.resolve(directory)))];\n      const sessionRoots = [];\n      const trustedUnscopedRoots = new Set();\n      for (const directory of trustedDirectories) {\n        try {\n          const root = await realpath(directory);\n          sessionRoots.push(root);\n          if (baseDirectories.includes(path.resolve(directory))) trustedUnscopedRoots.add(root);\n        } catch {}\n      }'
+          if text.count(old_roots) != 1:
+              raise SystemExit('switch-session trusted-root anchor mismatch')
+          text = text.replace(old_roots, new_roots, 1)
+          old_summary = '      const targetSummary = await summarizeSession(canonicalTarget, "");\n      if (targetSummary.id !== targetPiConversationId) {'
+          new_summary = '      const targetSummary = await summarizeSession(canonicalTarget, "");\n      const sessionCwd = String(targetSummary.cwd || "").trim();\n      const sourceDirectory = path.resolve(path.dirname(canonicalTarget));\n      const sameCwd = sessionCwd\n        ? path.resolve(expandHome(sessionCwd)) === path.resolve(cwd)\n        : trustedUnscopedRoots.has(sourceDirectory);\n      if (!sameCwd) throw new Error("session cwd does not match this Android Session");\n      if (targetSummary.id !== targetPiConversationId) {'
+          if text.count(old_summary) != 1:
+              raise SystemExit('switch-session cwd anchor mismatch')
+          text = text.replace(old_summary, new_summary, 1)
+          if 'closed-session-resume-v1' not in text or 'androidPrivateSessionDirectories()' not in text:
+              raise SystemExit('bridge repair missing')
+          bridge_path.write_text(text)
+
+          kotlin = Path('app/src/main/java/com/piandroid/PiBridge.kt')
+          k = kotlin.read_text()
+          k = k.replace('private val expectedBridgeVersion = "2026-09-14.2"', 'private val expectedBridgeVersion = "2026-09-14.3"', 1)
+          k = k.replace('        "cwd-shared-resume-v1"\n    )', '        "cwd-shared-resume-v1",\n        "closed-session-resume-v1"\n    )', 1)
+          if 'expectedBridgeVersion = "2026-09-14.3"' not in k or 'closed-session-resume-v1' not in k:
+              raise SystemExit('Kotlin bridge contract repair missing')
+          kotlin.write_text(k)
+
+          auth = Path('tools/test_bridge_auth.mjs')
+          auth.write_text(auth.read_text().replace('2026-09-14.2', '2026-09-14.3'))
+
+          gradle = Path('app/build.gradle.kts')
+          g = gradle.read_text()
+          g = g.replace('// v5.19.26 build 126: restore and restart every persisted open Session window after App restart.', '// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.', 1)
+          g = g.replace('        versionCode = 126', '        versionCode = 127', 1)
+          g = g.replace('        versionName = "5.19.26"', '        versionName = "5.19.27"', 1)
+          if 'versionCode = 127' not in g or 'versionName = "5.19.27"' not in g:
+              raise SystemExit('version bump failed')
+          gradle.write_text(g)
+          PY
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_mobile_resume.mjs
+          node tools/test_bridge_auth.mjs
+          git diff --check
+          grep -q 'closed-session-resume-v1' app/src/main/assets/pi-android-bridge.mjs
+          grep -q 'session cwd does not match this Android Session' app/src/main/assets/pi-android-bridge.mjs
+          grep -q 'versionName = "5.19.27"' app/build.gradle.kts
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/assets/pi-android-bridge.mjs app/src/main/java/com/piandroid/PiBridge.kt tools/test_bridge_auth.mjs app/build.gradle.kts
+          git commit -m "Allow resume from closed same-cwd Session history"
+          git push origin HEAD:fix/security-lifecycle-build
