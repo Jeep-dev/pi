@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-14.2";
+const bridgeVersion = "2026-09-14.3";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -26,6 +26,7 @@ const bridgeCapabilities = [
   "tool-history-metadata-v1",
   "tool-args-lossless-v1",
   "cwd-shared-resume-v1",
+  "closed-session-resume-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -1158,9 +1159,16 @@ const server = http.createServer(async (req, res) => {
       }
       if (!targetPiConversationId) throw new Error("Pi conversation identity is required");
       const target = path.resolve(String(input.path || ""));
+      const baseDirectories = sessionDiscoveryDirectories().map(directory => path.resolve(directory));
+      const trustedDirectories = [...new Set([...baseDirectories, ...(await androidPrivateSessionDirectories())].filter(Boolean).map(directory => path.resolve(directory)))];
       const sessionRoots = [];
-      for (const directory of sessionDiscoveryDirectories()) {
-        try { sessionRoots.push(await realpath(directory)); } catch {}
+      const trustedUnscopedRoots = new Set();
+      for (const directory of trustedDirectories) {
+        try {
+          const root = await realpath(directory);
+          sessionRoots.push(root);
+          if (baseDirectories.includes(path.resolve(directory))) trustedUnscopedRoots.add(root);
+        } catch {}
       }
       if (sessionRoots.length === 0) throw new Error("Pi session persistence is disabled");
       const canonicalTarget = await realpath(target);
@@ -1171,6 +1179,12 @@ const server = http.createServer(async (req, res) => {
       }
       if (!(await stat(canonicalTarget)).isFile()) throw new Error("session file not found");
       const targetSummary = await summarizeSession(canonicalTarget, "");
+      const sessionCwd = String(targetSummary.cwd || "").trim();
+      const sourceDirectory = path.resolve(path.dirname(canonicalTarget));
+      const sameCwd = sessionCwd
+        ? path.resolve(expandHome(sessionCwd)) === path.resolve(cwd)
+        : trustedUnscopedRoots.has(sourceDirectory);
+      if (!sameCwd) throw new Error("session cwd does not match this Android Session");
       if (targetSummary.id !== targetPiConversationId) {
         throw new Error(`Pi conversation identity mismatch: expected=${targetPiConversationId} actual=${targetSummary.id}`);
       }
