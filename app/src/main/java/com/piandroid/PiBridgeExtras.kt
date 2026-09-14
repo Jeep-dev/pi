@@ -17,58 +17,9 @@ internal fun normalizeRecoveredToolArgs(toolName: String, raw: String): String {
             }
         }
 
-    fun compactFromJson(args: JSONObject): String {
-        fun path(): String = args.optString("path")
-        return when (toolName) {
-            "bash" -> buildString {
-                append(args.optString("command"))
-                val timeout = args.optInt("timeout", 0)
-                if (timeout > 0) append("  (${timeout}s timeout)")
-            }
-            "read" -> buildString {
-                append(path())
-                val offset = args.optInt("offset", 0)
-                val limit = args.optInt("limit", 0)
-                if (offset > 0 || limit > 0) append("  [${if (offset > 0) "offset $offset" else ""}${if (offset > 0 && limit > 0) ", " else ""}${if (limit > 0) "limit $limit" else ""}]")
-            }
-            "write" -> buildString {
-                append(path())
-                val count = args.optString("content").length
-                if (count > 0) append("  ·  $count chars")
-            }
-            "edit" -> buildString {
-                append(path())
-                val count = args.optJSONArray("edits")?.length() ?: 0
-                if (count > 0) append("  ·  $count edits")
-            }
-            "grep" -> buildString {
-                append(args.optString("pattern"))
-                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
-            }
-            "find" -> buildString {
-                append(args.optString("pattern", args.optString("query")))
-                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
-            }
-            "ls" -> path()
-            "subagent" -> {
-                val tasks = args.optJSONArray("tasks")
-                if (tasks != null && tasks.length() > 0) {
-                    val agents = buildList {
-                        for (i in 0 until tasks.length()) {
-                            tasks.optJSONObject(i)?.optString("agent")?.takeIf { it.isNotBlank() }?.let(::add)
-                        }
-                    }.distinct()
-                    if (tasks.length() == 1) agents.firstOrNull().orEmpty()
-                    else "${tasks.length()} tasks${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
-                } else {
-                    args.optString("agent")
-                }
-            }
-            else -> args.toString().replace('\n', ' ').let { if (it.length > 800) it.take(800) + " …" else it }
-        }
-    }
-
-    runCatching { JSONObject(text) }.getOrNull()?.let { return compactFromJson(it) }
+    // New bridge histories store the complete raw arguments as JSON. Use the exact
+    // same formatter as live tool events so restart/resume never changes the card.
+    runCatching { JSONObject(text) }.getOrNull()?.let { return formatToolArgs(toolName, it) }
 
     return when (toolName) {
         "bash" -> valueAfter("命令：", "命令:") ?: text
@@ -86,9 +37,14 @@ internal fun normalizeRecoveredToolArgs(toolName: String, raw: String): String {
                 ?.substringBefore(' ')
                 ?.toIntOrNull()
                 ?: 0
+            val preview = sequenceOf("写入预览（末尾）：", "写入预览（末尾）:", "写入预览：", "写入预览:")
+                .mapNotNull { marker -> text.indexOf(marker).takeIf { it >= 0 }?.let { text.substring(it + marker.length).trimStart() } }
+                .firstOrNull()
+                .orEmpty()
             buildString {
                 append(target)
                 if (count > 0) append("  ·  $count chars")
+                if (preview.isNotBlank()) append('\n').append(preview)
             }
         }
         else -> text

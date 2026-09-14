@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.22 build 122: keep restored tool cards visually identical to live tool cards.
+// v5.19.23 build 123: preserve complete tool arguments for live and restored tool cards.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 122
-        versionName = "5.19.22"
+        versionCode = 123
+        versionName = "5.19.23"
     }
 
     signingConfigs {

@@ -24,7 +24,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-13.1"
+    private val expectedBridgeVersion = "2026-09-14.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -35,7 +35,8 @@ class PiBridge(
         "bounded-event-cache-v1",
         "hard-stop-v1",
         "conversation-owner-v1",
-        "tool-history-metadata-v1"
+        "tool-history-metadata-v1",
+        "tool-args-lossless-v1"
     )
     private val authToken: String by lazy {
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)
@@ -501,56 +502,8 @@ class PiBridge(
         }
     }
 
-    private fun toolArgsText(toolName: String, args: JSONObject?): String {
-        if (args == null || args.length() == 0) return ""
-        fun path(): String = args.optString("path")
-        return when (toolName) {
-            "bash" -> buildString {
-                append(args.optString("command"))
-                val timeout = args.optInt("timeout", 0)
-                if (timeout > 0) append("  (${timeout}s timeout)")
-            }
-            "read" -> buildString {
-                append(path())
-                val offset = args.optInt("offset", 0)
-                val limit = args.optInt("limit", 0)
-                if (offset > 0 || limit > 0) append("  [${if (offset > 0) "offset $offset" else ""}${if (offset > 0 && limit > 0) ", " else ""}${if (limit > 0) "limit $limit" else ""}]")
-            }
-            "write" -> buildString {
-                append(path())
-                val count = args.optString("content").length
-                if (count > 0) append("  ·  $count chars")
-            }
-            "edit" -> buildString {
-                append(path())
-                val count = args.optJSONArray("edits")?.length() ?: 0
-                if (count > 0) append("  ·  $count edits")
-            }
-            "grep" -> buildString {
-                append(args.optString("pattern"))
-                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
-            }
-            "find" -> buildString {
-                append(args.optString("pattern", args.optString("query")))
-                args.optString("path").takeIf { it.isNotBlank() }?.let { append("  $it") }
-            }
-            "ls" -> path()
-            "subagent" -> {
-                val tasks = args.optJSONArray("tasks")
-                if (tasks != null && tasks.length() > 0) {
-                    val agents = buildList {
-                        for (i in 0 until tasks.length()) {
-                            tasks.optJSONObject(i)?.optString("agent")?.takeIf { it.isNotBlank() }?.let(::add)
-                        }
-                    }.distinct()
-                    if (tasks.length() == 1) agents.firstOrNull().orEmpty() else "${tasks.length()} tasks${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
-                } else {
-                    args.optString("agent")
-                }
-            }
-            else -> args.toString().replace('\n', ' ').let { if (it.length > 800) it.take(800) + " …" else it }
-        }
-    }
+    private fun toolArgsText(toolName: String, args: JSONObject?): String =
+        formatToolArgs(toolName, args)
 
     private fun compactToolNumber(value: Long): String = when {
         value >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fm", value / 1_000_000.0)

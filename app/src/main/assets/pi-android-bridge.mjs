@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-13.1";
+const bridgeVersion = "2026-09-14.1";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -24,6 +24,7 @@ const bridgeCapabilities = [
   "hard-stop-v1",
   "conversation-owner-v1",
   "tool-history-metadata-v1",
+  "tool-args-lossless-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -332,7 +333,6 @@ function rpc(command, timeoutMs = 15000) {
   });
 }
 
-
 function sessionDirForCwd(baseCwd) {
   const resolved = path.resolve(baseCwd);
   const safe = `--${resolved.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
@@ -398,17 +398,11 @@ function contentText(content, imageLabel = "[图片]") {
   return parts.join("\n");
 }
 
-function toolArgumentsText(name, args) {
+// Persist raw tool arguments losslessly. Android applies the same presentation
+// formatter to both live events and restored history, so Show all can reveal all data.
+function toolArgumentsText(_name, args) {
   if (!args || typeof args !== "object") return "";
-  if (name === "write") {
-    const content = String(args.content || "");
-    const preview = content.length > 1600 ? content.slice(-1600) : content;
-    return [`目标：${String(args.path || "")}`, `内容：${content.length} 字符`, preview ? `写入预览${content.length > preview.length ? "（末尾）" : ""}：\n${preview}` : ""].filter(Boolean).join("\n\n");
-  }
-  if (name === "edit") return `目标：${String(args.path || "")}\n修改块：${Array.isArray(args.edits) ? args.edits.length : 0}`;
-  if (name === "bash") return `命令：${String(args.command || "")}`;
-  const formatted = JSON.stringify(args, null, 2);
-  return formatted.length > 4000 ? `${formatted.slice(0, 4000)}\n… 参数显示已截断` : formatted;
+  return JSON.stringify(args);
 }
 
 function entryTimestampMs(entry, message = {}) {
