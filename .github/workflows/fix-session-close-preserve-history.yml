@@ -1,0 +1,152 @@
+name: Fix terminal-style session close
+
+on:
+  push:
+    branches:
+      - fix/security-lifecycle-build
+    paths:
+      - ".github/workflows/fix-session-close-preserve-history.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/security-lifecycle-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Patch close semantics
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"anchor count for {path} is {count}, expected 1")
+              p.write_text(text.replace(old, new, 1))
+
+          bridge = Path("app/src/main/java/com/piandroid/PiBridge.kt")
+          text = bridge.read_text()
+          start_marker = "    /** Stop only this endpoint and remove only its private bridge/session namespace. */\n"
+          end_marker = "    suspend fun installAndStartBridge(): Result<Unit>"
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("PiBridge close block anchors not found")
+          replacement = '''    /** Close this Android Session like a terminal tab: stop its runtime, keep every on-disk file. */
+    suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            // Ask the owner-specific Bridge to stop Pi and exit. If it is already
+            // unhealthy, fall back to killing only the recorded process id.
+            request("/shutdown", "{}", 5_000)
+            delay(750)
+            val stopOnly = "if [ -f $remotePidFile ]; then old_pid=\\\"${'$'}(cat $remotePidFile)\\\"; kill \\\"${'$'}old_pid\\\" 2>/dev/null || true; sleep 0.3; kill -9 \\\"${'$'}old_pid\\\" 2>/dev/null || true; fi"
+            runTermux(stopOnly).getOrThrow()
+            // Deliberately do not remove bridge files, session directories,
+            // JSONL history, endpoint tokens, or runtime preferences here.
+        }
+    }
+
+'''
+          bridge.write_text(text[:start] + replacement + text[end:])
+
+          runtime = "app/src/main/java/com/piandroid/PiSessionRuntime.kt"
+          replace_once(runtime,
+              '''    fun closeAndCleanup(ownedSessionFile: String): Job {
+        val closedNow = fenceClient()
+        if (!closedNow) return scope.launch { }
+        return scope.launch {
+            try {
+                bridge.shutdownAndCleanup(ownedSessionFile)
+            } finally {
+                scope.coroutineContext[Job]?.cancel()
+            }
+        }
+    }
+''',
+              '''    fun closeRuntime(): Job {
+        val closedNow = fenceClient()
+        if (!closedNow) return scope.launch { }
+        return scope.launch {
+            try {
+                bridge.shutdownRuntime()
+            } finally {
+                scope.coroutineContext[Job]?.cancel()
+            }
+        }
+    }
+''')
+          replace_once(runtime,
+              '        return runtime.closeAndCleanup(record.ownedSessionFile)',
+              '        return runtime.closeRuntime()')
+
+          main = "app/src/main/java/com/piandroid/MainActivity.kt"
+          replace_once(main, 'Text("删除", color = Danger)', 'Text("关闭", color = Danger)')
+          replace_once(main, 'title = { Text("删除 Pi Session？") }', 'title = { Text("关闭 Pi Session？") }')
+          replace_once(main,
+              'text = { Text("将停止并清理“${sessionDisplayName(record)}”自己的 Pi、Bridge 和会话配置；不会删除项目文件或其他 Session。") }',
+              'text = { Text("将关闭“${sessionDisplayName(record)}”的 Pi/Bridge，并从 Pi Sessions 列表移除；不会删除任何 Pi 会话历史或项目文件。") }')
+          replace_once(main, 'Text("确认删除", color = Danger)', 'Text("确认关闭", color = Danger)')
+
+          test = Path("tools/test_session_close_preserves_history.mjs")
+          test.write_text('''import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const bridge = readFileSync("app/src/main/java/com/piandroid/PiBridge.kt", "utf8");
+const runtime = readFileSync("app/src/main/java/com/piandroid/PiSessionRuntime.kt", "utf8");
+const main = readFileSync("app/src/main/java/com/piandroid/MainActivity.kt", "utf8");
+
+const start = bridge.indexOf("suspend fun shutdownRuntime()");
+const end = bridge.indexOf("suspend fun installAndStartBridge", start);
+assert.ok(start >= 0 && end > start, "shutdownRuntime block must exist");
+const closeBlock = bridge.slice(start, end);
+assert.match(closeBlock, /request\("\/shutdown"/);
+assert.doesNotMatch(closeBlock, /rm\s+-/);
+assert.doesNotMatch(closeBlock, /unlink/);
+assert.doesNotMatch(closeBlock, /forgetEndpointToken/);
+assert.doesNotMatch(closeBlock, /runtimePreferences\(\)\.edit/);
+assert.match(runtime, /bridge\.shutdownRuntime\(\)/);
+assert.doesNotMatch(runtime, /shutdownAndCleanup/);
+assert.match(main, /不会删除任何 Pi 会话历史或项目文件/);
+console.log("session close preserves Pi history: ok");
+''')
+
+          gradle = "app/build.gradle.kts"
+          replace_once(gradle,
+              '// v5.19.24 build 124: share /resume discovery across Android Sessions with the same cwd.',
+              '// v5.19.25 build 125: closing an Android Session preserves all Pi history and on-disk data.')
+          replace_once(gradle, '        versionCode = 124', '        versionCode = 125')
+          replace_once(gradle, '        versionName = "5.19.24"', '        versionName = "5.19.25"')
+
+          workflow = ".github/workflows/android.yml"
+          p = Path(workflow)
+          w = p.read_text()
+          if 'node tools/test_session_close_preserves_history.mjs' not in w:
+              w = w.replace('          node tools/test_active_session_ui.mjs\n', '          node tools/test_active_session_ui.mjs\n          node tools/test_session_close_preserves_history.mjs\n', 1)
+          w = w.replace('          name: pi-android-v5.19.24-apks', '          name: pi-android-v5.19.25-apks', 1)
+          w = w.replace('# v5.19.24 same-cwd shared /resume discovery validation', '# v5.19.25 terminal-style Session close validation', 1)
+          p.write_text(w)
+          PY
+          node tools/test_session_close_preserves_history.mjs
+          node --check app/src/main/assets/pi-android-bridge.mjs
+          node tools/test_bridge_auth.mjs
+          git diff --check
+          grep -q 'versionName = "5.19.25"' app/build.gradle.kts
+          grep -q 'pi-android-v5.19.25-apks' .github/workflows/android.yml
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/piandroid/PiBridge.kt app/src/main/java/com/piandroid/PiSessionRuntime.kt app/src/main/java/com/piandroid/MainActivity.kt tools/test_session_close_preserves_history.mjs app/build.gradle.kts .github/workflows/android.yml
+          git commit -m "Preserve Pi history when closing Android Session"
+          git push origin HEAD:fix/security-lifecycle-build
