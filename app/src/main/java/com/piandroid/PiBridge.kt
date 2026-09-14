@@ -64,32 +64,13 @@ class PiBridge(
         context.packageManager.getPackageInfo(termux, 0)
     }.isSuccess
 
-    /** Stop only this endpoint and remove only its private bridge/session namespace. */
-    suspend fun shutdownAndCleanup(ownedSessionFile: String = ""): Result<Unit> = withContext(Dispatchers.IO) {
+    /** Close this Android Session like a terminal tab: stop its runtime and keep all files/history. */
+    suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            request("/shutdown", "{}", 5_000)
+            request("/shutdown", "{}", 5_000).getOrThrow()
             delay(750)
-            val owned = shellQuote(ownedSessionFile)
-            val cleanup = if (runtimeOwnerSessionId == DEFAULT_ENDPOINT_KEY) {
-                // The default endpoint historically lives directly under ~/.pi/android;
-                // never recursively remove that directory because it contains other tabs.
-                """
-                owned_file=$owned
-                case "${'$'}owned_file" in
-                  "${'$'}HOME"/.pi/android/sessions/default/pi-sessions/*.jsonl) rm -f -- "${'$'}owned_file" ;;
-                esac
-                if [ -f ~/.pi/android/bridge.pid ]; then old_pid="${'$'}(cat ~/.pi/android/bridge.pid)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi
-                rm -f -- ~/.pi/android/bridge.mjs ~/.pi/android/pi-android-mobile.ts ~/.pi/android/bridge.pid ~/.pi/android/bridge.log
-                rm -rf -- ~/.pi/android/sessions/default/pi-sessions
-                """.trimIndent()
-            } else {
-                // A non-default endpoint owns this whole directory, including its
-                // dedicated --session-dir history. No cwd/project path is touched.
-                "dir=~/.pi/android/sessions/${shellQuote(runtimeOwnerSessionId)}; if [ -f \"${'$'}dir/bridge.pid\" ]; then old_pid=\"${'$'}(cat \"${'$'}dir/bridge.pid\")\"; kill \"${'$'}old_pid\" 2>/dev/null || true; sleep 0.7; kill -9 \"${'$'}old_pid\" 2>/dev/null || true; fi; rm -rf -- \"${'$'}dir\""
-            }
-            runTermux(cleanup).getOrThrow()
-            runtimePreferences().edit().remove(lastSessionPreferenceKey).commit()
-            forgetEndpointToken(context, runtimeOwnerSessionId)
+            // Deliberately keep bridge files, session directories, JSONL history,
+            // endpoint tokens, and runtime preferences. Closing a tab is not deletion.
         }
     }
 

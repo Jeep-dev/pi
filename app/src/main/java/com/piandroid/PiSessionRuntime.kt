@@ -365,12 +365,12 @@ internal class PiSessionRuntime(
         }
     }
 
-    fun closeAndCleanup(ownedSessionFile: String): Job {
+    fun closeRuntime(): Job {
         val closedNow = fenceClient()
         if (!closedNow) return scope.launch { }
         return scope.launch {
             try {
-                bridge.shutdownAndCleanup(ownedSessionFile)
+                bridge.shutdownRuntime()
             } finally {
                 scope.coroutineContext[Job]?.cancel()
             }
@@ -738,7 +738,7 @@ internal class PiSessionRuntimeManager(context: Context) {
             ?: runtime(record).also { runtimes.remove(record.androidSessionId) }
         if (activeAndroidSessionId == record.androidSessionId) activeAndroidSessionId = null
         conversationOwners.entries.removeAll { it.value == record.androidSessionId }
-        return runtime.closeAndCleanup(record.ownedSessionFile)
+        return runtime.closeRuntime()
     }
 
     @Synchronized

@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.24 build 124: share /resume discovery across Android Sessions with the same cwd.
+// v5.19.25 build 125: closing an Android Session preserves all Pi history and on-disk data.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 124
-        versionName = "5.19.24"
+        versionCode = 125
+        versionName = "5.19.25"
     }
 
     signingConfigs {

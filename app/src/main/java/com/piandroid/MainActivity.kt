@@ -2072,7 +2072,7 @@ private fun SessionCreateDialog(name: String, cwd: String, startupArguments: Str
 
 @Composable
 private fun SessionManageDialog(record: PiSessionRecord, onDismiss: () -> Unit, onRename: () -> Unit, onTogglePinned: () -> Unit, onDelete: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(sessionDisplayName(record)) }, text = { Column(Modifier.fillMaxWidth()) { TextButton(onClick = onRename, modifier = Modifier.fillMaxWidth()) { Text("重命名") }; TextButton(onClick = onTogglePinned, modifier = Modifier.fillMaxWidth()) { Text(if (record.pinned) "取消置顶" else "置顶") }; TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) { Text("删除", color = Danger) } } }, confirmButton = {}, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(sessionDisplayName(record)) }, text = { Column(Modifier.fillMaxWidth()) { TextButton(onClick = onRename, modifier = Modifier.fillMaxWidth()) { Text("重命名") }; TextButton(onClick = onTogglePinned, modifier = Modifier.fillMaxWidth()) { Text(if (record.pinned) "取消置顶" else "置顶") }; TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) { Text("关闭", color = Danger) } } }, confirmButton = {}, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
@@ -2082,7 +2082,7 @@ private fun SessionRenameDialog(currentName: String, onName: (String) -> Unit, o
 
 @Composable
 private fun SessionDeleteDialog(record: PiSessionRecord, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("删除 Pi Session？") }, text = { Text("将停止并清理“${sessionDisplayName(record)}”自己的 Pi、Bridge 和会话配置；不会删除项目文件或其他 Session。") }, confirmButton = { TextButton(onClick = onConfirm) { Text("确认删除", color = Danger) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("关闭 Pi Session？") }, text = { Text("将关闭“${sessionDisplayName(record)}”的 Pi/Bridge，并从 Pi Sessions 列表移除；不会删除任何 Pi 会话历史或项目文件。") }, confirmButton = { TextButton(onClick = onConfirm) { Text("确认关闭", color = Danger) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
