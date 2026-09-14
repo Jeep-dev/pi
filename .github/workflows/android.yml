@@ -1,5 +1,5 @@
 name: Build Pi Android
-# v5.19.25 terminal-style Session close validation
+# v5.19.26 persisted open-Session restore validation
 
 on:
   workflow_dispatch:
@@ -67,5 +67,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.19.25-apks
+          name: pi-android-v5.19.26-apks
           path: app/build/outputs/apk/**/*.apk
