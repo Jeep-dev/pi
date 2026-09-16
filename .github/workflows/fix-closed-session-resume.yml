@@ -25,62 +25,66 @@ jobs:
 
           runtime = Path('app/src/main/java/com/piandroid/PiSessionRuntime.kt')
           r = runtime.read_text()
-          old = '''internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
-    val expectedFile = record.sessionFile
-    return if (expectedFile.isNotBlank()) {
-        samePiConversationFile(expectedFile, state.sessionFile) &&
-            (record.piConversationId.isBlank() || record.piConversationId == state.piConversationId)
-    } else {
-        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
-            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
-    }
-}
-'''
-          new = '''internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
-    val expectedFile = record.sessionFile
-    return if (expectedFile.isNotBlank()) {
-        // Once a durable JSONL exists, the canonical conversation identity is the
-        // file itself. Pi may expose a different/regenerated RPC sessionId after
-        // process restart; rejecting the same file on that ID loses valid history.
-        samePiConversationFile(expectedFile, state.sessionFile)
-    } else {
-        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
-            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
-    }
-}
-'''
+          old = (
+              'internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {\n'
+              '    val expectedFile = record.sessionFile\n'
+              '    return if (expectedFile.isNotBlank()) {\n'
+              '        samePiConversationFile(expectedFile, state.sessionFile) &&\n'
+              '            (record.piConversationId.isBlank() || record.piConversationId == state.piConversationId)\n'
+              '    } else {\n'
+              '        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&\n'
+              '            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }\n'
+              '    }\n'
+              '}\n'
+          )
+          new = (
+              'internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {\n'
+              '    val expectedFile = record.sessionFile\n'
+              '    return if (expectedFile.isNotBlank()) {\n'
+              '        // Once a durable JSONL exists, the canonical conversation identity is the\n'
+              '        // file itself. Pi may expose a different/regenerated RPC sessionId after\n'
+              '        // process restart; rejecting the same file on that ID loses valid history.\n'
+              '        samePiConversationFile(expectedFile, state.sessionFile)\n'
+              '    } else {\n'
+              '        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&\n'
+              '            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }\n'
+              '    }\n'
+              '}\n'
+          )
           if r.count(old) != 1:
               raise SystemExit(f'runtimeConversationMatches anchor count={r.count(old)}')
           runtime.write_text(r.replace(old, new, 1))
 
           test = Path('app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt')
           t = test.read_text()
-          old_test = '''    @Test
-    fun runtimeAttachRequiresOwnerAndConversationNotOnlyCwd() {
-        val record = PiSessionRecord(
-            "android-B", "B", "/same", "pi", 17651, "token-b",
-            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"
-        )
-        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)
-        val wrongConversation = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-A")
-        assertTrue(runtimeConversationMatches(record, matching))
-        assertFalse(runtimeConversationMatches(record, wrongConversation))
-    }
-'''
-          new_test = '''    @Test
-    fun runtimeAttachUsesPersistedSessionFileAsCanonicalConversationIdentity() {
-        val record = PiSessionRecord(
-            "android-B", "B", "/same", "pi", 17651, "token-b",
-            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"
-        )
-        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)
-        val sameFileNewRpcId = matching.copy(piConversationId = "rpc-generated-after-restart")
-        val wrongFile = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-B")
-        assertTrue(runtimeConversationMatches(record, matching))
-        assertTrue(runtimeConversationMatches(record, sameFileNewRpcId))
-        assertFalse(runtimeConversationMatches(record, wrongFile))
-    }
-'''
+          old_test = (
+              '    @Test\n'
+              '    fun runtimeAttachRequiresOwnerAndConversationNotOnlyCwd() {\n'
+              '        val record = PiSessionRecord(\n'
+              '            "android-B", "B", "/same", "pi", 17651, "token-b",\n'
+              '            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"\n'
+              '        )\n'
+              '        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)\n'
+              '        val wrongConversation = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-A")\n'
+              '        assertTrue(runtimeConversationMatches(record, matching))\n'
+              '        assertFalse(runtimeConversationMatches(record, wrongConversation))\n'
+              '    }\n'
+          )
+          new_test = (
+              '    @Test\n'
+              '    fun runtimeAttachUsesPersistedSessionFileAsCanonicalConversationIdentity() {\n'
+              '        val record = PiSessionRecord(\n'
+              '            "android-B", "B", "/same", "pi", 17651, "token-b",\n'
+              '            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"\n'
+              '        )\n'
+              '        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)\n'
+              '        val sameFileNewRpcId = matching.copy(piConversationId = "rpc-generated-after-restart")\n'
+              '        val wrongFile = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-B")\n'
+              '        assertTrue(runtimeConversationMatches(record, matching))\n'
+              '        assertTrue(runtimeConversationMatches(record, sameFileNewRpcId))\n'
+              '        assertFalse(runtimeConversationMatches(record, wrongFile))\n'
+              '    }\n'
+          )
           if t.count(old_test) != 1:
               raise SystemExit(f'identity regression test anchor count={t.count(old_test)}')
           test.write_text(t.replace(old_test, new_test, 1))
@@ -104,7 +108,6 @@ jobs:
           workflow.write_text(w)
           PY
           git diff --check
-          grep -q 'samePiConversationFile(expectedFile, state.sessionFile)' app/src/main/java/com/piandroid/PiSessionRuntime.kt
           grep -q 'sameFileNewRpcId' app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt
           grep -q 'versionName = "5.19.28"' app/build.gradle.kts
           grep -q 'pi-android-v5.19.28-apks' .github/workflows/android.yml
