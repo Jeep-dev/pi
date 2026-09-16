@@ -1,4 +1,4 @@
-name: Fix closed Session resume
+name: Fix conversation file identity
 
 on:
   push:
@@ -17,64 +17,102 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/security-lifecycle-build
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Patch and validate
+      - name: Patch file-first conversation identity
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          bridge_path = Path('app/src/main/assets/pi-android-bridge.mjs')
-          text = bridge_path.read_text()
-          text = text.replace('const bridgeVersion = "2026-09-14.2";', 'const bridgeVersion = "2026-09-14.3";', 1)
-          text = text.replace('  "cwd-shared-resume-v1",\n];', '  "cwd-shared-resume-v1",\n  "closed-session-resume-v1",\n];', 1)
-          old_roots = '      const sessionRoots = [];\n      for (const directory of sessionDiscoveryDirectories()) {\n        try { sessionRoots.push(await realpath(directory)); } catch {}\n      }'
-          new_roots = '      const baseDirectories = sessionDiscoveryDirectories().map(directory => path.resolve(directory));\n      const trustedDirectories = [...new Set([...baseDirectories, ...(await androidPrivateSessionDirectories())].filter(Boolean).map(directory => path.resolve(directory)))];\n      const sessionRoots = [];\n      const trustedUnscopedRoots = new Set();\n      for (const directory of trustedDirectories) {\n        try {\n          const root = await realpath(directory);\n          sessionRoots.push(root);\n          if (baseDirectories.includes(path.resolve(directory))) trustedUnscopedRoots.add(root);\n        } catch {}\n      }'
-          if text.count(old_roots) != 1:
-              raise SystemExit('switch-session trusted-root anchor mismatch')
-          text = text.replace(old_roots, new_roots, 1)
-          old_summary = '      const targetSummary = await summarizeSession(canonicalTarget, "");\n      if (targetSummary.id !== targetPiConversationId) {'
-          new_summary = '      const targetSummary = await summarizeSession(canonicalTarget, "");\n      const sessionCwd = String(targetSummary.cwd || "").trim();\n      const sourceDirectory = path.resolve(path.dirname(canonicalTarget));\n      const sameCwd = sessionCwd\n        ? path.resolve(expandHome(sessionCwd)) === path.resolve(cwd)\n        : trustedUnscopedRoots.has(sourceDirectory);\n      if (!sameCwd) throw new Error("session cwd does not match this Android Session");\n      if (targetSummary.id !== targetPiConversationId) {'
-          if text.count(old_summary) != 1:
-              raise SystemExit('switch-session cwd anchor mismatch')
-          text = text.replace(old_summary, new_summary, 1)
-          if 'closed-session-resume-v1' not in text or 'androidPrivateSessionDirectories()' not in text:
-              raise SystemExit('bridge repair missing')
-          bridge_path.write_text(text)
 
-          kotlin = Path('app/src/main/java/com/piandroid/PiBridge.kt')
-          k = kotlin.read_text()
-          k = k.replace('private val expectedBridgeVersion = "2026-09-14.2"', 'private val expectedBridgeVersion = "2026-09-14.3"', 1)
-          k = k.replace('        "cwd-shared-resume-v1"\n    )', '        "cwd-shared-resume-v1",\n        "closed-session-resume-v1"\n    )', 1)
-          if 'expectedBridgeVersion = "2026-09-14.3"' not in k or 'closed-session-resume-v1' not in k:
-              raise SystemExit('Kotlin bridge contract repair missing')
-          kotlin.write_text(k)
+          runtime = Path('app/src/main/java/com/piandroid/PiSessionRuntime.kt')
+          r = runtime.read_text()
+          old = '''internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
+    val expectedFile = record.sessionFile
+    return if (expectedFile.isNotBlank()) {
+        samePiConversationFile(expectedFile, state.sessionFile) &&
+            (record.piConversationId.isBlank() || record.piConversationId == state.piConversationId)
+    } else {
+        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
+            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
+    }
+}
+'''
+          new = '''internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
+    val expectedFile = record.sessionFile
+    return if (expectedFile.isNotBlank()) {
+        // Once a durable JSONL exists, the canonical conversation identity is the
+        // file itself. Pi may expose a different/regenerated RPC sessionId after
+        // process restart; rejecting the same file on that ID loses valid history.
+        samePiConversationFile(expectedFile, state.sessionFile)
+    } else {
+        isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
+            state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
+    }
+}
+'''
+          if r.count(old) != 1:
+              raise SystemExit(f'runtimeConversationMatches anchor count={r.count(old)}')
+          runtime.write_text(r.replace(old, new, 1))
 
-          auth = Path('tools/test_bridge_auth.mjs')
-          auth.write_text(auth.read_text().replace('2026-09-14.2', '2026-09-14.3'))
+          test = Path('app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt')
+          t = test.read_text()
+          old_test = '''    @Test
+    fun runtimeAttachRequiresOwnerAndConversationNotOnlyCwd() {
+        val record = PiSessionRecord(
+            "android-B", "B", "/same", "pi", 17651, "token-b",
+            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"
+        )
+        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)
+        val wrongConversation = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-A")
+        assertTrue(runtimeConversationMatches(record, matching))
+        assertFalse(runtimeConversationMatches(record, wrongConversation))
+    }
+'''
+          new_test = '''    @Test
+    fun runtimeAttachUsesPersistedSessionFileAsCanonicalConversationIdentity() {
+        val record = PiSessionRecord(
+            "android-B", "B", "/same", "pi", 17651, "token-b",
+            sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"
+        )
+        val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)
+        val sameFileNewRpcId = matching.copy(piConversationId = "rpc-generated-after-restart")
+        val wrongFile = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-B")
+        assertTrue(runtimeConversationMatches(record, matching))
+        assertTrue(runtimeConversationMatches(record, sameFileNewRpcId))
+        assertFalse(runtimeConversationMatches(record, wrongFile))
+    }
+'''
+          if t.count(old_test) != 1:
+              raise SystemExit(f'identity regression test anchor count={t.count(old_test)}')
+          test.write_text(t.replace(old_test, new_test, 1))
 
           gradle = Path('app/build.gradle.kts')
           g = gradle.read_text()
-          g = g.replace('// v5.19.26 build 126: restore and restart every persisted open Session window after App restart.', '// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.', 1)
-          g = g.replace('        versionCode = 126', '        versionCode = 127', 1)
-          g = g.replace('        versionName = "5.19.26"', '        versionName = "5.19.27"', 1)
-          if 'versionCode = 127' not in g or 'versionName = "5.19.27"' not in g:
+          g = g.replace('// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.',
+                        '// v5.19.28 build 128: restore persisted JSONL by file identity even if Pi RPC sessionId changes.', 1)
+          g = g.replace('        versionCode = 127', '        versionCode = 128', 1)
+          g = g.replace('        versionName = "5.19.27"', '        versionName = "5.19.28"', 1)
+          if 'versionCode = 128' not in g or 'versionName = "5.19.28"' not in g:
               raise SystemExit('version bump failed')
           gradle.write_text(g)
+
+          workflow = Path('.github/workflows/android.yml')
+          w = workflow.read_text()
+          w = w.replace('# v5.19.27 closed Session resume validation', '# v5.19.28 conversation file identity validation', 1)
+          w = w.replace('name: pi-android-v5.19.27-apks', 'name: pi-android-v5.19.28-apks', 1)
+          if 'pi-android-v5.19.28-apks' not in w:
+              raise SystemExit('artifact version update failed')
+          workflow.write_text(w)
           PY
-          node --check app/src/main/assets/pi-android-bridge.mjs
-          node tools/test_mobile_resume.mjs
-          node tools/test_bridge_auth.mjs
           git diff --check
-          grep -q 'closed-session-resume-v1' app/src/main/assets/pi-android-bridge.mjs
-          grep -q 'session cwd does not match this Android Session' app/src/main/assets/pi-android-bridge.mjs
-          grep -q 'versionName = "5.19.27"' app/build.gradle.kts
+          grep -q 'samePiConversationFile(expectedFile, state.sessionFile)' app/src/main/java/com/piandroid/PiSessionRuntime.kt
+          grep -q 'sameFileNewRpcId' app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt
+          grep -q 'versionName = "5.19.28"' app/build.gradle.kts
+          grep -q 'pi-android-v5.19.28-apks' .github/workflows/android.yml
       - name: Commit repair
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/assets/pi-android-bridge.mjs app/src/main/java/com/piandroid/PiBridge.kt tools/test_bridge_auth.mjs app/build.gradle.kts
-          git commit -m "Allow resume from closed same-cwd Session history"
+          git add app/src/main/java/com/piandroid/PiSessionRuntime.kt app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt app/build.gradle.kts .github/workflows/android.yml
+          git commit -m "Use session file as canonical recovery identity"
           git push origin HEAD:fix/security-lifecycle-build
