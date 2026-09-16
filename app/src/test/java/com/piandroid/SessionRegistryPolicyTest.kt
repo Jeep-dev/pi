@@ -185,15 +185,17 @@ class SessionRegistryPolicyTest {
     }
 
     @Test
-    fun runtimeAttachRequiresOwnerAndConversationNotOnlyCwd() {
+    fun runtimeAttachUsesPersistedSessionFileAsCanonicalConversationIdentity() {
         val record = PiSessionRecord(
             "android-B", "B", "/same", "pi", 17651, "token-b",
             sessionFile = "/private/B.jsonl", piConversationId = "conversation-B"
         )
         val matching = PiState("p", "m", "M", "off", false, false, "/private/B.jsonl", "conversation-B", "B", 1, true)
-        val wrongConversation = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-A")
+        val sameFileNewRpcId = matching.copy(piConversationId = "rpc-generated-after-restart")
+        val wrongFile = matching.copy(sessionFile = "/legacy/shared.jsonl", piConversationId = "conversation-B")
         assertTrue(runtimeConversationMatches(record, matching))
-        assertFalse(runtimeConversationMatches(record, wrongConversation))
+        assertTrue(runtimeConversationMatches(record, sameFileNewRpcId))
+        assertFalse(runtimeConversationMatches(record, wrongFile))
     }
 
     @Test

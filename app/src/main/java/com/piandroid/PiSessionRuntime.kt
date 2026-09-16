@@ -42,8 +42,10 @@ internal data class PiRuntimeIdentity(
 internal fun runtimeConversationMatches(record: PiSessionRecord, state: PiState): Boolean {
     val expectedFile = record.sessionFile
     return if (expectedFile.isNotBlank()) {
-        samePiConversationFile(expectedFile, state.sessionFile) &&
-            (record.piConversationId.isBlank() || record.piConversationId == state.piConversationId)
+        // Once a durable JSONL exists, the canonical conversation identity is the
+        // file itself. Pi may expose a different/regenerated RPC sessionId after
+        // process restart; rejecting the same file on that ID loses valid history.
+        samePiConversationFile(expectedFile, state.sessionFile)
     } else {
         isPrivatePiSessionFile(record.androidSessionId, state.sessionFile) &&
             state.piConversationId == record.piConversationId.ifBlank { record.androidSessionId }
