@@ -98,24 +98,15 @@ jobs:
           if 'versionCode = 128' not in g or 'versionName = "5.19.28"' not in g:
               raise SystemExit('version bump failed')
           gradle.write_text(g)
-
-          workflow = Path('.github/workflows/android.yml')
-          w = workflow.read_text()
-          w = w.replace('# v5.19.27 closed Session resume validation', '# v5.19.28 conversation file identity validation', 1)
-          w = w.replace('name: pi-android-v5.19.27-apks', 'name: pi-android-v5.19.28-apks', 1)
-          if 'pi-android-v5.19.28-apks' not in w:
-              raise SystemExit('artifact version update failed')
-          workflow.write_text(w)
           PY
           git diff --check
           grep -q 'sameFileNewRpcId' app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt
           grep -q 'versionName = "5.19.28"' app/build.gradle.kts
-          grep -q 'pi-android-v5.19.28-apks' .github/workflows/android.yml
       - name: Commit repair
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/piandroid/PiSessionRuntime.kt app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt app/build.gradle.kts .github/workflows/android.yml
+          git add app/src/main/java/com/piandroid/PiSessionRuntime.kt app/src/test/java/com/piandroid/SessionRegistryPolicyTest.kt app/build.gradle.kts
           git commit -m "Use session file as canonical recovery identity"
           git push origin HEAD:fix/security-lifecycle-build
