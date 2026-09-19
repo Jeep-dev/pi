@@ -46,11 +46,11 @@ class AgentKeepAliveService : Service() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification("正在连接本机 Pi Agent…"))
 
-        // The foreground service owns process liveness while any Pi Session is
-        // online. The wake lock is narrower: only active generation/compaction
-        // needs CPU wakefulness, so an idle connected Session does not burn power.
+        // All open Pi Sessions are expected to remain runnable in the background.
+        // Keep the CPU awake while the registry is non-empty so the watchdog and
+        // Termux runtimes are not suspended behind the UI.
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:AllSessions")
 
         val records = PiSessionStore(applicationContext).loadOrCreateDefault()
         (application as PiApplication).runtimeManager.register(records)
@@ -65,9 +65,9 @@ class AgentKeepAliveService : Service() {
                     return@launch
                 }
 
-                // Every open Session is a live terminal, independent of the visible tab.
-                // register() retries disconnected runtimes but leaves connected ones alone.
-                (application as PiApplication).runtimeManager.register(currentRecords)
+                val runtimeManager = (application as PiApplication).runtimeManager
+                runtimeManager.register(currentRecords)
+                wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
 
                 val probes = currentRecords.map { record ->
                     async {
@@ -82,25 +82,33 @@ class AgentKeepAliveService : Service() {
                         record to (health to state)
                     }
                 }.awaitAll()
+
+                probes.forEach { (record, result) ->
+                    val health = result.first
+                    if (health == null) {
+                        runtimeManager.recover(record, "Bridge 无响应，后台自动重连")
+                    } else if (!health.piRunning) {
+                        runtimeManager.recover(record, "Pi 进程已退出，后台自动重启")
+                    }
+                }
+
+                val bridgeOnline = probes.count { (_, result) -> result.first != null }
                 val working = probes.count { (_, result) ->
                     val state = result.second
                     state?.streaming == true || state?.compacting == true
                 }
                 val running = probes.count { (_, result) -> result.first?.piRunning == true }
 
-                if (working > 0) {
-                    wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
-                    updateNotification("$working 个 Pi Agent 正在工作 · $running/${currentRecords.size} 个 Session 在线")
-                } else {
-                    wakeLock?.takeIf { it.isHeld }?.release()
-                    updateNotification(
-                        if (running == currentRecords.size) {
+                updateNotification(
+                    when {
+                        running == currentRecords.size && working > 0 ->
+                            "$working 个 Pi Agent 正在工作 · $running/${currentRecords.size} 个 Session 在线"
+                        running == currentRecords.size ->
                             "$running 个 Pi Session 全部在线 · 后台保持运行"
-                        } else {
-                            "$running/${currentRecords.size} 个 Pi Session 在线 · 正在恢复其余 Session"
-                        }
-                    )
-                }
+                        else ->
+                            "$running/${currentRecords.size} 个 Pi 在线 · $bridgeOnline/${currentRecords.size} 个 Bridge 在线 · 自动恢复中"
+                    }
+                )
                 delay(10_000)
             }
         }
