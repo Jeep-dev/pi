@@ -1190,6 +1190,11 @@ private fun PiScreen(
             "tool_execution_update" -> updateTool(event)
             "tool_execution_end" -> finishTool(event)
             "stderr", "extension_error" -> addSystem(event.text)
+            "prompt_rejected" -> {
+                connecting = false
+                status = if (currentState?.streaming == true) "Working" else "Ready"
+                addSystem("发送失败：${event.text}")
+            }
             "process_exit" -> {
                 settleStreams()
                 currentState = currentState?.copy(streaming = false, compacting = false)
