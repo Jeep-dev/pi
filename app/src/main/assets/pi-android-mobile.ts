@@ -1,3 +1,12 @@
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, join, parse, resolve } from "node:path";
+import { promisify } from "node:util";
+import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
+
+const execFileAsync = promisify(execFile);
+
 export default function (pi: any) {
   function textOf(content: any): string {
     if (typeof content === "string") return content;
@@ -5,43 +14,649 @@ export default function (pi: any) {
     return content
       .filter((part) => part && part.type === "text")
       .map((part) => String(part.text || ""))
-      .join(" ");
+      .join("");
   }
 
-  function preview(value: string): string {
-    const clean = value.replace(/\s+/g, " ").trim();
-    return clean.length > 54 ? clean.slice(0, 54) + "…" : clean || "(empty message)";
+  function redactSecrets(value: string): string {
+    return value
+      .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/g, "[PRIVATE KEY REDACTED]")
+      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "github_pat_[REDACTED]")
+      .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "gh*_[REDACTED]")
+      .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "sk-[REDACTED]")
+      .replace(/\bAIza[0-9A-Za-z_-]{30,}\b/g, "AIza[REDACTED]")
+      .replace(/\bAKIA[0-9A-Z]{16}\b/g, "AKIA[REDACTED]")
+      .replace(/\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g, "xox*-[REDACTED]")
+      .replace(
+        /((?:authorization|api[_-]?key|access[_-]?token|token|secret|password)\s*[:=]\s*)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi,
+        "$1[REDACTED]",
+      );
   }
+
+  function preview(value: string, limit = 92): string {
+    const clean = redactSecrets(value).replace(/\s+/g, " ").trim();
+    return clean.length > limit ? clean.slice(0, limit) + "…" : clean || "(empty)";
+  }
+
+  function pathArgument(value: string): string {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  }
+
+  function resolveUserPath(value: string, cwd: string): string {
+    const trimmed = pathArgument(value);
+    if (trimmed === "~") return homedir();
+    if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+    return resolve(cwd, trimmed);
+  }
+
+  function writeActiveBranch(ctx: any, outputPath: string): string {
+    const source = ctx.sessionManager.getSessionFile();
+    const header = source && existsSync(source)
+      ? JSON.parse(readFileSync(source, "utf8").split(/\r?\n/, 1)[0])
+      : {
+          type: "session",
+          version: 3,
+          id: ctx.sessionManager.getSessionId(),
+          timestamp: new Date().toISOString(),
+          cwd: ctx.cwd,
+        };
+    const lines = [JSON.stringify({ ...header, cwd: ctx.cwd })];
+    let parentId: string | null = null;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      lines.push(JSON.stringify({ ...entry, parentId }));
+      parentId = String(entry.id);
+    }
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+    return outputPath;
+  }
+
+  async function exportActiveBranch(ctx: any, requested: string): Promise<string> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputPath = resolveUserPath(requested || `pi-session-${stamp}.html`, ctx.cwd);
+    if (extname(outputPath).toLowerCase() === ".jsonl") return writeActiveBranch(ctx, outputPath);
+
+    const htmlPath = extname(outputPath) ? outputPath : `${outputPath}.html`;
+    const temporaryJsonl = join(tmpdir(), `pi-android-export-${process.pid}-${Date.now()}.jsonl`);
+    writeActiveBranch(ctx, temporaryJsonl);
+    try {
+      const piExecutable = join(process.env.PREFIX || "/data/data/com.termux/files/usr", "bin", "pi");
+      await execFileAsync(piExecutable, ["--export", temporaryJsonl, htmlPath], {
+        cwd: ctx.cwd,
+        env: process.env,
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return htmlPath;
+    } finally {
+      try { await import("node:fs/promises").then((fs) => fs.unlink(temporaryJsonl)); } catch {}
+    }
+  }
+
+  function isConversationPrompt(entry: any): boolean {
+    if (entry?.type !== "message" || entry?.message?.role !== "user") return false;
+    return !textOf(entry.message.content).trimStart().startsWith("/");
+  }
+
+  function userPoints(ctx: any) {
+    const contextIds = new Set(
+      ctx.sessionManager.buildContextEntries().map((entry: any) => String(entry.id)),
+    );
+    const branchIds = new Set(
+      ctx.sessionManager.getBranch().map((entry: any) => String(entry.id)),
+    );
+    const entries = ctx.sessionManager.getEntries().filter(isConversationPrompt);
+
+    return entries
+      .map((entry: any, index: number) => {
+        const id = String(entry.id);
+        const scope = contextIds.has(id) ? "current" : branchIds.has(id) ? "compacted" : "branch";
+        const scopeLabel = scope === "current" ? "当前上下文" : scope === "compacted" ? "已压缩" : "其他分支";
+        return {
+          id,
+          text: textOf(entry.message.content),
+          scope,
+          scopeRank: scope === "current" ? 0 : scope === "compacted" ? 1 : 2,
+          order: index,
+          label: `[${scopeLabel}] ${index + 1}. ${preview(textOf(entry.message.content), 72)} · ${id.slice(0, 8)}`,
+        };
+      })
+      // Android's generic selector opens at the first row. Put the newest active
+      // prompts first instead of forcing users to scroll through archived history.
+      .sort((left: any, right: any) => left.scopeRank - right.scopeRank || right.order - left.order);
+  }
+
+  function entryText(entry: any): string {
+    if (!entry) return "";
+    if (entry.type === "message") {
+      const message = entry.message || {};
+      if (message.role === "user") return `user: ${preview(textOf(message.content))}`;
+      if (message.role === "assistant") {
+        const text = textOf(message.content);
+        if (text.trim()) return `assistant: ${preview(text)}`;
+        if (message.stopReason === "aborted") return "assistant: (aborted)";
+        if (message.errorMessage) return `assistant: ${preview(String(message.errorMessage))}`;
+        return "assistant: (tool call)";
+      }
+      if (message.role === "toolResult") return `[${message.toolName || "tool"}]`;
+      if (message.role === "bashExecution") return `[bash]: ${preview(String(message.command || ""))}`;
+      return `[${message.role || "message"}]`;
+    }
+    if (entry.type === "custom_message") return `[${entry.customType || "custom"}]: ${preview(textOf(entry.content))}`;
+    if (entry.type === "compaction") return `[compaction: ${Math.round(Number(entry.tokensBefore || 0) / 1000)}k tokens]`;
+    if (entry.type === "branch_summary") return `[branch summary]: ${preview(String(entry.summary || ""))}`;
+    if (entry.type === "model_change") return `[model: ${entry.provider || "?"}/${entry.modelId || "?"}]`;
+    if (entry.type === "thinking_level_change") return `[thinking: ${entry.thinkingLevel || "off"}]`;
+    if (entry.type === "session_info") return `[session: ${entry.name || "unnamed"}]`;
+    if (entry.type === "custom") return `[${entry.customType || "custom state"}]`;
+    return `[${String(entry.type || "entry").replace(/_/g, " ")}]`;
+  }
+
+  // Pi's tree is a conversation tree, not an execution log.  Assistant tool-call
+  // messages, tool results, bash executions, compaction and internal extension
+  // entries are kept in the session file but are not branch points in /tree.
+  // Collapsing those invisible nodes below preserves the real user-message
+  // parent/child structure, including branches created after tool runs.
+  function isVisibleEntry(entry: any, _isLeaf: boolean): boolean {
+    return isConversationPrompt(entry);
+  }
+
+  function treePoints(ctx: any) {
+    const roots = ctx.sessionManager.getTree() || [];
+    const leafId = ctx.sessionManager.getLeafId();
+    const allById = new Map<string, any>();
+
+    const indexAll = (nodes: any[]) => {
+      for (const node of nodes) {
+        allById.set(String(node.entry.id), node);
+        indexAll(node.children || []);
+      }
+    };
+    indexAll(roots);
+
+    const active = new Set<string>();
+    let activeId: string | null = leafId ? String(leafId) : null;
+    let currentVisibleId = "";
+    while (activeId) {
+      active.add(activeId);
+      const node = allById.get(activeId);
+      if (node?.entry?.type === "custom" && node.entry.customType === "__android_tree_edit__" && node.entry.data?.targetId) {
+        const targetId = String(node.entry.data.targetId);
+        active.add(targetId);
+        if (!currentVisibleId && isConversationPrompt(allById.get(targetId)?.entry)) currentVisibleId = targetId;
+      }
+      if (!currentVisibleId && isConversationPrompt(node?.entry)) currentVisibleId = activeId;
+      activeId = node?.entry?.parentId == null ? null : String(node.entry.parentId);
+    }
+
+    const ordered = (nodes: any[]) => [...nodes].sort(
+      (a, b) => Number(active.has(String(b.entry.id))) - Number(active.has(String(a.entry.id))),
+    );
+
+    const visibleById = new Map<string, any>();
+    const visibleRoots: any[] = [];
+    const collectVisible = (nodes: any[], visibleParent: any | null) => {
+      for (const node of ordered(nodes)) {
+        const id = String(node.entry.id);
+        const visible = isVisibleEntry(node.entry, id === leafId);
+        const parent = visible ? node : visibleParent;
+        if (visible) {
+          const copy = { node, children: [] as any[] };
+          visibleById.set(id, copy);
+          if (visibleParent) visibleById.get(String(visibleParent.entry.id))?.children.push(copy);
+          else visibleRoots.push(copy);
+        }
+        collectVisible(node.children || [], parent);
+      }
+    };
+    collectVisible(roots, null);
+
+    const points: any[] = [];
+    const render = (item: any, prefix: string, connector: string) => {
+      const node = item.node;
+      const id = String(node.entry.id);
+      const pathMark = id === currentVisibleId ? "◆ " : active.has(id) ? "● " : "  ";
+      const label = node.label ? `[${node.label}] ` : "";
+      const line = `${prefix}${connector}${pathMark}${label}${entryText(node.entry)} · ${id.slice(0, 8)}`;
+      points.push({ id, label: line, entry: node.entry, entryLabel: node.label });
+
+      const childPrefix = connector === "├─ " ? `${prefix}│  ` : connector === "└─ " ? `${prefix}   ` : prefix;
+      if (item.children.length === 1) {
+        render(item.children[0], childPrefix, "");
+      } else {
+        item.children.forEach((child: any, index: number) => {
+          render(child, childPrefix, index === item.children.length - 1 ? "└─ " : "├─ ");
+        });
+      }
+    };
+    visibleRoots.forEach((root, index) => {
+      render(root, "", visibleRoots.length > 1 ? (index === visibleRoots.length - 1 ? "└─ " : "├─ ") : "");
+    });
+    return points;
+  }
+
+  async function chooseUserPoint(ctx: any, title: string) {
+    const points = userPoints(ctx);
+    if (!points.length) {
+      ctx.ui.notify("当前 session 还没有用户消息", "info");
+      return undefined;
+    }
+    const selected = await ctx.ui.select(title, points.map((point: any) => point.label));
+    return points.find((point: any) => point.label === selected);
+  }
+
+  async function chooseTreePoint(ctx: any) {
+    const points = treePoints(ctx);
+    if (!points.length) {
+      ctx.ui.notify("当前 session 还没有可导航的条目", "info");
+      return undefined;
+    }
+    const selected = await ctx.ui.select("Session Tree", points.map((point: any) => point.label));
+    return points.find((point: any) => point.label === selected);
+  }
+
+  type LoadedResourceSection = { title: string; items: string[] };
+
+  function uniqueValues(values: any[]): string[] {
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+  }
+
+  function uniqueSorted(values: any[]): string[] {
+    return uniqueValues(values).sort((left, right) => left.localeCompare(right));
+  }
+
+  function loadedExtensionLabels(commands = typeof pi.getCommands === "function" ? pi.getCommands() : [], tools = typeof pi.getAllTools === "function" ? pi.getAllTools() : []): string[] {
+    // getCommands() also contains prompt and skill commands. Only its extension
+    // entries belong in [Extensions]; the other entries are rendered separately.
+    const commandList = Array.isArray(commands) ? commands : [];
+    const hasCommandSource = commandList.some((resource: any) => typeof resource?.source === "string");
+    const extensionCommands = commandList.filter(
+      (resource: any) => resource?.source === "extension" || (!hasCommandSource && resource?.sourceInfo),
+    );
+    const configuredTools = Array.isArray(tools) ? tools : [];
+    const resources = [...extensionCommands, ...configuredTools];
+    const byPath = new Map<string, any>();
+    for (const resource of resources) {
+      const sourceInfo = resource?.sourceInfo;
+      const resourcePath = String(sourceInfo?.path || "");
+      const source = String(sourceInfo?.source || "");
+      if (!resourcePath || resourcePath.startsWith("<") || source === "builtin" || source === "sdk") continue;
+      if (!byPath.has(resourcePath)) byPath.set(resourcePath, sourceInfo);
+    }
+
+    const localItems = [...byPath.entries()]
+      .filter(([, sourceInfo]) => !String(sourceInfo?.source || "").startsWith("npm:") && !String(sourceInfo?.source || "").startsWith("git:"))
+      .map(([resourcePath, sourceInfo]) => {
+        const segments = resourcePath.replace(/\\/g, "/").split("/").filter(Boolean);
+        if (segments.length > 1 && ["index.ts", "index.js"].includes(segments.at(-1) || "")) segments.pop();
+        return { resourcePath, sourceInfo, segments };
+      });
+
+    const labels = [...byPath.entries()].map(([resourcePath, sourceInfo]) => {
+      const source = String(sourceInfo?.source || "");
+      if (source.startsWith("npm:")) return source.slice("npm:".length) || basename(resourcePath);
+      if (source.startsWith("git:")) {
+        const repository = source.replace(/^git:/, "").replace(/[#/]$/, "").split("/").at(-1)?.replace(/\.git$/, "");
+        return repository || basename(resourcePath);
+      }
+      const item = localItems.find((candidate) => candidate.resourcePath === resourcePath);
+      if (!item || item.segments.length === 0) return basename(resourcePath);
+      for (let count = 1; count <= item.segments.length; count++) {
+        const candidate = item.segments.slice(-count).join("/");
+        if (localItems.every((other) => other.resourcePath === resourcePath || other.segments.slice(-count).join("/") !== candidate)) {
+          return candidate;
+        }
+      }
+      return item.segments.join("/");
+    });
+    return uniqueSorted(labels);
+  }
+
+  function compactContextPath(value: string, cwd: string): string {
+    const resourcePath = value.replace(/\\/g, "/");
+    const normalizedCwd = cwd.replace(/\\/g, "/").replace(/\/$/, "");
+    if (resourcePath === normalizedCwd) return ".";
+    if (resourcePath.startsWith(`${normalizedCwd}/`)) return resourcePath.slice(normalizedCwd.length + 1);
+    const homePath = homedir().replace(/\\/g, "/").replace(/\/$/, "");
+    if (resourcePath === homePath) return "~";
+    if (resourcePath.startsWith(`${homePath}/`)) return `~${resourcePath.slice(homePath.length)}`;
+    return resourcePath;
+  }
+
+  function loadedResourceSections(ctx: any, includeContext: boolean): LoadedResourceSection[] {
+    const commandsResult = typeof pi.getCommands === "function" ? pi.getCommands() : [];
+    const toolsResult = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];
+    const commands = Array.isArray(commandsResult) ? commandsResult : [];
+    const tools = Array.isArray(toolsResult) ? toolsResult : [];
+    const sections: LoadedResourceSection[] = [];
+
+    if (includeContext && typeof ctx?.getSystemPromptOptions === "function") {
+      try {
+        const options = ctx.getSystemPromptOptions();
+        const contextItems = Array.isArray(options?.contextFiles)
+          ? uniqueValues(options.contextFiles.map((file: any) => compactContextPath(String(file?.path || ""), String(ctx.cwd || ""))))
+          : [];
+        if (contextItems.length > 0) sections.push({ title: "Context", items: contextItems });
+      } catch {
+        // Older Pi runtimes do not expose command system-prompt options.
+      }
+    }
+
+    const skills = uniqueSorted(
+      commands
+        .filter((command: any) => command?.source === "skill")
+        .map((command: any) => String(command.name || "").replace(/^skill:/, "")),
+    );
+    if (skills.length > 0) sections.push({ title: "Skills", items: skills });
+
+    const prompts = uniqueSorted(
+      commands
+        .filter((command: any) => command?.source === "prompt")
+        .map((command: any) => {
+          const name = String(command.name || "").trim();
+          return name.startsWith("/") ? name : `/${name}`;
+        }),
+    );
+    if (prompts.length > 0) sections.push({ title: "Prompts", items: prompts });
+
+    const extensions = loadedExtensionLabels(commands, tools);
+    if (extensions.length > 0) sections.push({ title: "Extensions", items: extensions });
+
+    // RPC mode currently returns [] here by design. If a newer Pi runtime
+    // exposes custom themes through the RPC UI context, only themes with a
+    // source path are shown, matching native Pi's built-in-theme exclusion.
+    let themes: string[] = [];
+    try {
+      const available = typeof ctx?.ui?.getAllThemes === "function" ? ctx.ui.getAllThemes() : [];
+      const builtInThemeNames = new Set(["dark", "light"]);
+      themes = uniqueSorted(
+        (Array.isArray(available) ? available : [])
+          .filter((theme: any) => String(theme?.path || "").trim())
+          .map((theme: any) => String(theme.name || basename(String(theme.path || ""))))
+          .filter((name) => !builtInThemeNames.has(name)),
+      );
+    } catch {}
+    if (themes.length > 0) sections.push({ title: "Themes", items: themes });
+
+    return sections;
+  }
+
+  function resourceWidgetLines(sections: LoadedResourceSection[]): string[] {
+    return sections.flatMap((section) => [`[${section.title}]`, `  ${section.items.join(", ")}`]);
+  }
+
+  function publishLoadedResources(ctx: any, includeContext = false) {
+    const sections = loadedResourceSections(ctx, includeContext);
+    ctx.ui.setWidget("__android_loaded_resources", resourceWidgetLines(sections), { placement: "aboveEditor" });
+    // Keep the original widget and its payload for older Android clients.
+    ctx.ui.setWidget(
+      "__android_loaded_extensions",
+      sections.find((section) => section.title === "Extensions")?.items || [],
+      { placement: "aboveEditor" },
+    );
+  }
+
+  pi.registerCommand("__android_loaded_resources", {
+    description: "Publish Pi's loaded resources to Android",
+    handler: async (_args: string, ctx: any) => publishLoadedResources(ctx, true),
+  });
 
   pi.registerCommand("tree", {
-    description: "Navigate the current session tree on Android",
+    description: "Navigate the user-message session tree",
     handler: async (args: string, ctx: any) => {
       await ctx.waitForIdle();
-      const entries = ctx.sessionManager.getEntries();
-      const points = entries
-        .filter((entry: any) => entry?.type === "message" && entry?.message?.role === "user")
-        .map((entry: any, index: number) => ({
-          id: String(entry.id),
-          label: `${index + 1}. ${preview(textOf(entry.message.content))}  · ${String(entry.id).slice(0, 8)}`,
-        }));
+      const requested = String(args || "").trim();
+      let target = requested
+        ? treePoints(ctx).find((point: any) => point.id === requested || point.id.startsWith(requested))
+        : await chooseTreePoint(ctx);
+      if (!target) return;
 
-      if (!points.length) {
-        ctx.ui.notify("当前 session 还没有可跳转的用户消息", "info");
+      const physicalLeaf = ctx.sessionManager.getLeafEntry();
+      const logicalLeafId = physicalLeaf?.type === "custom" && physicalLeaf.customType === "__android_tree_edit__"
+        ? String(physicalLeaf.data?.targetId || "")
+        : physicalLeaf?.type === "label"
+          ? String(physicalLeaf.parentId || "")
+          : String(ctx.sessionManager.getLeafId() || "");
+      if (target.id === logicalLeafId) {
+        if (physicalLeaf?.type === "custom" && physicalLeaf.customType === "__android_tree_edit__") {
+          ctx.ui.setEditorText(String(physicalLeaf.data?.editorText ?? ""));
+        }
+        ctx.ui.notify("已经位于这个节点", "info");
         return;
       }
 
-      const requested = String(args || "").trim();
-      let target = requested ? points.find((point: any) => point.id === requested || point.id.startsWith(requested)) : undefined;
-      if (!target) {
-        const selected = await ctx.ui.select("Session Tree", points.map((point: any) => point.label));
-        if (!selected) return;
-        target = points.find((point: any) => point.label === selected);
+      const editableText = target.entry?.type === "message" && target.entry?.message?.role === "user"
+        ? textOf(target.entry.message.content)
+        : target.entry?.type === "custom_message"
+          ? textOf(target.entry.content)
+          : undefined;
+      const result = await ctx.navigateTree(target.id, { summarize: false });
+      if (result.cancelled) {
+        ctx.ui.notify("/tree 已取消", "warning");
+        return;
       }
+
+      // Persist immediately without entering model context. User selections branch from
+      // the parent and retain their editable text even when Android or Pi is restarted.
+      const selectedLeaf = ctx.sessionManager.getLeafId();
+      if (editableText !== undefined) {
+        ctx.sessionManager.appendCustomEntry("__android_tree_edit__", { targetId: target.id, editorText: editableText });
+      } else if (selectedLeaf) {
+        ctx.sessionManager.appendLabelChange(String(selectedLeaf), target.entryLabel);
+      }
+
+      if (editableText !== undefined) ctx.ui.setEditorText(editableText);
+      ctx.ui.notify("ANDROID_SESSION_SWITCHED", "info");
+    },
+  });
+
+  pi.registerCommand("fork", {
+    description: "Fork from an earlier user message on Android",
+    handler: async (args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const points = userPoints(ctx);
+      const requested = String(args || "").trim();
+      const target = requested
+        ? points.find((point: any) => point.id === requested || point.id.startsWith(requested))
+        : await chooseUserPoint(ctx, "从消息创建 Fork");
       if (!target) return;
 
-      const result = await ctx.navigateTree(target.id, { summarize: false });
-      if (result.cancelled) ctx.ui.notify("/tree 已取消", "warning");
-      else ctx.ui.notify(`已跳转到 ${target.id.slice(0, 8)}`, "info");
+      if (target.scope !== "current") {
+        const warning = target.scope === "compacted"
+          ? "这条消息已被当前 compaction 摘要替代，不在当前模型上下文中。"
+          : "这条消息属于当前 session 的其他分支，不在当前模型上下文中。";
+        const confirmed = await ctx.ui.confirm(
+          "确认历史 Fork",
+          `${warning}\n\n继续会创建独立 session，并恢复到该旧时间点；原 session 不会被修改。`,
+        );
+        if (!confirmed) return;
+      }
+
+      // A successful fork replaces the runtime and invalidates the old command
+      // context. Use withSession so Android is updated from the replacement
+      // session, and restore Pi's native behavior of putting the selected prompt
+      // into the editor for review/resubmission.
+      const selectedText = target.text;
+      const result = await ctx.fork(target.id, {
+        position: "before",
+        withSession: async (replacementCtx: any) => {
+          replacementCtx.ui.setEditorText(selectedText);
+          replacementCtx.ui.notify("ANDROID_SESSION_SWITCHED", "info");
+          replacementCtx.ui.notify("已创建独立 Fork；所选消息已放入输入框，确认或修改后再发送。", "info");
+        },
+      });
+      if (result.cancelled) ctx.ui.notify("/fork 已取消", "warning");
     },
+  });
+
+  pi.registerCommand("name", {
+    description: "Set the current session name on Android",
+    handler: async (args: string, ctx: any) => {
+      const requested = String(args || "").trim();
+      const name = requested || await ctx.ui.input("Session name", "输入会话名称");
+      if (name === undefined) return;
+      pi.setSessionName(String(name).trim());
+      ctx.ui.notify(`会话名称：${String(name).trim() || "(none)"}`, "info");
+    },
+  });
+
+  pi.registerCommand("export", {
+    description: "Export the active branch to HTML or JSONL",
+    handler: async (args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      try {
+        const output = await exportActiveBranch(ctx, pathArgument(String(args || "")));
+        ctx.ui.notify(`已导出当前分支：${output}`, "info");
+      } catch (error: any) {
+        ctx.ui.notify(`导出失败：${error?.message || error}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("import", {
+    description: "Import and resume a JSONL session",
+    handler: async (args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const input = pathArgument(String(args || ""));
+      if (!input) {
+        ctx.ui.notify("用法：/import <path.jsonl>", "warning");
+        return;
+      }
+      const source = resolveUserPath(input, ctx.cwd);
+      if (!existsSync(source) || extname(source).toLowerCase() !== ".jsonl") {
+        ctx.ui.notify(`找不到 JSONL session：${source}`, "error");
+        return;
+      }
+      const confirmed = await ctx.ui.confirm("Import session", `导入并切换到 ${source}？`);
+      if (!confirmed) return;
+
+      const currentFile = ctx.sessionManager.getSessionFile();
+      const sessionDir = currentFile ? dirname(currentFile) : join(homedir(), ".pi", "agent", "sessions");
+      mkdirSync(sessionDir, { recursive: true });
+      let destination = join(sessionDir, basename(source));
+      if (resolve(source) !== resolve(destination)) {
+        const parts = parse(destination);
+        let suffix = 1;
+        while (existsSync(destination)) destination = join(parts.dir, `${parts.name}-${suffix++}${parts.ext}`);
+        copyFileSync(source, destination, constants.COPYFILE_EXCL);
+      }
+      const importedFrom = source;
+      const result = await ctx.switchSession(destination, {
+        withSession: async (next: any) => {
+          next.ui.notify(`已导入 session：${importedFrom}`, "info");
+          next.ui.notify("ANDROID_SESSION_SWITCHED", "info");
+        },
+      });
+      if (result.cancelled) ctx.ui.notify("导入已取消", "warning");
+    },
+  });
+
+  pi.registerCommand("share", {
+    description: "Share the active branch as a private GitHub gist",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const confirmed = await ctx.ui.confirm("Share session", "将当前分支导出并创建私密 GitHub Gist？");
+      if (!confirmed) return;
+      const directory = join(tmpdir(), `pi-android-share-${process.pid}-${Date.now()}`);
+      mkdirSync(directory, { recursive: true });
+      const html = join(directory, "session.html");
+      try {
+        await exportActiveBranch(ctx, html);
+        const { stdout } = await execFileAsync("gh", ["gist", "create", "--public=false", html], {
+          cwd: ctx.cwd,
+          env: process.env,
+          timeout: 120_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const gistUrl = stdout.trim();
+        const gistId = gistUrl.split("/").pop();
+        if (!gistId) throw new Error("无法读取 Gist ID");
+        ctx.ui.notify(`分享链接：https://pi.dev/session/#${gistId}\nGist：${gistUrl}`, "info");
+      } catch (error: any) {
+        ctx.ui.notify(`分享失败：${error?.message || error}。请先在 Termux 运行 gh auth login。`, "error");
+      } finally {
+        try { await import("node:fs/promises").then((fs) => fs.rm(directory, { recursive: true, force: true })); } catch {}
+      }
+    },
+  });
+
+  pi.registerCommand("trust", {
+    description: "Save the project trust decision",
+    handler: async (_args: string, ctx: any) => {
+      const store = new ProjectTrustStore(join(homedir(), ".pi", "agent"));
+      const existing = store.get(ctx.cwd);
+      const choice = await ctx.ui.select(`Project trust · 当前：${existing === null ? "未设置" : existing ? "trusted" : "untrusted"}`, [
+        "Trust this directory",
+        "Do not trust this directory",
+        "Clear saved decision",
+      ]);
+      if (!choice) return;
+      store.set(ctx.cwd, choice === "Clear saved decision" ? null : choice === "Trust this directory");
+      ctx.ui.notify("信任设置已保存；执行 /reload 或重新连接后生效", "info");
+    },
+  });
+
+  pi.registerCommand("reload", {
+    description: "Reload extensions, skills, prompts, themes, and context files",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      // reload() replaces the runtime; the old context must not be used after it resolves.
+      await ctx.reload();
+    },
+  });
+
+  pi.registerCommand("login", {
+    description: "Show secure provider authentication instructions",
+    handler: async (_args: string, ctx: any) => {
+      ctx.ui.notify("为避免在 Android 对话记录中暴露密钥，认证请在 Termux 原版 Pi 中执行 /login；完成后回到这里执行 /reload。", "warning");
+    },
+  });
+
+  pi.registerCommand("logout", {
+    description: "Show secure provider logout instructions",
+    handler: async (_args: string, ctx: any) => {
+      ctx.ui.notify("凭据删除请在 Termux 原版 Pi 中执行 /logout；完成后回到这里执行 /reload。", "warning");
+    },
+  });
+
+  pi.registerCommand("__android_checkpoint", {
+    description: "Persist the active branch before an Android bridge upgrade",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.waitForIdle();
+      const leafId = ctx.sessionManager.getLeafId();
+      if (!leafId) return;
+      let currentLabel: string | undefined;
+      const visit = (nodes: any[]) => {
+        for (const node of nodes || []) {
+          if (String(node.entry?.id) === String(leafId)) currentLabel = node.label;
+          visit(node.children || []);
+        }
+      };
+      visit(ctx.sessionManager.getTree());
+      ctx.sessionManager.appendLabelChange(String(leafId), currentLabel);
+    },
+  });
+
+  pi.registerCommand("quit", {
+    description: "Gracefully stop the current Pi RPC process",
+    handler: async (_args: string, ctx: any) => {
+      const confirmed = await ctx.ui.confirm("Quit Pi", "保存 session 并停止当前 Agent？");
+      if (confirmed) {
+        ctx.ui.notify("ANDROID_PI_QUIT", "info");
+        ctx.shutdown();
+      }
+    },
+  });
+
+  // RPC has no complete built-in loaded-resource query. Publish the resource
+  // categories available through the runtime API immediately; Android follows
+  // up with __android_loaded_resources once command context is available so
+  // Context can be included too. The legacy widget remains for old clients.
+  pi.on("session_start", (event: any, ctx: any) => {
+    publishLoadedResources(ctx);
+    if (event?.reason === "reload") ctx.ui.notify("资源已重新加载", "info");
   });
 }
