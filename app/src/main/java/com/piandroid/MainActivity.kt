@@ -940,13 +940,30 @@ private fun PiScreen(
         )
     }
 
+    fun refreshToolDraft(contentIndex: Int, force: Boolean = false) {
+        val buffer = toolDraftBuffers[contentIndex] ?: return
+        val now = android.os.SystemClock.uptimeMillis()
+        val lastRefresh = toolDraftRefreshAt[contentIndex] ?: 0L
+        if (!force && now - lastRefresh < 50L) return
+        toolDraftRefreshAt[contentIndex] = now
+
+        val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
+        if (index >= 0) {
+            val line = lines[index]
+            val count = toolDraftChars[contentIndex] ?: buffer.length
+            lines[index] = line.copy(text = toolDraftPreview(buffer.toString(), count))
+        }
+    }
+
     fun updateToolDraft(contentIndex: Int, delta: String) {
-        if (contentIndex < 0) return
+        if (contentIndex < 0 || delta.isEmpty()) return
         toolDraftChars[contentIndex] = (toolDraftChars[contentIndex] ?: 0) + delta.length
         toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
+        refreshToolDraft(contentIndex)
     }
 
     fun finishToolDraft(contentIndex: Int, toolName: String) {
+        refreshToolDraft(contentIndex, force = true)
         toolDraftChars.remove(contentIndex)
         toolDraftBuffers.remove(contentIndex)
         toolDraftRefreshAt.remove(contentIndex)
@@ -2187,7 +2204,9 @@ LaunchedEffect(listState) {
                         var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
                         LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(250) } }
                         val hasStructuredTool = line.toolName.isNotBlank() || line.toolArgs.isNotBlank() || line.toolOutput.isNotBlank() || line.toolDurationMs >= 0L
-                        val toolOutput = if (hasStructuredTool) line.toolOutput else fullText
+                        // Draft tool calls stream through ChatLine.text until Pi emits the final structured args.
+                        // Always render that live draft text instead of hiding it just because toolName is already known.
+                        val toolOutput = if (line.role == "tool-draft") fullText else if (hasStructuredTool) line.toolOutput else fullText
                         val outputHint = toolHiddenHint(toolOutput)
                         val argsHint = toolArgsHiddenHint(line.toolArgs)
                         val renderedOutput = if (line.collapsed && outputHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
