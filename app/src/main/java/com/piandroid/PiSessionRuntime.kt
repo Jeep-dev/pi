@@ -226,16 +226,19 @@ internal class PiSessionRuntime(
         synchronized(stateLock) {
             if (closed || !recoveryEnabled) return
             autoStartRequested = true
-            connected = false
-            ++conversationGeneration
-            eventJob?.cancel()
-            eventJob = null
             updatesMutable.tryEmit(
                 PiRuntimeUpdate.Reconnecting(
                     IllegalStateException(reason.ifBlank { "Pi runtime unavailable" })
                 )
             )
-            if (connectionJob?.isActive != true) launchConnectionLocked()
+            // Recovery is single-flight. A watchdog tick must not invalidate or
+            // restart a connection attempt that is already repairing this Session.
+            if (connectionJob?.isActive == true) return
+            connected = false
+            ++conversationGeneration
+            eventJob?.cancel()
+            eventJob = null
+            launchConnectionLocked()
         }
     }
 
@@ -497,7 +500,7 @@ internal class PiSessionRuntime(
         // Probe once, quickly. Do not stack several multi-second health waits
         // before even asking Termux to start the bridge.
         val healthBefore = bridge.health(timeoutMs = 700).getOrNull()
-        val bridgeReady = bridge.waitForBridge(1_200).isSuccess
+        val bridgeReady = bridge.waitForBridge(2_500).isSuccess
         val runningHealth = if (bridgeReady) {
             healthBefore ?: bridge.health(timeoutMs = 700).getOrNull()
         } else {
