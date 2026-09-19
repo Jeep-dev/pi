@@ -170,11 +170,12 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-19.1");
+  assert.equal(health.bridgeVersion, "2026-09-19.2");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
   assert.ok(health.capabilities.includes("thinking-levels-v1"));
+  assert.ok(health.capabilities.includes("pi-auto-restart-v1"));
   assert.ok(health.capabilities.includes("persistent-widgets-v1"));
   assert.ok(health.capabilities.includes("multi-session-v1"));
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
@@ -224,14 +225,32 @@ try {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const started = await fetch(`http://127.0.0.1:${port}/start`, {
-      method: "POST",
-      headers: startHeaders,
-      body: JSON.stringify({ cwd: home, launchCommand: "pi --mode rpc" }),
-    });
-    assert.equal(started.status, 200, `Pi restart ${attempt + 1} failed: ${await started.text()}`);
+  const firstStart = await fetch(`http://127.0.0.1:${port}/start`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ cwd: home, launchCommand: "pi --mode rpc" }),
+  });
+  assert.equal(firstStart.status, 200, `Pi start failed: ${await firstStart.text()}`);
+  const firstHealth = await fetch(`http://127.0.0.1:${port}/health`, { headers: startHeaders }).then(r => r.json());
+
+  const duplicateStart = await fetch(`http://127.0.0.1:${port}/start`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ cwd: home, launchCommand: "pi --mode rpc" }),
+  });
+  assert.equal(duplicateStart.status, 200, `Duplicate Pi start failed: ${await duplicateStart.text()}`);
+  const duplicateHealth = await fetch(`http://127.0.0.1:${port}/health`, { headers: startHeaders }).then(r => r.json());
+  assert.equal(duplicateHealth.piPid, firstHealth.piPid, "same-config /start must not kill a healthy Pi");
+
+  process.kill(firstHealth.piPid, "SIGKILL");
+  let recoveredHealth = null;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    recoveredHealth = await fetch(`http://127.0.0.1:${port}/health`, { headers: startHeaders }).then(r => r.json());
+    if (recoveredHealth.piRunning && recoveredHealth.piPid && recoveredHealth.piPid !== firstHealth.piPid) break;
   }
+  assert.ok(recoveredHealth?.piRunning, "Bridge must auto-restart an unexpectedly exited Pi");
+  assert.notEqual(recoveredHealth.piPid, firstHealth.piPid, "auto-restart must create a new Pi child");
   await new Promise(resolve => setTimeout(resolve, 250));
 
   const sessionDirectoryName = `--${path.resolve(home).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
