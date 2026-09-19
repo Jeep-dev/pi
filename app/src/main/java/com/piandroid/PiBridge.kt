@@ -291,6 +291,15 @@ class PiBridge(
         }
     }
 
+    suspend fun thinkingLevels(): Result<List<String>> = rpcData("/thinking-levels").mapCatching { data ->
+        val array = data.optJSONArray("levels") ?: JSONArray()
+        buildList {
+            for (i in 0 until array.length()) {
+                array.optString(i).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }.distinct()
+    }
+
     suspend fun setModel(model: PiModel): Result<Unit> {
         val body = JSONObject().put("provider", model.provider).put("modelId", model.id).toString()
         return request("/model", body).map { Unit }
