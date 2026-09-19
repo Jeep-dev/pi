@@ -56,9 +56,19 @@ class AgentKeepAliveService : Service() {
         (application as PiApplication).runtimeManager.register(records)
 
         monitorJob = scope.launch {
-            var offlinePolls = 0
             while (isActive) {
                 val currentRecords = PiSessionStore(applicationContext).loadOrCreateDefault()
+                if (currentRecords.isEmpty()) {
+                    wakeLock?.takeIf { it.isHeld }?.release()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    return@launch
+                }
+
+                // Every open Session is a live terminal, independent of the visible tab.
+                // register() retries disconnected runtimes but leaves connected ones alone.
+                (application as PiApplication).runtimeManager.register(currentRecords)
+
                 val probes = currentRecords.map { record ->
                     async {
                         val endpoint = PiBridge(
@@ -67,8 +77,8 @@ class AgentKeepAliveService : Service() {
                             record.token,
                             record.androidSessionId
                         )
-                        val health = endpoint.health(timeoutMs = 2_500).getOrNull()
-                        val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
+                        val health = endpoint.health(timeoutMs = 1_200).getOrNull()
+                        val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 1_500).getOrNull() else null
                         record to (health to state)
                     }
                 }.awaitAll()
@@ -79,25 +89,19 @@ class AgentKeepAliveService : Service() {
                 val running = probes.count { (_, result) -> result.first?.piRunning == true }
 
                 if (working > 0) {
-                    offlinePolls = 0
                     wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
-                    updateNotification("$working 个 Pi Agent 正在工作 · 共 $running 个在线")
+                    updateNotification("$working 个 Pi Agent 正在工作 · $running/${currentRecords.size} 个 Session 在线")
                 } else {
                     wakeLock?.takeIf { it.isHeld }?.release()
-                    if (running > 0) {
-                        offlinePolls = 0
-                        updateNotification("$running 个 Pi Session 在线 · 后台保持连接")
-                    } else {
-                        offlinePolls++
-                        updateNotification("没有在线 Pi · 检查中 $offlinePolls/2")
-                        if (offlinePolls >= 2) {
-                            stopForeground(STOP_FOREGROUND_REMOVE)
-                            stopSelf()
-                            return@launch
+                    updateNotification(
+                        if (running == currentRecords.size) {
+                            "$running 个 Pi Session 全部在线 · 后台保持运行"
+                        } else {
+                            "$running/${currentRecords.size} 个 Pi Session 在线 · 正在恢复其余 Session"
                         }
-                    }
+                    )
                 }
-                delay(15_000)
+                delay(10_000)
             }
         }
     }
