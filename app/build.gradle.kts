@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.29 build 129: background multi-session recovery, bridge port cleanup, and leaner Android UI.
+// v5.19.30 build 130: self-healing Pi child process and serialized bridge starts.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 129
-        versionName = "5.19.29"
+        versionCode = 130
+        versionName = "5.19.30"
     }
 
     signingConfigs {
