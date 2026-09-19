@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-19.2";
+const bridgeVersion = "2026-09-19.3";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -29,6 +29,7 @@ const bridgeCapabilities = [
   "closed-session-resume-v1",
   "thinking-levels-v1",
   "pi-auto-restart-v1",
+  "async-prompt-accept-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -954,6 +955,28 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+function dispatchPrompt(message, streamingBehavior) {
+  if (stopFence) throw new Error("Stop in progress; prompt rejected");
+  if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
+
+  const command = {
+    type: "prompt",
+    message,
+    ...(streamingBehavior ? { streamingBehavior } : {}),
+  };
+
+  // Prompt handling is asynchronous in Pi RPC mode: the authoritative response
+  // is emitted after input/before_agent_start preflight. Never hold the Android
+  // HTTP request open while extension/auth preflight runs; doing so turns a slow
+  // preflight into a fake transport timeout and a fake reconnect.
+  void rpc(command, 120_000).catch(error => {
+    addEvent({
+      type: "prompt_rejected",
+      error: String(error?.message || error),
+    });
+  });
+}
+
 function dispatchLongCommand(message) {
   if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
@@ -1140,11 +1163,8 @@ const server = http.createServer(async (req, res) => {
         }).join("\n");
         message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
-      return rpcResponse(res, {
-        type: "prompt",
-        message,
-        ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
-      });
+      dispatchPrompt(message, input.streamingBehavior);
+      return send(res, 202, { ok: true });
     }
 
     if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {
