@@ -75,7 +75,6 @@ class PiBridge(
                 if [ -f $remotePidFile ]; then
                   pid="${'$'}(cat $remotePidFile 2>/dev/null || true)";
                   if [ -n "${'$'}pid" ]; then kill "${'$'}pid" 2>/dev/null || true; sleep 0.3; kill -9 "${'$'}pid" 2>/dev/null || true; fi;
-                  rm -f $remotePidFile;
                 fi
             """.trimIndent().replace("\n", " ")
             runTermux(cleanup).getOrThrow()
