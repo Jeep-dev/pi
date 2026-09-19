@@ -225,7 +225,7 @@ class PiBridge(
                 }
             })
         }
-        return request("/prompt", body.toString()).map { Unit }
+        return request("/prompt-async", body.toString()).map { Unit }
     }
 
     suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
