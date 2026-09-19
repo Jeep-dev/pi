@@ -10,9 +10,19 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.security.SecureRandom
+
+internal fun Throwable?.isSocketTimeoutFailure(): Boolean {
+    var current = this
+    while (current != null) {
+        if (current is SocketTimeoutException) return true
+        current = current.cause
+    }
+    return false
+}
 
 class PiBridge(
     context: Context,
