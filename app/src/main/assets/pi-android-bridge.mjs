@@ -1148,7 +1148,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 202, { ok: true });
     }
 
-    if (req.method === "POST" && url.pathname === "/prompt") {
+    if (req.method === "POST" && (url.pathname === "/prompt" || url.pathname === "/prompt-async")) {
       if (stopFence) throw new Error("Stop in progress; prompt rejected");
       const input = JSON.parse(await readBody(req));
       const attachments = Array.isArray(input.attachments)
@@ -1163,8 +1163,15 @@ const server = http.createServer(async (req, res) => {
         }).join("\n");
         message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
-      dispatchPrompt(message, input.streamingBehavior);
-      return send(res, 202, { ok: true });
+      if (url.pathname === "/prompt-async") {
+        dispatchPrompt(message, input.streamingBehavior);
+        return send(res, 202, { ok: true });
+      }
+      return rpcResponse(res, {
+        type: "prompt",
+        message,
+        ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
+      });
     }
 
     if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {
