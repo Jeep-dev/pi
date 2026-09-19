@@ -24,7 +24,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-14.3"
+    private val expectedBridgeVersion = "2026-09-19.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -38,7 +38,8 @@ class PiBridge(
         "tool-history-metadata-v1",
         "tool-args-lossless-v1",
         "cwd-shared-resume-v1",
-        "closed-session-resume-v1"
+        "closed-session-resume-v1",
+        "thinking-levels-v1"
     )
     private val authToken: String by lazy {
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)
@@ -75,11 +76,13 @@ class PiBridge(
         }
     }
 
-    suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun installAndStartBridge(gracefulShutdown: Boolean = true): Result<Unit> = withContext(Dispatchers.IO) {
         if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
         runCatching {
-            request("/shutdown", "{}", 2_000)
-            delay(750)
+            if (gracefulShutdown) {
+                request("/shutdown", "{}", 1_000)
+                delay(600)
+            }
             val bridge = context.assets.open("pi-android-bridge.mjs").use {
                 Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
             }
@@ -101,10 +104,16 @@ class PiBridge(
     }
 
     suspend fun waitForBridge(timeoutMillis: Long = 15_000): Result<Unit> {
-        val attempts = (timeoutMillis / 250).toInt().coerceAtLeast(1)
+        // Honor a real wall-clock deadline. The old implementation multiplied
+        // "attempts" by a 1.2s socket timeout, so a nominal 30s wait could take
+        // almost three minutes when no bridge was listening.
+        val deadlineNanos = System.nanoTime() + timeoutMillis.coerceAtLeast(1) * 1_000_000L
         var lastSeenVersion = ""
-        repeat(attempts) {
-            request("/health", null, 1200).onSuccess { raw ->
+        while (true) {
+            val remainingMs = ((deadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+            if (remainingMs <= 0L) break
+            val probeTimeout = remainingMs.coerceAtMost(600L).coerceAtLeast(100L).toInt()
+            request("/health", null, probeTimeout).onSuccess { raw ->
                 val root = runCatching { JSONObject(raw) }.getOrNull()
                 val version = root?.optString("bridgeVersion").orEmpty()
                 val capabilities = root?.optJSONArray("capabilities") ?: JSONArray()
@@ -116,7 +125,9 @@ class PiBridge(
                     return Result.success(Unit)
                 }
             }
-            delay(250)
+            val afterProbeMs = ((deadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+            if (afterProbeMs <= 0L) break
+            delay(afterProbeMs.coerceAtMost(100L))
         }
         val detail = if (lastSeenVersion.isBlank()) {
             "没有检测到新版 bridge"
