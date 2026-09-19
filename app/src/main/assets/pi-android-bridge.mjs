@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-19.1";
+const bridgeVersion = "2026-09-19.2";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -28,6 +28,7 @@ const bridgeCapabilities = [
   "cwd-shared-resume-v1",
   "closed-session-resume-v1",
   "thinking-levels-v1",
+  "pi-auto-restart-v1",
 ];
 const authToken = process.env.PI_ANDROID_TOKEN || "";
 if (authToken.length < 32) throw new Error("PI_ANDROID_TOKEN is required");
@@ -62,6 +63,9 @@ const persistentUiEvents = new Map();
 let latestQueueEvent = null;
 let stopFence = false;
 let stopInProgress = null;
+let startQueue = Promise.resolve();
+let restartTimer = null;
+let autoRestartEnabled = true;
 
 function addEvent(value) {
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
@@ -73,6 +77,9 @@ function addEvent(value) {
     eventBytes -= events.shift().byteSize;
   }
   if (value?.type === "queue_update") latestQueueEvent = event;
+  if (value?.type === "extension_ui_request" && value.method === "notify" && value.message === "ANDROID_PI_QUIT") {
+    autoRestartEnabled = false;
+  }
   if (value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") latestQueueEvent = null;
   if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
     pendingUiRequests.set(String(value.id), value);
@@ -154,6 +161,10 @@ function attachJsonl(stream) {
 }
 
 function stopPi() {
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
   stopFence = false;
   stopInProgress = null;
   addEvent({ type: "process_reset" });
@@ -263,11 +274,25 @@ function spawnPi(nextLaunchCommand, nextCwd) {
   });
 }
 
-async function startPi(nextCwd, nextLaunchCommand) {
+async function startPiOnce(nextCwd, nextLaunchCommand) {
+  const desiredCwd = expandHome((nextCwd || cwd).trim()) || termuxHome;
+  const desiredLaunch = (nextLaunchCommand || launchCommand).trim();
+  if (!desiredLaunch) throw new Error("Pi launch command is empty");
+
+  if (
+    child &&
+    child.exitCode == null &&
+    child.stdin?.writable &&
+    desiredCwd === cwd &&
+    desiredLaunch === launchCommand
+  ) {
+    return;
+  }
+
   stopPi();
-  cwd = expandHome((nextCwd || cwd).trim()) || termuxHome;
-  launchCommand = (nextLaunchCommand || launchCommand).trim();
-  if (!launchCommand) throw new Error("Pi launch command is empty");
+  autoRestartEnabled = true;
+  cwd = desiredCwd;
+  launchCommand = desiredLaunch;
   lastStderr = "";
   lastStdoutTail = "";
   lastExit = null;
@@ -303,13 +328,40 @@ async function startPi(nextCwd, nextLaunchCommand) {
     }
     pending.clear();
     child = null;
+
+    if (!shuttingDown && autoRestartEnabled && launchCommand && !restartTimer) {
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        if (shuttingDown || !autoRestartEnabled || child) return;
+        startPi(cwd, launchCommand).catch(error => {
+          lastStderr = (lastStderr + `\nAuto restart failed: ${String(error?.message || error)}`).slice(-8000);
+          if (!shuttingDown && autoRestartEnabled && !restartTimer) {
+            restartTimer = setTimeout(() => {
+              restartTimer = null;
+              if (!shuttingDown && autoRestartEnabled && !child) {
+                startPi(cwd, launchCommand).catch(() => {});
+              }
+            }, 2_000);
+            restartTimer.unref?.();
+          }
+        });
+      }, 400);
+      restartTimer.unref?.();
+    }
   });
+
   await new Promise(resolve => setTimeout(resolve, 450));
   if (child !== startedChild || startedChild.exitCode != null) {
     const exitText = lastExit ? `exit=${lastExit.code ?? "?"} signal=${lastExit.signal ?? "-"}` : "exit=unknown";
     const details = [lastStderr.trim(), lastStdoutTail.trim()].filter(Boolean).join("\n--- stdout ---\n");
     throw new Error(`Pi failed to start (${exitText})${details ? `\n${details}` : ""}`);
   }
+}
+
+function startPi(nextCwd, nextLaunchCommand) {
+  const run = startQueue.then(() => startPiOnce(nextCwd, nextLaunchCommand));
+  startQueue = run.catch(() => {});
+  return run;
 }
 
 function sendRaw(value) {
