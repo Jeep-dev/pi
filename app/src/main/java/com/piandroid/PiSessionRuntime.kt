@@ -1,7 +1,5 @@
 package com.piandroid
 
-import java.net.SocketTimeoutException
-
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -247,10 +245,21 @@ internal class PiSessionRuntime(
      */
     fun recoverIfUnhealthy(reason: Throwable) {
         scope.launch {
-            val health = bridge.health(timeoutMs = 800).getOrNull()
-            val responsive = health?.piRunning == true && bridge.state(timeoutMs = 1_500).isSuccess
-            if (!responsive) {
-                forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
+            val healthResult = bridge.health(timeoutMs = 800)
+            val health = healthResult.getOrNull()
+            when {
+                // A timeout is only an unknown state. Do not turn it into a real
+                // disconnect by restarting a process that may still be healthy.
+                health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure() ->
+                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(reason))
+                health == null ->
+                    forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
+                // /health is the process-liveness authority. If it says the Pi child
+                // is alive, a failed get_state/command must never restart that child.
+                health.piRunning ->
+                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(reason))
+                else ->
+                    forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
             }
         }
     }
@@ -278,21 +287,24 @@ internal class PiSessionRuntime(
                     // batch that was in flight before activation.
                     val generation = ++conversationGeneration
                     scope.launch {
-                        val refreshed = runCatching { connectCurrent(true, generation) }
-                        val ready = refreshed.getOrNull()
-                        if (ready != null) {
-                            if (!publishReady(ready, generation)) {
-                                updatesMutable.emit(
-                                    PiRuntimeUpdate.Failed(
-                                        IllegalStateException("Pi conversation is already owned by another Android Session")
+                        while (isConversationGeneration(generation) && canRecover()) {
+                            val refreshed = runCatching { connectCurrent(true, generation) }
+                            val ready = refreshed.getOrNull()
+                            if (ready != null) {
+                                if (!publishReady(ready, generation)) {
+                                    updatesMutable.emit(
+                                        PiRuntimeUpdate.Failed(
+                                            IllegalStateException("Pi conversation is already owned by another Android Session")
+                                        )
                                     )
-                                )
+                                }
+                                break
                             }
-                        } else {
-                            val error = refreshed.exceptionOrNull()
-                            if (error != null && isConversationGeneration(generation)) {
-                                updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
-                            }
+                            val error = refreshed.exceptionOrNull() ?: break
+                            if (!isConversationGeneration(generation)) break
+                            updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+                            if (error !is TransientRpcUnavailable) break
+                            delay(500L)
                         }
                     }
                 } else if (state != null && snapshot != null) {
@@ -439,35 +451,58 @@ internal class PiSessionRuntime(
     }
 
     private fun launchConnectionLocked() {
-        val startIfMissing = autoStartRequested
-        val requestedRecord = record
+        val initialStartIfMissing = autoStartRequested
+        val initialRecord = record
         connectionJob = scope.launch {
-            var result = runCatching { connectInternal(requestedRecord, startIfMissing) }
-            // If an inactive tab was being probed while the user selected it,
-            // promote that same runtime to an active start instead of waiting for
-            // a second Compose effect.
-            if (result.isFailure && result.exceptionOrNull() is RuntimeUnavailable) {
-                val promote = synchronized(stateLock) { autoStartRequested && !startIfMissing && !closed }
-                if (promote) result = runCatching { connectInternal(currentRecord(), true) }
-            }
-            if (result.isSuccess) {
-                if (publishReady(result.getOrThrow())) {
-                    startEventLoop()
-                } else {
-                    updatesMutable.emit(
-                        PiRuntimeUpdate.Failed(
-                            IllegalStateException("Pi conversation is already owned by another Android Session")
-                        )
-                    )
+            var startIfMissing = initialStartIfMissing
+            var requestedRecord = initialRecord
+            while (currentCoroutineContext().isActive && !isClosed()) {
+                var result = runCatching { connectInternal(requestedRecord, startIfMissing) }
+                // If an inactive tab was being probed while the user selected it,
+                // promote that same runtime to an active start instead of waiting for
+                // a second Compose effect.
+                if (result.isFailure && result.exceptionOrNull() is RuntimeUnavailable) {
+                    val promote = synchronized(stateLock) { autoStartRequested && !startIfMissing && !closed }
+                    if (promote) {
+                        startIfMissing = true
+                        requestedRecord = currentRecord()
+                        result = runCatching { connectInternal(requestedRecord, true) }
+                    }
                 }
-            } else {
+
+                if (result.isSuccess) {
+                    if (publishReady(result.getOrThrow())) {
+                        startEventLoop()
+                    } else {
+                        updatesMutable.emit(
+                            PiRuntimeUpdate.Failed(
+                                IllegalStateException("Pi conversation is already owned by another Android Session")
+                            )
+                        )
+                    }
+                    break
+                }
+
                 val error = result.exceptionOrNull() ?: IllegalStateException("Pi connection failed")
+                if (error is TransientRpcUnavailable) {
+                    // Keep this connection job alive. A localhost timeout means
+                    // "unknown/busy", not "dead"; retry without emitting Failed
+                    // or invoking any destructive start/kill path.
+                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+                    delay(500L)
+                    requestedRecord = currentRecord()
+                    startIfMissing = synchronized(stateLock) { autoStartRequested }
+                    continue
+                }
+
                 if (error is RuntimeUnavailable) updatesMutable.emit(PiRuntimeUpdate.Unavailable)
                 else updatesMutable.emit(PiRuntimeUpdate.Failed(error))
+                break
             }
+
             val retryAsActive = synchronized(stateLock) {
                 connectionJob = null
-                !closed && !connected && autoStartRequested && !startIfMissing
+                !closed && !connected && autoStartRequested && !initialStartIfMissing
             }
             if (retryAsActive) {
                 synchronized(stateLock) {
@@ -561,7 +596,7 @@ internal class PiSessionRuntime(
             // temporarily busy. Reinstalling here would kill that still-live
             // bridge and turn a harmless RPC stall into a real disconnect.
             val healthError = healthProbe.exceptionOrNull()
-            if (healthBefore == null && healthError.hasSocketTimeout()) {
+            if (healthBefore == null && healthError.isSocketTimeoutFailure()) {
                 throw BridgeRpcTemporarilyUnavailable(healthError)
             }
             bridge.installAndStartBridge(gracefulShutdown = healthBefore != null).getOrThrow()
@@ -724,20 +759,14 @@ internal class PiSessionRuntime(
         return false
     }
 
-    private fun Throwable?.hasSocketTimeout(): Boolean {
-        var current = this
-        while (current != null) {
-            if (current is SocketTimeoutException) return true
-            current = current.cause
-        }
-        return false
-    }
+    private open class TransientRpcUnavailable(message: String, cause: Throwable?) :
+        IllegalStateException(message, cause)
 
     private class PiRpcTemporarilyUnavailable(cause: Throwable) :
-        IllegalStateException("Pi RPC temporarily unavailable", cause)
+        TransientRpcUnavailable("Pi RPC temporarily unavailable", cause)
 
     private class BridgeRpcTemporarilyUnavailable(cause: Throwable?) :
-        IllegalStateException("Bridge RPC temporarily unavailable", cause)
+        TransientRpcUnavailable("Bridge RPC temporarily unavailable", cause)
 
     private fun currentRecord(): PiSessionRecord = synchronized(stateLock) { record }
     private fun isConversationGeneration(expected: Long): Boolean = synchronized(stateLock) {
