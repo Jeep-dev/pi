@@ -1,5 +1,7 @@
 package com.piandroid
 
+import java.net.SocketTimeoutException
+
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -496,7 +498,8 @@ internal class PiSessionRuntime(
     ): PiRuntimeReady {
         // Probe once, quickly. Do not stack several multi-second health waits
         // before even asking Termux to start the bridge.
-        val healthBefore = bridge.health(timeoutMs = 700).getOrNull()
+        val healthProbe = bridge.health(timeoutMs = 700)
+        val healthBefore = healthProbe.getOrNull()
         val bridgeReady = bridge.waitForBridge(1_200).isSuccess
         val runningHealth = if (bridgeReady) {
             healthBefore ?: bridge.health(timeoutMs = 700).getOrNull()
@@ -505,8 +508,14 @@ internal class PiSessionRuntime(
         }
         val ownerMatches = runningHealth?.runtimeOwnerSessionId == runtimeOwnerSessionId
         val bridgeUsable = bridgeReady && ownerMatches
+
+        // A slow RPC is not a dead process. If /health already confirmed that the
+        // Pi child is alive, a transient get_state failure must never fall through
+        // to bridge.start(), because /start is allowed to replace the child.
         val attached = if (bridgeUsable && runningHealth?.piRunning == true) {
-            bridge.state(timeoutMs = 2_500).getOrNull()
+            bridge.state(timeoutMs = 2_500).getOrElse { error ->
+                throw PiRpcTemporarilyUnavailable(error)
+            }
         } else {
             null
         }
@@ -548,6 +557,13 @@ internal class PiSessionRuntime(
         // A healthy owner-matching bridge can start/restart Pi directly. Reinstall
         // the bridge only when it is absent, stale, or belongs to the wrong endpoint.
         if (!bridgeUsable) {
+            // On localhost, a read/connect timeout can mean the Node bridge is
+            // temporarily busy. Reinstalling here would kill that still-live
+            // bridge and turn a harmless RPC stall into a real disconnect.
+            val healthError = healthProbe.exceptionOrNull()
+            if (healthBefore == null && healthError.hasSocketTimeout()) {
+                throw BridgeRpcTemporarilyUnavailable(healthError)
+            }
             bridge.installAndStartBridge(gracefulShutdown = healthBefore != null).getOrThrow()
             bridge.waitForBridge(10_000).getOrThrow()
         }
@@ -707,6 +723,21 @@ internal class PiSessionRuntime(
         }
         return false
     }
+
+    private fun Throwable?.hasSocketTimeout(): Boolean {
+        var current = this
+        while (current != null) {
+            if (current is SocketTimeoutException) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private class PiRpcTemporarilyUnavailable(cause: Throwable) :
+        IllegalStateException("Pi RPC temporarily unavailable", cause)
+
+    private class BridgeRpcTemporarilyUnavailable(cause: Throwable?) :
+        IllegalStateException("Bridge RPC temporarily unavailable", cause)
 
     private fun currentRecord(): PiSessionRecord = synchronized(stateLock) { record }
     private fun isConversationGeneration(expected: Long): Boolean = synchronized(stateLock) {
