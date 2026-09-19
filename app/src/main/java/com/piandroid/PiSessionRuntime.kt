@@ -248,18 +248,12 @@ internal class PiSessionRuntime(
             val healthResult = bridge.health(timeoutMs = 800)
             val health = healthResult.getOrNull()
             when {
-                // A timeout is only an unknown state. Do not turn it into a real
-                // disconnect by restarting a process that may still be healthy.
-                health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure() ->
-                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(reason))
-                health == null ->
-                    forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
-                // /health is the process-liveness authority. If it says the Pi child
-                // is alive, a failed get_state/command must never restart that child.
-                health.piRunning ->
-                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(reason))
-                else ->
-                    forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
+                // The event loop owns connectivity state. A command timeout with a
+                // live Pi (or an inconclusive localhost timeout) must not flip the
+                // whole Session into RECONNECTING.
+                health?.piRunning == true -> Unit
+                health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure() -> Unit
+                else -> forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
             }
         }
     }
