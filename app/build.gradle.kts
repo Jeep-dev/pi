@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.32 build 132: keep sessions alive and retry transient local RPC failures.
+// v5.19.33 build 133: nonblocking prompt transport and stable connectivity on send timeout.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 132
-        versionName = "5.19.32"
+        versionCode = 133
+        versionName = "5.19.33"
     }
 
     signingConfigs {
