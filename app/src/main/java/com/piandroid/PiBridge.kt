@@ -69,10 +69,16 @@ class PiBridge(
     /** Close this Android Session like a terminal tab: stop its runtime and keep all files/history. */
     suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            request("/shutdown", "{}", 5_000).getOrThrow()
-            delay(750)
-            // Deliberately keep bridge files, session directories, JSONL history,
-            // endpoint tokens, and runtime preferences. Closing a tab is not deletion.
+            request("/shutdown", "{}", 1_500)
+            delay(600)
+            val cleanup = """
+                if [ -f $remotePidFile ]; then
+                  pid="${'$'}(cat $remotePidFile 2>/dev/null || true)";
+                  if [ -n "${'$'}pid" ]; then kill "${'$'}pid" 2>/dev/null || true; sleep 0.3; kill -9 "${'$'}pid" 2>/dev/null || true; fi;
+                  rm -f $remotePidFile;
+                fi
+            """.trimIndent().replace("\n", " ")
+            runTermux(cleanup).getOrThrow()
         }
     }
 
@@ -94,7 +100,18 @@ class PiBridge(
                 printf '%s' '$bridge' | base64 -d > $remoteBridgeScript &&
                 printf '%s' '$extension' | base64 -d > $remoteExtensionScript &&
                 chmod 700 $remoteBridgeScript &&
-                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
+                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile 2>/dev/null || true)"; if [ -n "${'$'}old_pid" ]; then kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.3; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi; fi &&
+                for proc in /proc/[0-9]*; do
+                  [ -r "${'$'}proc/environ" ] && [ -r "${'$'}proc/cmdline" ] || continue;
+                  if tr '\0' '\n' < "${'$'}proc/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_PORT=$port' &&
+                     tr '\0' ' ' < "${'$'}proc/cmdline" 2>/dev/null | grep -Fq '/.pi/android/' &&
+                     tr '\0' ' ' < "${'$'}proc/cmdline" 2>/dev/null | grep -Fq 'bridge.mjs'; then
+                    stale_pid="${'$'}{proc##*/}";
+                    kill "${'$'}stale_pid" 2>/dev/null || true;
+                    sleep 0.2;
+                    kill -9 "${'$'}stale_pid" 2>/dev/null || true;
+                  fi;
+                done &&
                 rm -f $remotePidFile &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$runtimeOwnerSessionId' PI_ANDROID_PID_FILE=$remotePidFile &&
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
