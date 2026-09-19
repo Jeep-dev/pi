@@ -1,5 +1,5 @@
 name: Build Pi Android
-# v5.19.28 conversation file identity validation
+# Android build and validation
 
 on:
   workflow_dispatch:
@@ -67,7 +67,12 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
+      - name: Read app version
+        run: |
+          APP_VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n1)"
+          test -n "$APP_VERSION"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-android-v5.19.28-apks
+          name: pi-android-v${{ env.APP_VERSION }}-apks
           path: app/build/outputs/apk/**/*.apk
