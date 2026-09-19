@@ -456,14 +456,27 @@ internal class PiSessionRuntime(
         configuredRecord: PiSessionRecord,
         allowStart: Boolean
     ): PiRuntimeReady {
-        val healthBefore = bridge.health(timeoutMs = 2_500).getOrNull()
-        val attached = bridge.attachToRunningBridge().getOrNull()
-        val runningHealth = healthBefore ?: bridge.health(timeoutMs = 2_500).getOrNull()
+        // Probe once, quickly. Do not stack several multi-second health waits
+        // before even asking Termux to start the bridge.
+        val healthBefore = bridge.health(timeoutMs = 700).getOrNull()
+        val bridgeReady = bridge.waitForBridge(1_200).isSuccess
+        val runningHealth = if (bridgeReady) {
+            healthBefore ?: bridge.health(timeoutMs = 700).getOrNull()
+        } else {
+            healthBefore
+        }
+        val ownerMatches = runningHealth?.runtimeOwnerSessionId == runtimeOwnerSessionId
+        val bridgeUsable = bridgeReady && ownerMatches
+        val attached = if (bridgeUsable && runningHealth?.piRunning == true) {
+            bridge.state(timeoutMs = 2_500).getOrNull()
+        } else {
+            null
+        }
+
         if (attached != null) {
             val runningCwd = runningHealth?.cwd.orEmpty()
-            val ownerMatches = runningHealth?.runtimeOwnerSessionId == runtimeOwnerSessionId
             val conversationMatches = runtimeConversationMatches(configuredRecord, attached)
-            if (ownerMatches && sameCwd(configuredRecord.cwd, runningCwd) && conversationMatches) {
+            if (sameCwd(configuredRecord.cwd, runningCwd) && conversationMatches) {
                 val snapshot = bridge.recoverySnapshot().getOrThrow()
                 return PiRuntimeReady(
                     state = attached,
@@ -483,7 +496,7 @@ internal class PiSessionRuntime(
             throw RuntimeUnavailable()
         }
 
-        val previous = attached ?: bridge.state(timeoutMs = 1_500).getOrNull()
+        val previous = attached
         val previousFile = synchronized(stateLock) { lastState?.sessionFile?.takeIf { it.isNotBlank() } }
             ?: configuredRecord.sessionFile.takeIf { it.isNotBlank() }
         val preserveSession = previousFile != null
@@ -493,8 +506,13 @@ internal class PiSessionRuntime(
                 .firstOrNull { it.name == "__android_checkpoint" }
                 ?.let { bridge.prompt("/__android_checkpoint") }
         }
-        bridge.installAndStartBridge().getOrThrow()
-        bridge.waitForBridge(30_000).getOrThrow()
+
+        // A healthy owner-matching bridge can start/restart Pi directly. Reinstall
+        // the bridge only when it is absent, stale, or belongs to the wrong endpoint.
+        if (!bridgeUsable) {
+            bridge.installAndStartBridge(gracefulShutdown = healthBefore != null).getOrThrow()
+            bridge.waitForBridge(10_000).getOrThrow()
+        }
 
         val configuredLaunch = appendPiStartupArguments(
             configuredRecord.launchCommand.trim(),
@@ -697,12 +715,12 @@ internal class PiSessionRuntimeManager(context: Context) {
                 conversationOwners[file] = record.androidSessionId
             }
         }
-        // The durable Session registry is the set of open terminal-like windows.
-        // After an Activity/process restart, every persisted window must attach to
-        // its surviving runtime or restart it. Explicitly closed windows were removed
-        // from the registry already, so they are intentionally not restarted.
+        // Register every Session, but never cold-start all of them at once.
+        // Inactive Sessions may attach to an already-running bridge; only the
+        // selected PiScreen promotes its own runtime with autoStart=true.
+        // This avoids flooding Termux RunCommandService with parallel bridge launches.
         records.forEach { record ->
-            runtime(record).ensureConnected(record, autoStart = true)
+            runtime(record).ensureConnected(record, autoStart = false)
         }
     }
 
