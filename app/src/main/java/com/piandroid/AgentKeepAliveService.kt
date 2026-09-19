@@ -77,27 +77,33 @@ class AgentKeepAliveService : Service() {
                             record.token,
                             record.androidSessionId
                         )
-                        val health = endpoint.health(timeoutMs = 1_200).getOrNull()
+                        val healthResult = endpoint.health(timeoutMs = 1_200)
+                        val health = healthResult.getOrNull()
                         val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 1_500).getOrNull() else null
-                        record to (health to state)
+                        record to Triple(health, state, healthResult.exceptionOrNull())
                     }
                 }.awaitAll()
 
                 probes.forEach { (record, result) ->
                     val health = result.first
-                    if (health == null) {
+                    val healthError = result.third
+                    if (health == null && !healthError.isSocketTimeoutFailure()) {
                         runtimeManager.recover(record, "Bridge 无响应，后台自动重连")
-                    } else if (!health.piRunning) {
+                    } else if (health != null && !health.piRunning) {
                         runtimeManager.recover(record, "Pi 进程已退出，后台自动重启")
                     }
                 }
 
-                val bridgeOnline = probes.count { (_, result) -> result.first != null }
+                val bridgeOnline = probes.count { (_, result) ->
+                    result.first != null || result.third.isSocketTimeoutFailure()
+                }
                 val working = probes.count { (_, result) ->
                     val state = result.second
                     state?.streaming == true || state?.compacting == true
                 }
-                val running = probes.count { (_, result) -> result.first?.piRunning == true }
+                val running = probes.count { (_, result) ->
+                    result.first?.piRunning == true || result.third.isSocketTimeoutFailure()
+                }
 
                 updateNotification(
                     when {
