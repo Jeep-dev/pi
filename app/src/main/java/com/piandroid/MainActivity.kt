@@ -384,14 +384,15 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
     val bridge = PiBridge(context, record.port, record.token, record.androidSessionId)
     val health = bridge.health(timeoutMs = 2_500).getOrNull()
         ?: return record.copy(
-            status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
+            status = PiSessionStatus.ERROR,
+            lastError = "Bridge 无响应，正在自动重连"
         )
     if (!health.piRunning) {
         val diagnostic = bridgeHealthDiagnostic(health)
         return record.copy(
             cwd = health.cwd.ifBlank { record.cwd },
-            status = if (diagnostic.isBlank() && record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR,
-            lastError = diagnostic.ifBlank { record.lastError }
+            status = PiSessionStatus.ERROR,
+            lastError = diagnostic.ifBlank { "Pi 进程已退出，正在自动重连" }
         )
     }
     val stateResult = bridge.state(timeoutMs = 4_000)
@@ -1365,7 +1366,10 @@ private fun PiScreen(
 
     fun sendExtensionCommand(text: String) {
         runtime.launchTask {
-            bridge.command(text).onFailure { addSystem("命令发送失败：${it.message}") }
+            bridge.command(text).onFailure {
+                addSystem("命令发送失败：${it.message}")
+                runtime.recoverIfUnhealthy(it)
+            }
         }
     }
 
@@ -1403,6 +1407,7 @@ private fun PiScreen(
                             markSteeringFailed(listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"))
                         }
                         addSystem("发送附件失败：${it.message}")
+                        runtime.recoverIfUnhealthy(it)
                     }
                 )
             }
@@ -1689,6 +1694,7 @@ private fun PiScreen(
                                 markSteeringFailed(text)
                             }
                             addSystem("发送失败：${it.message}")
+                            runtime.recoverIfUnhealthy(it)
                         }
                     )
                 }
