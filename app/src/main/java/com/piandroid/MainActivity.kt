@@ -303,13 +303,11 @@ private fun toolDraftPreview(raw: String, count: Int): String {
     val preview = when {
         content != null -> content
         raw.isNotBlank() -> raw
-        else -> "等待参数数据…"
+        else -> ""
     }
     return buildString {
-        if (!path.isNullOrBlank()) append("目标：$path\n")
-        append("实时生成内容：\n")
+        if (!path.isNullOrBlank()) append(path).append('\n')
         append(preview)
-        append("\n\n已生成 ${compactCount(count.toLong())} 字符 · 正常运行")
     }
 }
 
@@ -1495,7 +1493,6 @@ private fun PiScreen(
             "/scoped-models" -> {
                 modelInitialSearch = ""
                 panel = Panel.Models
-                addSystem("移动端没有 Ctrl+P 循环；可在此切换当前模型或设置新会话默认模型")
             }
             "/thinking" -> {
                 if (args.isBlank()) panel = Panel.Thinking
@@ -2061,7 +2058,6 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
             Text("Pi Sessions", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 15.sp, modifier = Modifier.weight(1f))
             TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text("＋", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp) }
         }
-        Text("中间区域右滑打开 · 左边缘保留返回", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
         LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
             items(sessions, key = { it.androidSessionId }) { record ->
                 val selected = record.androidSessionId == activeAndroidSessionId
@@ -2196,7 +2192,7 @@ LaunchedEffect(listState) {
                 resourceSections.forEach { section -> Text("[${section.title}]", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp)); Text("  ${section.items.joinToString(", ")}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp) }
             }
         }
-        if (lines.isEmpty()) item { Text("Pi Touch GUI\n输入 / 调出真实命令。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.padding(6.dp)) }
+        if (lines.isEmpty()) item { Text("Pi Touch GUI", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.padding(6.dp)) }
         itemsIndexed(lines) { lineIndex, line ->
             val fullText = line.text.trimEnd(); val visibleText = fullText
             SelectionContainer {
@@ -2278,7 +2274,7 @@ LaunchedEffect(listState) {
 @Composable
 private fun CommandPalette(query: String, local: List<LocalCommand>, remote: List<PiCommand>, modifier: Modifier = Modifier, onPick: (String, Boolean) -> Unit) {
     val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
-    BoxWithConstraints(modifier.fillMaxWidth()) { val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp)); Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth().heightIn(max = allowedHeight).background(PanelBg, RoundedCornerShape(10.dp)).border(1.dp, Border, RoundedCornerShape(10.dp)).padding(vertical = 3.dp)) { Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) { Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f)); Text("${choices.size} · 上下滑动", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }; LazyColumn(state = paletteState, modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 3.dp)) { items(choices) { choice -> val cmd = choice.first; val remoteChoice = choice.second; Row(Modifier.fillMaxWidth().clickable { onPick(cmd.name, remoteChoice) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.width(112.dp)); Text(cmd.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f)) } } } } }
+    BoxWithConstraints(modifier.fillMaxWidth()) { val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp)); Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth().heightIn(max = allowedHeight).background(PanelBg, RoundedCornerShape(10.dp)).border(1.dp, Border, RoundedCornerShape(10.dp)).padding(vertical = 3.dp)) { Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) { Text("Pi Commands", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f)); Text("${choices.size}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }; LazyColumn(state = paletteState, modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 3.dp)) { items(choices) { choice -> val cmd = choice.first; val remoteChoice = choice.second; Text("/${cmd.name}", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 14.sp, modifier = Modifier.fillMaxWidth().clickable { onPick(cmd.name, remoteChoice) }.padding(horizontal = 12.dp, vertical = 10.dp)) } } } }
 }
 
 @Composable
@@ -2326,7 +2322,6 @@ private fun ModelsPanel(models: List<PiModel>, state: PiState?, thinkingLevels: 
                 item {
                     Column(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)) {
                         Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        Text("Pi 当前模型支持的 thinking levels", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, bottom = 6.dp))
                         effortLevels.forEach { level ->
                             val selected = state?.thinkingLevel == level
                             Row(Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2380,7 +2375,7 @@ private fun ThinkingPanel(current: String, levels: List<String>, onBack: () -> U
 }
 
 @Composable
-private fun BashPanel(input: String, output: String, running: Boolean, onInput: (String) -> Unit, onBack: () -> Unit, onRun: () -> Unit, onAbort: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/run · Pi RPC bash", onBack); Text(output.ifBlank { "命令通过 Pi 的 bash RPC 执行，并进入 Pi session 上下文。" }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)); Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(input, onInput, Modifier.weight(1f), singleLine = true, label = { Text("$ command") }); if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") } else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") } } } }
+private fun BashPanel(input: String, output: String, running: Boolean, onInput: (String) -> Unit, onBack: () -> Unit, onRun: () -> Unit, onAbort: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/run", onBack); Text(output, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)); Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(input, onInput, Modifier.weight(1f), singleLine = true, label = { Text("$ command") }); if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") } else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") } } } }
 
 @Composable
 private fun FilesPanel(path: String, files: List<PiFile>, selectedFile: String, fileText: String, fileLoading: Boolean, fileTruncated: Boolean, onBack: () -> Unit, onOpen: (PiFile) -> Unit, onUp: () -> Unit, onText: (String) -> Unit, onSave: () -> Unit) {
@@ -2394,7 +2389,7 @@ private fun TextPanel(title: String, text: String, onBack: () -> Unit) { Column(
 private fun StatsPanel(stats: PiStats?, state: PiState?, onBack: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/session", onBack); val rows = listOf("Session" to (state?.sessionName?.ifBlank { state.piConversationId }.orEmpty()), "File" to (stats?.sessionFile ?: state?.sessionFile.orEmpty()), "Messages" to (stats?.totalMessages?.toString() ?: "—"), "Input tokens" to (stats?.inputTokens?.toString() ?: "—"), "Output tokens" to (stats?.outputTokens?.toString() ?: "—"), "Cache read" to (stats?.cacheRead?.toString() ?: "—"), "Cost" to (stats?.let { "$${"%.4f".format(it.cost)}" } ?: "—"), "Context" to (stats?.takeIf { it.contextPercent >= 0 }?.let { "${it.contextTokens}/${it.contextWindow} (${"%.1f".format(it.contextPercent)}%)" } ?: "—")); rows.forEach { (label, value) -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 9.dp)) { Text(label, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.width(110.dp)); Text(value, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.sp) } } } }
 
 @Composable
-private fun ThemesPanel(selected: PiThemeMode, onBack: () -> Unit, onSelect: (PiThemeMode) -> Unit) { Column(Modifier.fillMaxSize().background(Bg)) { PanelHeader("Themes", onBack); Text("主题会立即应用并自动保存。暗色主题保持原有配色。", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)); Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { PiThemeMode.entries.forEach { mode -> val preview = colorsFor(mode); Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(8.dp)).border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp)).clickable { onSelect(mode) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { Row(Modifier.width(58.dp).height(38.dp).background(preview.bg, RoundedCornerShape(5.dp)).border(1.dp, preview.border, RoundedCornerShape(5.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp))) }; Column(Modifier.weight(1f)) { Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold); Text(mode.description, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }; Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } } }
+private fun ThemesPanel(selected: PiThemeMode, onBack: () -> Unit, onSelect: (PiThemeMode) -> Unit) { Column(Modifier.fillMaxSize().background(Bg)) { PanelHeader("Themes", onBack); Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { PiThemeMode.entries.forEach { mode -> val preview = colorsFor(mode); Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(8.dp)).border(1.dp, if (mode == selected) Accent else Border, RoundedCornerShape(8.dp)).clickable { onSelect(mode) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { Row(Modifier.width(58.dp).height(38.dp).background(preview.bg, RoundedCornerShape(5.dp)).border(1.dp, preview.border, RoundedCornerShape(5.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.width(12.dp).height(24.dp).background(preview.userBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.toolBg, RoundedCornerShape(2.dp))); Box(Modifier.width(12.dp).height(24.dp).background(preview.blue, RoundedCornerShape(2.dp))) }; Text(mode.displayName, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); Text(if (mode == selected) "✓ 当前" else "选择", color = if (mode == selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } } }
 
 @Composable
 private fun SettingsPanel(
@@ -2427,40 +2422,10 @@ private fun SettingsPanel(
             textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         )
         startupError?.let { Text(it, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) }
-        Text(
-            "模型：--provider / --model / --thinking / --models\n" +
-                "工具：--tools / --exclude-tools / --no-builtin-tools / --no-tools\n" +
-                "资源：-e / --no-extensions / --skill / --no-skills / --prompt-template / --no-prompt-templates / --no-context-files\n" +
-                "提示：--system-prompt / --append-system-prompt\n" +
-                "其他：--name / --verbose / --approve / --no-approve",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            lineHeight = 15.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
-        )
-        Text(
-            "附加参数会在启动时追加到上面的基础命令；两个输入框都可以编辑。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
-        )
         Row(Modifier.fillMaxWidth().clickable(enabled = connected) { onAutoCompaction(!autoCompaction) }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                Text("接近模型上下文上限时自动生成 compaction summary", color = TextMuted, fontSize = 11.sp)
-            }
+            Text("自动上下文压缩", color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text(if (autoCompaction) "ON" else "OFF", color = if (autoCompaction) Accent else TextMuted, fontFamily = FontFamily.Monospace)
         }
-        Text(
-            "默认直接使用 Termux 中的 Pi。--mode rpc、Android Session 身份和私有 session-dir 由 App 维持；其他 Pi 原生启动参数可在上方编辑。",
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 17.sp,
-            modifier = Modifier.padding(14.dp)
-        )
         Button(onClick = onConnect, enabled = startupError == null, modifier = Modifier.padding(14.dp)) { Text(if (connected) "重新连接" else "连接 Pi") }
     }
 }
