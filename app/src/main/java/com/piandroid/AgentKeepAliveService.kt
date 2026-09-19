@@ -56,6 +56,9 @@ class AgentKeepAliveService : Service() {
         (application as PiApplication).runtimeManager.register(records)
 
         monitorJob = scope.launch {
+            val bridgeMisses = mutableMapOf<String, Int>()
+            val piMisses = mutableMapOf<String, Int>()
+            val lastRecoveryAt = mutableMapOf<String, Long>()
             while (isActive) {
                 val currentRecords = PiSessionStore(applicationContext).loadOrCreateDefault()
                 if (currentRecords.isEmpty()) {
@@ -83,12 +86,36 @@ class AgentKeepAliveService : Service() {
                     }
                 }.awaitAll()
 
+                val now = android.os.SystemClock.elapsedRealtime()
                 probes.forEach { (record, result) ->
+                    val key = record.androidSessionId
                     val health = result.first
+                    val cooldownElapsed = now - (lastRecoveryAt[key] ?: 0L) >= 30_000L
+
                     if (health == null) {
-                        runtimeManager.recover(record, "Bridge 无响应，后台自动重连")
-                    } else if (!health.piRunning) {
-                        runtimeManager.recover(record, "Pi 进程已退出，后台自动重启")
+                        val misses = (bridgeMisses[key] ?: 0) + 1
+                        bridgeMisses[key] = misses
+                        piMisses[key] = 0
+                        if (misses >= 3 && cooldownElapsed) {
+                            lastRecoveryAt[key] = now
+                            bridgeMisses[key] = 0
+                            runtimeManager.recover(record, "Bridge 无响应，后台自动重连")
+                        }
+                    } else {
+                        bridgeMisses[key] = 0
+                        if (!health.piRunning) {
+                            val misses = (piMisses[key] ?: 0) + 1
+                            piMisses[key] = misses
+                            // Bridge 2026-09-19.2 already auto-restarts its Pi child.
+                            // Only escalate to Android-side recovery if that fails repeatedly.
+                            if (misses >= 3 && cooldownElapsed) {
+                                lastRecoveryAt[key] = now
+                                piMisses[key] = 0
+                                runtimeManager.recover(record, "Pi 进程持续离线，后台自动重连")
+                            }
+                        } else {
+                            piMisses[key] = 0
+                        }
                     }
                 }
 
