@@ -138,8 +138,8 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
     private val permissionRequestCode = 7001
-    // Runtime ownership belongs to the Activity process, never to a Composable.
-    private val runtimeManager by lazy { PiSessionRuntimeManager(applicationContext) }
+    // Runtime ownership belongs to the Application process, not this disposable Activity.
+    private val runtimeManager by lazy { (application as PiApplication).runtimeManager }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,10 +158,6 @@ class MainActivity : ComponentActivity() {
         setContent { PiTouchApp(runtimeManager) }
     }
 
-    override fun onDestroy() {
-        runtimeManager.close()
-        super.onDestroy()
-    }
 
     private fun requestTermuxPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
@@ -528,7 +524,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            if (merged.any { it.status == PiSessionStatus.WORKING }) {
+            if (merged.any { it.status == PiSessionStatus.WORKING || it.status == PiSessionStatus.IDLE }) {
                 AgentKeepAliveService.start(context)
             } else {
                 AgentKeepAliveService.stop(context)
