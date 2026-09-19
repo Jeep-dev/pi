@@ -111,12 +111,22 @@ class PiBridge(
                 printf '%s' '$bridge' | base64 -d > $remoteBridgeScript &&
                 printf '%s' '$extension' | base64 -d > $remoteExtensionScript &&
                 chmod 700 $remoteBridgeScript &&
-                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile 2>/dev/null || true)"; if [ -n "${'$'}old_pid" ]; then kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.3; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi; fi &&
+                if [ -f $remotePidFile ]; then
+                  old_pid="${'$'}(cat $remotePidFile 2>/dev/null || true)";
+                  if [ -n "${'$'}old_pid" ] && [ -r "/proc/${'$'}old_pid/environ" ] && [ -r "/proc/${'$'}old_pid/cmdline" ] &&
+                     tr '\0' '\n' < "/proc/${'$'}old_pid/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_PORT=$port' &&
+                     tr '\0' '\n' < "/proc/${'$'}old_pid/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_ENDPOINT_KEY=$runtimeOwnerSessionId' &&
+                     tr '\0' ' ' < "/proc/${'$'}old_pid/cmdline" 2>/dev/null | grep -Fq '$remoteBridgeScript'; then
+                    kill "${'$'}old_pid" 2>/dev/null || true;
+                    sleep 0.3;
+                    kill -9 "${'$'}old_pid" 2>/dev/null || true;
+                  fi;
+                fi &&
                 for proc in /proc/[0-9]*; do
                   [ -r "${'$'}proc/environ" ] && [ -r "${'$'}proc/cmdline" ] || continue;
-                  if tr '\0' '\n' < "${'$'}proc/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_PORT=$port' &&
-                     tr '\0' ' ' < "${'$'}proc/cmdline" 2>/dev/null | grep -Fq '/.pi/android/' &&
-                     tr '\0' ' ' < "${'$'}proc/cmdline" 2>/dev/null | grep -Fq 'bridge.mjs'; then
+                   if tr '\0' '\n' < "${'$'}proc/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_PORT=$port' &&
+                      tr '\0' '\n' < "${'$'}proc/environ" 2>/dev/null | grep -Fxq 'PI_ANDROID_ENDPOINT_KEY=$runtimeOwnerSessionId' &&
+                      tr '\0' ' ' < "${'$'}proc/cmdline" 2>/dev/null | grep -Fq '$remoteBridgeScript'; then
                     stale_pid="${'$'}{proc##*/}";
                     kill "${'$'}stale_pid" 2>/dev/null || true;
                     sleep 0.2;
@@ -128,6 +138,13 @@ class PiBridge(
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
             """.trimIndent().replace("\n", " ")
             runTermux(command).getOrThrow()
+        }
+    }
+
+    suspend fun restartConfirmedUnresponsiveBridge(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            installAndStartBridge(gracefulShutdown = false).getOrThrow()
+            waitForBridge(12_000).getOrThrow()
         }
     }
 
