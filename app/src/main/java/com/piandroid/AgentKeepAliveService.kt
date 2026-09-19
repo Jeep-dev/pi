@@ -94,19 +94,20 @@ class AgentKeepAliveService : Service() {
                     }
                 }
 
-                val bridgeOnline = probes.count { (_, result) ->
-                    result.first != null || result.third.isSocketTimeoutFailure()
-                }
+                val bridgeOnline = probes.count { (_, result) -> result.first != null }
                 val working = probes.count { (_, result) ->
                     val state = result.second
                     state?.streaming == true || state?.compacting == true
                 }
-                val running = probes.count { (_, result) ->
-                    result.first?.piRunning == true || result.third.isSocketTimeoutFailure()
+                val running = probes.count { (_, result) -> result.first?.piRunning == true }
+                val unknown = probes.count { (_, result) ->
+                    result.first == null && result.third.isSocketTimeoutFailure()
                 }
 
                 updateNotification(
                     when {
+                        unknown > 0 ->
+                            "$running/${currentRecords.size} 已确认在线 · $unknown 个状态未知"
                         running == currentRecords.size && working > 0 ->
                             "$working 个 Pi Agent 正在工作 · $running/${currentRecords.size} 个 Session 在线"
                         running == currentRecords.size ->
