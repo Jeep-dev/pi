@@ -1120,6 +1120,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/state") return rpcResponse(res, { type: "get_state" });
     if (req.method === "GET" && url.pathname === "/stats") return send(res, 200, await sessionStats());
     if (req.method === "GET" && url.pathname === "/models") return rpcResponse(res, { type: "get_available_models" });
+    if (req.method === "GET" && url.pathname === "/thinking-levels") return rpcResponse(res, { type: "get_available_thinking_levels" });
     if (req.method === "GET" && url.pathname === "/commands") return rpcResponse(res, { type: "get_commands" });
     if (req.method === "GET" && url.pathname === "/messages") return rpcResponse(res, { type: "get_messages" });
     if (req.method === "GET" && url.pathname === "/history") {
