@@ -173,7 +173,8 @@ try {
   assert.equal(health.bridgeVersion, "2026-09-19.1");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
-  assert.ok(health.capabilities.includes("recovery-snapshot-v1"));\n  assert.ok(health.capabilities.includes("thinking-levels-v1"));
+  assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
+  assert.ok(health.capabilities.includes("thinking-levels-v1"));
   assert.ok(health.capabilities.includes("persistent-widgets-v1"));
   assert.ok(health.capabilities.includes("multi-session-v1"));
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
