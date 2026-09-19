@@ -217,6 +217,42 @@ internal class PiSessionRuntime(
 
     fun backgroundRecoveryEnabled(): Boolean = synchronized(stateLock) { !closed && recoveryEnabled }
 
+    /**
+     * Force this Session back through the serialized attach/start path.
+     * Used by the process watchdog when the Bridge or Pi child disappears while
+     * Runtime state still says connected.
+     */
+    fun forceRecover(reason: String) {
+        synchronized(stateLock) {
+            if (closed || !recoveryEnabled) return
+            autoStartRequested = true
+            connected = false
+            ++conversationGeneration
+            eventJob?.cancel()
+            eventJob = null
+            updatesMutable.tryEmit(
+                PiRuntimeUpdate.Reconnecting(
+                    IllegalStateException(reason.ifBlank { "Pi runtime unavailable" })
+                )
+            )
+            if (connectionJob?.isActive != true) launchConnectionLocked()
+        }
+    }
+
+    /**
+     * A command timeout is not automatically a dead runtime. Verify the local
+     * Bridge/Pi first; only restart when the endpoint is actually unhealthy.
+     */
+    fun recoverIfUnhealthy(reason: Throwable) {
+        scope.launch {
+            val health = bridge.health(timeoutMs = 800).getOrNull()
+            val responsive = health?.piRunning == true && bridge.state(timeoutMs = 1_500).isSuccess
+            if (!responsive) {
+                forceRecover(reason.message.orEmpty().ifBlank { "Pi request failed" })
+            }
+        }
+    }
+
     fun canSubmitTask(): Boolean = taskGate.isAccepting()
 
     fun launchTask(block: suspend () -> Unit): Job? = taskGate.launch(scope, block)
@@ -728,6 +764,11 @@ internal class PiSessionRuntimeManager(context: Context) {
                 sessionRuntime.ensureConnected(record, autoStart = true)
             }
         }
+    }
+
+    @Synchronized
+    fun recover(record: PiSessionRecord, reason: String) {
+        runtime(record).forceRecover(reason)
     }
 
     @Synchronized
