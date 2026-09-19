@@ -382,9 +382,15 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
     val bridge = PiBridge(context, record.port, record.token, record.androidSessionId)
     val healthResult = bridge.health(timeoutMs = 2_500)
     val health = healthResult.getOrElse { error ->
-        // Preserve the last known good UI state on a transient localhost timeout.
-        // The runtime owns recovery; polling must not manufacture an ERROR state.
-        if (error.isSocketTimeoutFailure()) return record
+        // A localhost timeout means "unknown", not "offline". Preserve a last
+        // known good state; otherwise expose UNKNOWN until liveness is confirmed.
+        if (error.isSocketTimeoutFailure()) {
+            return if (record.status == PiSessionStatus.IDLE || record.status == PiSessionStatus.WORKING) {
+                record
+            } else {
+                record.copy(status = PiSessionStatus.UNKNOWN, lastError = "")
+            }
+        }
         return record.copy(
             status = PiSessionStatus.ERROR,
             lastError = "Bridge 无响应，正在自动重连"
@@ -400,9 +406,15 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
     }
     val stateResult = bridge.state(timeoutMs = 4_000)
     val state = stateResult.getOrElse { error ->
-        // /health already confirmed that Pi is alive. A state timeout is not
-        // process death, so keep rendering the previous state and retry later.
-        if (error.isSocketTimeoutFailure()) return record
+        // /health already confirmed the process exists. State RPC timeout is an
+        // unknown control-plane state, never proof that the Session stopped.
+        if (error.isSocketTimeoutFailure()) {
+            return if (record.status == PiSessionStatus.IDLE || record.status == PiSessionStatus.WORKING) {
+                record
+            } else {
+                record.copy(status = PiSessionStatus.UNKNOWN, lastError = "")
+            }
+        }
         val detail = listOf(error.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
         return record.copy(status = PiSessionStatus.ERROR, lastError = detail.ifBlank { "无法读取 Pi 状态" })
     }
@@ -2059,6 +2071,7 @@ LaunchedEffect(chatListState) {
 private fun sessionStatusLabel(record: PiSessionRecord): String = when (record.status) {
     PiSessionStatus.WORKING -> "Working"
     PiSessionStatus.IDLE -> "Idle"
+    PiSessionStatus.UNKNOWN -> "状态未知"
     PiSessionStatus.NOT_STARTED -> "未启动"
     PiSessionStatus.ERROR -> "Error"
 }
@@ -2082,7 +2095,7 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
                     }
                     Text(record.cwd, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 19.dp, top = 4.dp))
                     Row(Modifier.fillMaxWidth().padding(start = 19.dp, top = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(sessionStatusLabel(record), color = when (record.status) { PiSessionStatus.WORKING -> Blue; PiSessionStatus.ERROR -> Danger; PiSessionStatus.IDLE -> Accent; PiSessionStatus.NOT_STARTED -> TextMuted }, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        Text(sessionStatusLabel(record), color = when (record.status) { PiSessionStatus.WORKING -> Blue; PiSessionStatus.ERROR -> Danger; PiSessionStatus.IDLE -> Accent; PiSessionStatus.UNKNOWN, PiSessionStatus.NOT_STARTED -> TextMuted }, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                         if (record.lastActivity > 0) Text(" · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(record.lastActivity)), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
                     }
                     if (record.status == PiSessionStatus.ERROR && record.lastError.isNotBlank()) Text(record.lastError, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 19.dp, top = 3.dp))
