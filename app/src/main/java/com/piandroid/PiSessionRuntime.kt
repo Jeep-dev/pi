@@ -716,9 +716,13 @@ internal class PiSessionRuntime(
                         }
                         if (!committed) continue
                     } else {
-                        failures++
-                        updatesMutable.emit(PiRuntimeUpdate.Reconnecting(snapshot.exceptionOrNull()!!))
-                        delay(500L)
+                        val error = snapshot.exceptionOrNull() ?: IllegalStateException("Recovery snapshot failed")
+                        if (reconcileTransportFailure(generation, error)) {
+                            failures = 0
+                        } else {
+                            failures++
+                            delay((500L * (1L shl (failures.coerceAtMost(4) - 1))).coerceAtMost(5_000L))
+                        }
                     }
                 } else {
                     val committed = synchronized(stateLock) {
@@ -746,17 +750,56 @@ internal class PiSessionRuntime(
             } else {
                 if (!isConversationGeneration(generation)) continue
                 val error = result.exceptionOrNull() ?: IllegalStateException("Bridge event polling failed")
-                failures++
-                updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
-                if (failures >= 3) {
-                    if (recoverFromEventFailure(generation)) failures = 0
-                    else delay((500L * (1L shl (failures.coerceAtMost(4) - 1))).coerceAtMost(5_000L))
+                if (reconcileTransportFailure(generation, error)) {
+                    failures = 0
                 } else {
-                    delay((500L * (1L shl (failures - 1))).coerceAtMost(5_000L))
+                    failures++
+                    delay((500L * (1L shl (failures.coerceAtMost(4) - 1))).coerceAtMost(5_000L))
                 }
             }
         }
         synchronized(stateLock) { eventJob = null }
+    }
+
+    private suspend fun reconcileTransportFailure(
+        expectedGeneration: Long,
+        error: Throwable
+    ): Boolean {
+        if (!canRecover() || !isConversationGeneration(expectedGeneration)) return false
+
+        if (error.isSocketTimeoutFailure()) {
+            // An /events timeout by itself is not a disconnect. Ask the tiny
+            // /health endpoint independently with a generous window.
+            val definitive = bridge.health(timeoutMs = 5_000)
+            val health = definitive.getOrNull()
+            if (health?.piRunning == true) {
+                // Control plane recovered; keep the existing Ready/Idle/Working
+                // state and continue the event cursor without UI reconnect churn.
+                return true
+            }
+            if (health == null && definitive.exceptionOrNull().isSocketTimeoutFailure()) {
+                // Both the 35s long-poll and an independent 5s health probe failed.
+                // At this point the Bridge is functionally hung, not merely slow.
+                updatesMutable.emit(
+                    PiRuntimeUpdate.Reconnecting(
+                        IllegalStateException("Bridge 持续无响应，正在重启")
+                    )
+                )
+                val restarted = bridge.restartConfirmedUnresponsiveBridge()
+                if (restarted.isFailure) {
+                    updatesMutable.emit(
+                        PiRuntimeUpdate.Reconnecting(
+                            restarted.exceptionOrNull() ?: IllegalStateException("Bridge 重启失败")
+                        )
+                    )
+                    return false
+                }
+            }
+        }
+
+        // Non-timeout transport failure, an explicitly dead Pi child, or a Bridge
+        // that was just restarted all require the normal attach/start recovery.
+        return recoverFromEventFailure(expectedGeneration)
     }
 
     private suspend fun recoverFromEventFailure(expectedGeneration: Long? = null): Boolean {
