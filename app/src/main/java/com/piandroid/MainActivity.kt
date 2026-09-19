@@ -422,6 +422,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     val sessionStore = remember { PiSessionStore(context) }
     val initialSessions = remember { sessionStore.loadOrCreateDefault() }
     remember(initialSessions) { runtimeManager.register(initialSessions) }
+    LaunchedEffect(initialSessions.isNotEmpty()) {
+        if (initialSessions.isNotEmpty()) AgentKeepAliveService.start(context)
+    }
     var sessions by remember { mutableStateOf(initialSessions) }
     var activeAndroidSessionId by rememberSaveable {
         val saved = sessionStore.activeId()
