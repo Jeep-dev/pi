@@ -704,6 +704,7 @@ private fun PiScreen(
     var currentState by remember { mutableStateOf<PiState?>(null) }
     var currentStats by remember { mutableStateOf<PiStats?>(null) }
     var models by remember { mutableStateOf<List<PiModel>>(emptyList()) }
+    var thinkingLevels by remember { mutableStateOf<List<String>>(emptyList()) }
     var remoteCommands by remember { mutableStateOf<List<PiCommand>>(emptyList()) }
     var loadedExtensions by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadedResourceSections by remember { mutableStateOf<List<LoadedResourceSection>>(emptyList()) }
@@ -887,10 +888,12 @@ private fun PiScreen(
         val state = async { runtime.refreshState().getOrNull() }
         val stats = async { bridge.stats().getOrNull() }
         val availableModels = async { bridge.models().getOrNull() }
+        val availableThinkingLevels = async { bridge.thinkingLevels().getOrNull() }
         val availableCommands = async { bridge.commands().getOrNull() }
         state.await()
         stats.await()?.let { currentStats = it }
         availableModels.await()?.let { models = it }
+        availableThinkingLevels.await()?.let { thinkingLevels = it }
         availableCommands.await()?.let { remoteCommands = it }
     }
 
@@ -1966,10 +1969,10 @@ LaunchedEffect(chatListState) {
                         onUserScrollActivity = { showScrollControls = true },
                         onToggleLine = ::toggleLine
                     )
-                    Panel.Models -> ModelsPanel(models, currentState, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
+                    Panel.Models -> ModelsPanel(models, currentState, thinkingLevels, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
                         bridge.saveDefaultModel(model); defaultModelKey = "${model.provider}/${model.id}"; addSystem("新对话默认模型：$defaultModelKey")
                     }, { model -> runtime.launchTask { bridge.setModel(model).fold(onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") }, onFailure = { addSystem("切换模型失败：${it.message}") }) } }, { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") }, onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }) } })
-                    Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
+                    Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), thinkingLevels, { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
                     Panel.Bash -> BashPanel(bashInput, bashOutput, bashRunning, { bashInput = it }, { panel = Panel.Chat }, {
                         val command = bashInput.trim(); if (command.isNotBlank()) runtime.launchTask { bashRunning = true; bashOutput = "$ $command\n"; bridge.bash(command).fold(onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]" }, onFailure = { bashOutput += "ERROR: ${it.message}" }); bashRunning = false; refreshMeta() }
                     }, { val stop = runtime.stopCurrentAgent(); scope.launch { stop.await(); bashRunning = false } })
@@ -2300,13 +2303,78 @@ private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComp
 private fun PanelHeader(title: String, onBack: () -> Unit) { Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Text(title, color = Blue, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); TextButton(onClick = onBack) { Text("返回", color = TextMuted) } } }
 
 @Composable
-private fun ModelsPanel(models: List<PiModel>, state: PiState?, initialSearch: String, defaultModelKey: String, onBack: () -> Unit, onSetDefault: (PiModel) -> Unit, onPick: (PiModel) -> Unit, onEffort: (String) -> Unit) {
-    val effortLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"); var search by remember(initialSearch) { mutableStateOf(initialSearch) }; val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleModels = models.filter { model -> val searchable = "${model.provider} ${model.id} ${model.name}".lowercase(); tokens.all { it in searchable } }
-    Column(Modifier.fillMaxSize()) { PanelHeader("/model", onBack); LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(7.dp), contentPadding = PaddingValues(bottom = 14.dp)) { item { Column(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)) { Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold); Text("Pi thinking level → provider reasoning_effort", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, bottom = 6.dp)); effortLevels.forEach { level -> val selected = state?.thinkingLevel == level; Row(Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) { Text(level, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f)); Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp) } } } }; item { OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(top = 6.dp), placeholder = { Text("搜索 provider、模型名称或 ID") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp)); Text("Models · ${visibleModels.size}/${models.size}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)) }; items(visibleModels) { model -> val selected = state?.provider == model.provider && state.modelId == model.id; val isDefault = defaultModelKey == "${model.provider}/${model.id}"; Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).clickable { onPick(model) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(model.name.ifBlank { model.id }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp); Text("${model.provider}/${model.id}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }; Column(horizontalAlignment = Alignment.End) { Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp); TextButton(onClick = { onSetDefault(model) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(if (isDefault) "★ 新对话默认" else "设为默认", color = if (isDefault) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp) } } } } } }
+private fun ModelsPanel(models: List<PiModel>, state: PiState?, thinkingLevels: List<String>, initialSearch: String, defaultModelKey: String, onBack: () -> Unit, onSetDefault: (PiModel) -> Unit, onPick: (PiModel) -> Unit, onEffort: (String) -> Unit) {
+    val effortLevels = thinkingLevels.distinct()
+    val showReasoningControls = effortLevels.any { it != "off" }
+    var search by remember(initialSearch) { mutableStateOf(initialSearch) }
+    val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+    val visibleModels = models.filter { model ->
+        val searchable = "${model.provider} ${model.id} ${model.name}".lowercase()
+        tokens.all { it in searchable }
+    }
+    Column(Modifier.fillMaxSize()) {
+        PanelHeader("/model", onBack)
+        LazyColumn(
+            Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+            contentPadding = PaddingValues(bottom = 14.dp)
+        ) {
+            if (showReasoningControls) {
+                item {
+                    Column(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).padding(12.dp)) {
+                        Text("reasoning_effort", color = Blue, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text("Pi 当前模型支持的 thinking levels", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, bottom = 6.dp))
+                        effortLevels.forEach { level ->
+                            val selected = state?.thinkingLevel == level
+                            Row(Modifier.fillMaxWidth().clickable { onEffort(level) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(level, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(top = 6.dp), placeholder = { Text("搜索 provider、模型名称或 ID") }, singleLine = true, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                Text("Models · ${visibleModels.size}/${models.size}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+            }
+            items(visibleModels) { model ->
+                val selected = state?.provider == model.provider && state.modelId == model.id
+                val isDefault = defaultModelKey == "${model.provider}/${model.id}"
+                Row(Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(6.dp)).clickable { onPick(model) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(model.name.ifBlank { model.id }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                        Text("${model.provider}/${model.id}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(if (selected) "✓ 当前" else "选择", color = if (selected) Accent else Blue, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                        TextButton(onClick = { onSetDefault(model) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+                            Text(if (isDefault) "★ 新对话默认" else "设为默认", color = if (isDefault) Accent else TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
-private fun ThinkingPanel(current: String, onBack: () -> Unit, onPick: (String) -> Unit) { val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"); Column(Modifier.fillMaxSize()) { PanelHeader("/thinking", onBack); levels.forEach { level -> Row(Modifier.fillMaxWidth().clickable { onPick(level) }.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Text(level, color = TextMain, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f)); if (level == current) Text("✓", color = Accent) } } } }
+private fun ThinkingPanel(current: String, levels: List<String>, onBack: () -> Unit, onPick: (String) -> Unit) {
+    val available = levels.distinct()
+    Column(Modifier.fillMaxSize()) {
+        PanelHeader("/thinking", onBack)
+        if (available.none { it != "off" }) {
+            Text("当前模型没有可调 thinking 档位", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp))
+        } else {
+            available.forEach { level ->
+                Row(Modifier.fillMaxWidth().clickable { onPick(level) }.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(level, color = TextMain, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+                    if (level == current) Text("✓", color = Accent)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun BashPanel(input: String, output: String, running: Boolean, onInput: (String) -> Unit, onBack: () -> Unit, onRun: () -> Unit, onAbort: () -> Unit) { Column(Modifier.fillMaxSize()) { PanelHeader("/run · Pi RPC bash", onBack); Text(output.ifBlank { "命令通过 Pi 的 bash RPC 执行，并进入 Pi session 上下文。" }, color = TextMain, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)); Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(input, onInput, Modifier.weight(1f), singleLine = true, label = { Text("$ command") }); if (running) Button(onClick = onAbort, colors = ButtonDefaults.buttonColors(containerColor = LocalPiColors.current.stopButtonBg)) { Text("停止") } else Button(onClick = onRun, enabled = input.isNotBlank()) { Text("执行") } } } }
