@@ -296,9 +296,14 @@ internal class PiSessionRuntime(
                             }
                             val error = refreshed.exceptionOrNull() ?: break
                             if (!isConversationGeneration(generation)) break
+                            if (error is TransientRpcUnavailable) {
+                                // This Session was already connected. A temporary
+                                // localhost RPC timeout must not repaint it as disconnected.
+                                delay(500L)
+                                continue
+                            }
                             updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
-                            if (error !is TransientRpcUnavailable) break
-                            delay(500L)
+                            break
                         }
                     }
                 } else if (state != null && snapshot != null) {
@@ -450,6 +455,7 @@ internal class PiSessionRuntime(
         connectionJob = scope.launch {
             var startIfMissing = initialStartIfMissing
             var requestedRecord = initialRecord
+            var transientFailures = 0
             while (currentCoroutineContext().isActive && !isClosed()) {
                 var result = runCatching { connectInternal(requestedRecord, startIfMissing) }
                 // If an inactive tab was being probed while the user selected it,
@@ -479,10 +485,27 @@ internal class PiSessionRuntime(
 
                 val error = result.exceptionOrNull() ?: IllegalStateException("Pi connection failed")
                 if (error is TransientRpcUnavailable) {
-                    // Keep this connection job alive. A localhost timeout means
-                    // "unknown/busy", not "dead"; retry without emitting Failed
-                    // or invoking any destructive start/kill path.
-                    updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+                    // Unknown is not offline. Retry silently first so a short local
+                    // stall never turns into a fake disconnect in the UI.
+                    transientFailures++
+                    if (transientFailures >= 3) {
+                        // Three quick attach probes plus this independent 5s health
+                        // probe establish sustained unresponsiveness. Only then is a
+                        // destructive Bridge restart allowed.
+                        val definitive = bridge.health(timeoutMs = 5_000)
+                        val definitiveHealth = definitive.getOrNull()
+                        if (definitiveHealth?.piRunning == true) {
+                            transientFailures = 0
+                        } else if (definitiveHealth == null && definitive.exceptionOrNull().isSocketTimeoutFailure()) {
+                            updatesMutable.emit(
+                                PiRuntimeUpdate.Reconnecting(
+                                    IllegalStateException("Bridge 持续无响应，正在重启")
+                                )
+                            )
+                            bridge.restartConfirmedUnresponsiveBridge()
+                            transientFailures = 0
+                        }
+                    }
                     delay(500L)
                     requestedRecord = currentRecord()
                     startIfMissing = synchronized(stateLock) { autoStartRequested }
