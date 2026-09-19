@@ -34,7 +34,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-19.2"
+    private val expectedBridgeVersion = "2026-09-19.3"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -50,7 +50,8 @@ class PiBridge(
         "cwd-shared-resume-v1",
         "closed-session-resume-v1",
         "thinking-levels-v1",
-        "pi-auto-restart-v1"
+        "pi-auto-restart-v1",
+        "async-prompt-accept-v1"
     )
     private val authToken: String by lazy {
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)
@@ -700,7 +701,7 @@ class PiBridge(
             }
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
-            "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
+            "extension_error", "prompt_rejected" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
             "extension_ui_request" -> {
                 val method = value.optString("method")
                 val optionsArray = if (method == "setWidget") {
