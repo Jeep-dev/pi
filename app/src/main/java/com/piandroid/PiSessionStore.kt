@@ -8,6 +8,7 @@ import java.util.UUID
 internal enum class PiSessionStatus {
     WORKING,
     IDLE,
+    UNKNOWN,
     NOT_STARTED,
     ERROR
 }
@@ -273,9 +274,9 @@ internal class PiSessionStore(context: Context) {
                                 .trim().ifBlank {
                                     if (sessionFile.isBlank()) id else ""
                                 },
-                            // Process handles are intentionally not persisted. A new App
-                            // instance probes each endpoint and replaces this transient value.
-                            status = PiSessionStatus.NOT_STARTED,
+                            // Process handles are intentionally not persisted. Existing
+                            // Sessions begin UNKNOWN until localhost liveness is re-probed.
+                            status = PiSessionStatus.UNKNOWN,
                             lastActivity = item.optLong("lastActivity"),
                             lastError = item.optString("lastError"),
                             displayName = item.optString("displayName").trim(),
