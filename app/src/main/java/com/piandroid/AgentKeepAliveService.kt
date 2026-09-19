@@ -45,16 +45,21 @@ class AgentKeepAliveService : Service() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification("正在连接本机 Pi Agent…"))
+
+        // The foreground service owns process liveness while any Pi Session is
+        // online. The wake lock is narrower: only active generation/compaction
+        // needs CPU wakefulness, so an idle connected Session does not burn power.
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
-            .apply { acquire(MAX_WAKE_TIME_MS) }
+
+        val records = PiSessionStore(applicationContext).loadOrCreateDefault()
+        (application as PiApplication).runtimeManager.register(records)
+
         monitorJob = scope.launch {
-            var failures = 0
-            var idlePolls = 0
+            var offlinePolls = 0
             while (isActive) {
-                wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
-                val records = PiSessionStore(applicationContext).loadOrCreateDefault()
-                val probes = records.map { record ->
+                val currentRecords = PiSessionStore(applicationContext).loadOrCreateDefault()
+                val probes = currentRecords.map { record ->
                     async {
                         val endpoint = PiBridge(
                             applicationContext,
@@ -72,22 +77,25 @@ class AgentKeepAliveService : Service() {
                     state?.streaming == true || state?.compacting == true
                 }
                 val running = probes.count { (_, result) -> result.first?.piRunning == true }
+
                 if (working > 0) {
-                    failures = 0
-                    idlePolls = 0
+                    offlinePolls = 0
+                    wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                     updateNotification("$working 个 Pi Agent 正在工作 · 共 $running 个在线")
                 } else {
-                    idlePolls++
-                    if (idlePolls >= 2) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        return@launch
+                    wakeLock?.takeIf { it.isHeld }?.release()
+                    if (running > 0) {
+                        offlinePolls = 0
+                        updateNotification("$running 个 Pi Session 在线 · 后台保持连接")
+                    } else {
+                        offlinePolls++
+                        updateNotification("没有在线 Pi · 检查中 $offlinePolls/2")
+                        if (offlinePolls >= 2) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                            return@launch
+                        }
                     }
-                    failures++
-                    updateNotification(
-                        if (running > 0) "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
-                        else "没有在线 Pi，等待 App 恢复 · $failures"
-                    )
                 }
                 delay(15_000)
             }
