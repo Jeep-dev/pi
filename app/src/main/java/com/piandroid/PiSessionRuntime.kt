@@ -215,6 +215,8 @@ internal class PiSessionRuntime(
 
     fun isConnected(): Boolean = synchronized(stateLock) { connected }
 
+    fun backgroundRecoveryEnabled(): Boolean = synchronized(stateLock) { !closed && recoveryEnabled }
+
     fun canSubmitTask(): Boolean = taskGate.isAccepting()
 
     fun launchTask(block: suspend () -> Unit): Job? = taskGate.launch(scope, block)
@@ -683,7 +685,7 @@ internal class PiSessionRuntime(
     private class RuntimeUnavailable : IllegalStateException("Pi runtime is not running")
 }
 
-/** Activity-owned registry; Compose only receives stable per-session runtimes. */
+/** Process-owned registry; Compose only receives stable per-session runtimes. */
 internal class PiSessionRuntimeManager(context: Context) {
     private val appContext = context.applicationContext
     private val managerJob = SupervisorJob()
@@ -715,12 +717,16 @@ internal class PiSessionRuntimeManager(context: Context) {
                 conversationOwners[file] = record.androidSessionId
             }
         }
-        // Register every Session, but never cold-start all of them at once.
-        // Inactive Sessions may attach to an already-running bridge; only the
-        // selected PiScreen promotes its own runtime with autoStart=true.
-        // This avoids flooding Termux RunCommandService with parallel bridge launches.
+        // Every open Android Session is an independent terminal and must stay
+        // alive regardless of which one is visible. The selected PiScreen only
+        // controls presentation; it never owns runtime liveness.
         records.forEach { record ->
-            runtime(record).ensureConnected(record, autoStart = false)
+            val sessionRuntime = runtime(record)
+            if (sessionRuntime.isConnected()) {
+                sessionRuntime.update(record)
+            } else if (sessionRuntime.backgroundRecoveryEnabled()) {
+                sessionRuntime.ensureConnected(record, autoStart = true)
+            }
         }
     }
 
