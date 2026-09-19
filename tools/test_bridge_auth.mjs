@@ -127,6 +127,12 @@ process.stdin.on("data", chunk => {
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "extensions-widget", method: "setWidget", widgetKey: "__android_loaded_extensions", widgetLines: ["mobile.ts", "project.ts"] }) + "\\n");
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "resources-widget", method: "setWidget", widgetKey: "__android_loaded_resources", widgetLines: ["[Context]", "  AGENTS.md", "[Prompts]", "  /review"] }) + "\\n");
     }
+    if (command.type === "prompt" && command.message === "__delayed_accept__") {
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: "prompt", success: true }) + "\\n");
+      }, 1500);
+      continue;
+    }
     const isAttachmentTest = command.type === "prompt" && command.message.startsWith("__attachment_test__");
     const attachmentValid = !isAttachmentTest || command.message.includes(".pi-android-uploads/");
     process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: command.type, success: attachmentValid, data, ...(!attachmentValid ? { error: "file reference missing" } : {}) }) + "\\n");
@@ -170,12 +176,13 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-19.2");
+  assert.equal(health.bridgeVersion, "2026-09-19.3");
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));
   assert.ok(health.capabilities.includes("thinking-levels-v1"));
   assert.ok(health.capabilities.includes("pi-auto-restart-v1"));
+  assert.ok(health.capabilities.includes("async-prompt-accept-v1"));
   assert.ok(health.capabilities.includes("persistent-widgets-v1"));
   assert.ok(health.capabilities.includes("multi-session-v1"));
   assert.ok(health.capabilities.includes("consistent-recovery-v1"));
@@ -232,6 +239,16 @@ try {
   });
   assert.equal(firstStart.status, 200, `Pi start failed: ${await firstStart.text()}`);
   const firstHealth = await fetch(`http://127.0.0.1:${port}/health`, { headers: startHeaders }).then(r => r.json());
+
+  const asyncPromptStarted = Date.now();
+  const asyncPrompt = await fetch(`http://127.0.0.1:${port}/prompt-async`, {
+    method: "POST",
+    headers: startHeaders,
+    body: JSON.stringify({ message: "__delayed_accept__" }),
+  });
+  assert.equal(asyncPrompt.status, 202);
+  assert.ok(Date.now() - asyncPromptStarted < 700, "Android prompt transport must not wait for Pi preflight");
+  await new Promise(resolve => setTimeout(resolve, 1600));
 
   const duplicateStart = await fetch(`http://127.0.0.1:${port}/start`, {
     method: "POST",
