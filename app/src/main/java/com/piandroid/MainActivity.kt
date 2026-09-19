@@ -380,11 +380,16 @@ private fun bridgeHealthDiagnostic(health: PiHealth): String = listOf(
 
 private suspend fun pollPiSession(context: Context, record: PiSessionRecord): PiSessionRecord {
     val bridge = PiBridge(context, record.port, record.token, record.androidSessionId)
-    val health = bridge.health(timeoutMs = 2_500).getOrNull()
-        ?: return record.copy(
+    val healthResult = bridge.health(timeoutMs = 2_500)
+    val health = healthResult.getOrElse { error ->
+        // Preserve the last known good UI state on a transient localhost timeout.
+        // The runtime owns recovery; polling must not manufacture an ERROR state.
+        if (error.isSocketTimeoutFailure()) return record
+        return record.copy(
             status = PiSessionStatus.ERROR,
             lastError = "Bridge 无响应，正在自动重连"
         )
+    }
     if (!health.piRunning) {
         val diagnostic = bridgeHealthDiagnostic(health)
         return record.copy(
@@ -394,8 +399,11 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
         )
     }
     val stateResult = bridge.state(timeoutMs = 4_000)
-    val state = stateResult.getOrElse {
-        val detail = listOf(it.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
+    val state = stateResult.getOrElse { error ->
+        // /health already confirmed that Pi is alive. A state timeout is not
+        // process death, so keep rendering the previous state and retry later.
+        if (error.isSocketTimeoutFailure()) return record
+        val detail = listOf(error.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
         return record.copy(status = PiSessionStatus.ERROR, lastError = detail.ifBlank { "无法读取 Pi 状态" })
     }
     if (health.runtimeOwnerSessionId != record.androidSessionId || !runtimeConversationMatches(record, state)) {
