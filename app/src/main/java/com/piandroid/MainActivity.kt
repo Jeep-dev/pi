@@ -524,7 +524,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            if (merged.any { it.status == PiSessionStatus.WORKING || it.status == PiSessionStatus.IDLE }) {
+            if (merged.isNotEmpty()) {
                 AgentKeepAliveService.start(context)
             } else {
                 AgentKeepAliveService.stop(context)
@@ -1296,11 +1296,9 @@ private fun PiScreen(
         panel = Panel.Chat
         refreshMeta()
         requestLoadedResources()
-        if (currentState?.streaming == true || currentState?.compacting == true) {
-            AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
-        } else {
-            AgentKeepAliveService.stop(bridge.applicationContext())
-        }
+        // The active tab is only a view. Its idle state must never stop
+        // process-wide keepalive for the other Session runtimes.
+        AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
     }
 
     val connect: () -> Unit = connect@{
