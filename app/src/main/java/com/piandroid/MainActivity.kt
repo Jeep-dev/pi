@@ -2261,13 +2261,13 @@ LaunchedEffect(listState) {
                                 if (line.toolIsError) Text("error", color = Danger, fontFamily = FontFamily.Monospace, fontSize = 9.5.sp)
                             }
                             if (renderedArgs.isNotBlank()) {
-                                Text(renderedArgs, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, maxLines = if (line.collapsed) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+                                Text(renderedArgs, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, maxLines = if (line.collapsed && argsHint.isNotBlank()) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
                             }
                             if (line.toolMeta.isNotBlank()) Text(line.toolMeta, color = if (line.toolIsError) Danger else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp))
                             if (renderedOutput.isNotBlank()) {
                                 val outputLines = renderedOutput.lines()
                                 val styledOutput = buildAnnotatedString { outputLines.forEachIndexed { index, outputLine -> val color = when { outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded; outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved; else -> colors.toolOutput }; pushStyle(SpanStyle(color = color)); append(outputLine); pop(); if (index != outputLines.lastIndex) append('\n') } }
-                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 7.dp))
+                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed && outputHint.isNotBlank()) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 7.dp))
                             }
                             if (expandable) {
                                 Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
