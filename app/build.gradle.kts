@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.34 build 134: explicit unknown state and confirmed-hang recovery.
+// v5.19.35 build 135: prevent hidden tool-card ellipsis without Show all.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 134
-        versionName = "5.19.34"
+        versionCode = 135
+        versionName = "5.19.35"
     }
 
     signingConfigs {
