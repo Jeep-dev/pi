@@ -180,8 +180,9 @@ internal fun toolHiddenHint(output: String, maxLines: Int = 5, maxChars: Int = 7
 /**
  * Arguments are different from output: the useful part is normally the beginning
  * (command/path/pattern), so collapsed cards keep the head rather than the tail.
- * Compose also applies maxLines, which handles a single very long command that
- * visually wraps on a narrow phone even when it contains no newline characters.
+ * The UI only applies a visual maxLines cap when this helper has already marked
+ * the arguments expandable. Short commands may wrap freely instead of being
+ * silently ellipsized without a Show all control.
  */
 internal fun toolArgsPreview(args: String, maxLines: Int = 2, maxChars: Int = 180): String {
     val clean = args.trimEnd()
