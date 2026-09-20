@@ -29,6 +29,8 @@ assert.ok(main.includes("Observe measured LazyColumn geometry as well as message
 assert.ok(main.includes("val collapseInfo = when"), "tool footer must derive Pi-style hidden-line metadata");
 assert.ok(main.includes("contentAlignment = Alignment.CenterStart"), "tool footer must show hidden-line metadata on the left");
 assert.ok(main.includes("contentAlignment = Alignment.CenterEnd"), "tool footer must keep execution duration on the right");
+assert.ok(main.includes("maxLines = if (line.collapsed && argsHint.isNotBlank()) 3 else Int.MAX_VALUE"), "tool args must only be visually truncated when Show all is available");
+assert.ok(main.includes("maxLines = if (line.collapsed && outputHint.isNotBlank()) 6 else Int.MAX_VALUE"), "tool output must only be visually truncated when Show all is available");
 
 assert.ok(main.includes("toolDurationMs = message.toolDurationMs"), "restored tool cards must retain durable execution duration");
 assert.ok(main.includes("toolName = message.toolName"), "restored tool cards must retain their real tool name");
