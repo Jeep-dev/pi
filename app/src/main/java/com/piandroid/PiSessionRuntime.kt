@@ -863,7 +863,7 @@ internal class PiSessionRuntimeManager(context: Context) {
     }
 
     @Synchronized
-    fun register(records: List<PiSessionRecord>) {
+    fun register(records: List<PiSessionRecord>, autoStart: Boolean = true) {
         records.forEach { record ->
             val file = conversationFileKey(record.sessionFile)
             if (file.isNotBlank()) {
@@ -881,13 +881,13 @@ internal class PiSessionRuntimeManager(context: Context) {
             if (sessionRuntime.isConnected()) {
                 sessionRuntime.update(record)
             } else if (sessionRuntime.backgroundRecoveryEnabled()) {
-                sessionRuntime.ensureConnected(record, autoStart = true)
+                sessionRuntime.ensureConnected(record, autoStart = autoStart)
             }
         }
     }
 
     @Synchronized
-    fun reconcile(records: List<PiSessionRecord>) {
+    fun reconcile(records: List<PiSessionRecord>, autoStart: Boolean = true) {
         val wanted = records.mapTo(LinkedHashSet()) { it.androidSessionId }
         val staleIds = runtimes.keys.filterNot { it in wanted }
         staleIds.forEach { id ->
@@ -895,7 +895,7 @@ internal class PiSessionRuntimeManager(context: Context) {
             conversationOwners.entries.removeAll { it.value == id }
             if (activeAndroidSessionId == id) activeAndroidSessionId = null
         }
-        register(records)
+        register(records, autoStart = autoStart)
     }
 
     @Synchronized
