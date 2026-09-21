@@ -10,6 +10,8 @@ import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,12 +27,79 @@ class AgentKeepAliveService : Service() {
         private const val CHANNEL_ID = "pi_agent_long_tasks"
         private const val NOTIFICATION_ID = 17649
         private const val ACTION_STOP = "com.piandroid.STOP_LONG_TASK_KEEPALIVE"
+        private const val EXTRA_RECORDS = "com.piandroid.EXTRA_PI_SESSION_RECORDS"
         private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
 
-        fun start(bridgeContext: Context) {
+        fun start(bridgeContext: Context, records: List<PiSessionRecord>? = null) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
+            if (records != null) intent.putExtra(EXTRA_RECORDS, encodeRecords(records))
             bridgeContext.startForegroundService(intent)
         }
+
+        private fun encodeRecords(records: List<PiSessionRecord>): String {
+            val array = JSONArray()
+            records.forEach { record ->
+                array.put(
+                    JSONObject()
+                        .put("id", record.androidSessionId)
+                        .put("name", record.name)
+                        .put("cwd", record.cwd)
+                        .put("launchCommand", record.launchCommand)
+                        .put("port", record.port)
+                        .put("token", record.token)
+                        .put("startupArguments", record.startupArguments)
+                        .put("sessionFile", record.sessionFile)
+                        .put("piConversationId", record.piConversationId)
+                        .put("status", record.status.name)
+                        .put("lastActivity", record.lastActivity)
+                        .put("lastError", record.lastError)
+                        .put("displayName", record.displayName)
+                        .put("ownedSessionFile", record.ownedSessionFile)
+                        .put("sessionDirectory", record.sessionDirectory)
+                        .put("pinned", record.pinned)
+                        .put("legacySessionFile", record.legacySessionFile)
+                )
+            }
+            return array.toString()
+        }
+
+        private fun decodeRecords(raw: String): List<PiSessionRecord> = runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val id = item.optString("id").trim()
+                    val cwd = item.optString("cwd").trim()
+                    val launchCommand = item.optString("launchCommand").trim()
+                    val port = item.optInt("port")
+                    val token = item.optString("token").trim()
+                    if (id.isBlank() || cwd.isBlank() || launchCommand.isBlank() || port !in 1..65_535 || token.length < 32) continue
+                    add(
+                        PiSessionRecord(
+                            androidSessionId = id,
+                            name = item.optString("name").ifBlank { "Pi" },
+                            cwd = cwd,
+                            launchCommand = launchCommand,
+                            port = port,
+                            token = token,
+                            startupArguments = item.optString("startupArguments"),
+                            sessionFile = item.optString("sessionFile"),
+                            piConversationId = item.optString("piConversationId"),
+                            status = runCatching {
+                                PiSessionStatus.valueOf(item.optString("status"))
+                            }.getOrDefault(PiSessionStatus.UNKNOWN),
+                            lastActivity = item.optLong("lastActivity"),
+                            lastError = item.optString("lastError"),
+                            displayName = item.optString("displayName"),
+                            ownedSessionFile = item.optString("ownedSessionFile"),
+                            sessionDirectory = item.optString("sessionDirectory"),
+                            pinned = item.optBoolean("pinned"),
+                            legacySessionFile = item.optBoolean("legacySessionFile")
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
 
         fun stop(bridgeContext: Context) {
             bridgeContext.stopService(Intent(bridgeContext, AgentKeepAliveService::class.java))
@@ -40,6 +109,15 @@ class AgentKeepAliveService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var monitorJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private val recordsLock = Any()
+    private var registeredRecords: List<PiSessionRecord> = emptyList()
+
+    private fun recordsSnapshot(): List<PiSessionRecord> = synchronized(recordsLock) { registeredRecords }
+
+    private fun replaceRecords(records: List<PiSessionRecord>) {
+        synchronized(recordsLock) { registeredRecords = records }
+        (application as PiApplication).runtimeManager.reconcile(records)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -53,11 +131,11 @@ class AgentKeepAliveService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:AllSessions")
 
         val records = PiSessionStore(applicationContext).loadOrCreateDefault()
-        (application as PiApplication).runtimeManager.register(records)
+        replaceRecords(records)
 
         monitorJob = scope.launch {
             while (isActive) {
-                val currentRecords = PiSessionStore(applicationContext).loadOrCreateDefault()
+                val currentRecords = recordsSnapshot()
                 if (currentRecords.isEmpty()) {
                     wakeLock?.takeIf { it.isHeld }?.release()
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -126,6 +204,9 @@ class AgentKeepAliveService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
+        }
+        intent?.getStringExtra(EXTRA_RECORDS)?.let { raw ->
+            replaceRecords(decodeRecords(raw))
         }
         return START_STICKY
     }
