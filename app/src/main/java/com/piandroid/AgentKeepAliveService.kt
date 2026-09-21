@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -111,12 +112,13 @@ class AgentKeepAliveService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val recordsLock = Any()
     private var registeredRecords: List<PiSessionRecord> = emptyList()
+    private val serviceStartedAt = SystemClock.elapsedRealtime()
 
     private fun recordsSnapshot(): List<PiSessionRecord> = synchronized(recordsLock) { registeredRecords }
 
     private fun replaceRecords(records: List<PiSessionRecord>) {
         synchronized(recordsLock) { registeredRecords = records }
-        (application as PiApplication).runtimeManager.reconcile(records)
+        (application as PiApplication).runtimeManager.reconcile(records, autoStart = false)
     }
 
     override fun onCreate() {
@@ -165,7 +167,11 @@ class AgentKeepAliveService : Service() {
                 probes.forEach { (record, result) ->
                     val health = result.first
                     val healthError = result.third
-                    if (health == null && !healthError.isSocketTimeoutFailure()) {
+                    if (
+                        health == null &&
+                        !healthError.isSocketTimeoutFailure() &&
+                        SystemClock.elapsedRealtime() - serviceStartedAt >= 3_000L
+                    ) {
                         runtimeManager.recover(record, "Bridge 无响应，后台自动重连")
                     } else if (health != null && !health.piRunning) {
                         runtimeManager.recover(record, "Pi 进程已退出，后台自动重启")
