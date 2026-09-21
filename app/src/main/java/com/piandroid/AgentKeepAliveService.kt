@@ -31,7 +31,7 @@ class AgentKeepAliveService : Service() {
         private const val EXTRA_RECORDS = "com.piandroid.EXTRA_PI_SESSION_RECORDS"
         private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
 
-        fun start(bridgeContext: Context, records: List<PiSessionRecord>? = null) {
+        internal fun start(bridgeContext: Context, records: List<PiSessionRecord>? = null) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
             if (records != null) intent.putExtra(EXTRA_RECORDS, encodeRecords(records))
             bridgeContext.startForegroundService(intent)
