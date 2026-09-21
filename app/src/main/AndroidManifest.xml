@@ -17,6 +17,8 @@
         <service
             android:name=".AgentKeepAliveService"
             android:exported="false"
+            android:process=":agent"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
