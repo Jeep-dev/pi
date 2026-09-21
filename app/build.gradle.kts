@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.35 build 135: prevent hidden tool-card ellipsis without Show all.
+// v5.19.36 build 136: isolate long-lived agent from UI process eviction.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -19,8 +19,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 135
-        versionName = "5.19.35"
+        versionCode = 136
+        versionName = "5.19.36"
     }
 
     signingConfigs {
