@@ -442,7 +442,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
     val initialSessions = remember { sessionStore.loadOrCreateDefault() }
     remember(initialSessions) { runtimeManager.register(initialSessions) }
     LaunchedEffect(initialSessions.isNotEmpty()) {
-        if (initialSessions.isNotEmpty()) AgentKeepAliveService.start(context)
+        if (initialSessions.isNotEmpty()) AgentKeepAliveService.start(context, initialSessions)
     }
     var sessions by remember { mutableStateOf(initialSessions) }
     var activeAndroidSessionId by rememberSaveable {
@@ -471,6 +471,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         sessions = updated
         updated.firstOrNull { it.androidSessionId == id }?.let { runtimeManager.runtime(it).update(it) }
         sessionStore.save(updated, activeAndroidSessionId)
+        AgentKeepAliveService.start(context, updated)
     }
 
     fun selectSession(id: String): Boolean {
@@ -510,6 +511,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         activeAndroidSessionId = deletion.activeId.orEmpty()
         emptySessionDrawerOpen = deletion.keepDrawerOpen
         sessionStore.save(deletion.remaining, deletion.activeId)
+        AgentKeepAliveService.start(context, deletion.remaining)
         runtimeManager.remove(record)
         managedSession = null
         deleteSession = null
@@ -531,6 +533,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
         activeAndroidSessionId = record.androidSessionId
         runtimeManager.activate(record)
         sessionStore.save(updated, record.androidSessionId)
+        AgentKeepAliveService.start(context, updated)
         createSessionOpen = false
     }
 
@@ -547,7 +550,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessionStore.save(merged, latestActiveId)
             }
             if (merged.isNotEmpty()) {
-                AgentKeepAliveService.start(context)
+                AgentKeepAliveService.start(context, merged)
             } else {
                 AgentKeepAliveService.stop(context)
             }
