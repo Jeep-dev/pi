@@ -887,6 +887,18 @@ internal class PiSessionRuntimeManager(context: Context) {
     }
 
     @Synchronized
+    fun reconcile(records: List<PiSessionRecord>) {
+        val wanted = records.mapTo(LinkedHashSet()) { it.androidSessionId }
+        val staleIds = runtimes.keys.filterNot { it in wanted }
+        staleIds.forEach { id ->
+            runtimes.remove(id)?.closeRuntime()
+            conversationOwners.entries.removeAll { it.value == id }
+            if (activeAndroidSessionId == id) activeAndroidSessionId = null
+        }
+        register(records)
+    }
+
+    @Synchronized
     fun recover(record: PiSessionRecord, reason: String) {
         runtime(record).forceRecover(reason)
     }
