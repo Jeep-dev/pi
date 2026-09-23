@@ -378,6 +378,14 @@ private fun directDocumentPath(context: Context, uri: Uri): String? {
     }
 }
 
+/** A timed-out prompt may already be in Pi; say so instead of inviting a duplicate resend. */
+private fun promptFailureText(prefix: String, error: Throwable): String =
+    if (isAmbiguousDeliveryFailure(error)) {
+        "发送状态未知：${error.message.orEmpty()}。消息可能已送达 Pi，请先等待输出或查看历史，再决定是否重发"
+    } else {
+        "$prefix：${error.message}"
+    }
+
 private fun bridgeHealthDiagnostic(health: PiHealth): String = listOf(
     health.lastExit,
     health.stderr.trim().takeIf { it.isNotBlank() }?.let { "stderr: $it" },
@@ -528,7 +536,9 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            if (merged.any { it.status == PiSessionStatus.WORKING }) {
+            // A reconnecting runtime may be about to resume a working agent;
+            // keep the service so recovery is not suspended in the background.
+            if (merged.any { it.status == PiSessionStatus.WORKING } || PiRecoveryTracker.anyRecovering()) {
                 AgentKeepAliveService.start(context)
             } else {
                 AgentKeepAliveService.stop(context)
@@ -1319,6 +1329,16 @@ private fun PiScreen(
                     status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
                     connecting = true
                 }
+                is PiRuntimeUpdate.Recovered -> {
+                    update.state?.let { applyRuntimeState(it) }
+                    connected = true
+                    connecting = false
+                    status = when {
+                        currentState?.compacting == true -> "Compacting"
+                        currentState?.streaming == true -> "Working"
+                        else -> "Ready"
+                    }
+                }
                 is PiRuntimeUpdate.Unavailable -> {
                     connected = false
                     connecting = false
@@ -1385,7 +1405,7 @@ private fun PiScreen(
                             steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
                             markSteeringFailed(listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"))
                         }
-                        addSystem("发送附件失败：${it.message}")
+                        addSystem(promptFailureText("发送附件失败", it))
                     }
                 )
             }
@@ -1671,7 +1691,7 @@ private fun PiScreen(
                                 steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
                                 markSteeringFailed(text)
                             }
-                            addSystem("发送失败：${it.message}")
+                            addSystem(promptFailureText("发送失败", it))
                         }
                     )
                 }
