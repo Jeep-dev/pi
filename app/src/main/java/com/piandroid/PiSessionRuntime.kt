@@ -191,6 +191,9 @@ internal class PiSessionRuntime(
     // Only touched under connectMutex.
     private val unresponsiveGrace = UnresponsiveBridgeGrace()
 
+    // Guarded by stateLock; throttles Termux wake-ups.
+    private var lastTermuxWakeAtMs: Long? = null
+
     fun update(next: PiSessionRecord) {
         check(next.androidSessionId == runtimeOwnerSessionId) {
             "Runtime owner mismatch: owner=$runtimeOwnerSessionId record=${next.androidSessionId}"
@@ -487,7 +490,12 @@ internal class PiSessionRuntime(
         configuredRecord: PiSessionRecord,
         allowStart: Boolean
     ): PiRuntimeReady {
-        val healthBeforeResult = bridge.health(timeoutMs = 2_500)
+        var healthBeforeResult = bridge.health(timeoutMs = 2_500)
+        if (healthBeforeResult.isFailure && wakeTermuxIfFrozen(healthBeforeResult.exceptionOrNull())) {
+            // Give the thawed Bridge a moment, then judge it on a fresh probe.
+            delay(1_500L)
+            healthBeforeResult = bridge.health(timeoutMs = 2_500)
+        }
         val attachResult = bridge.attachToRunningBridge()
         val attached = attachResult.getOrNull()
         val runningHealthResult = if (healthBeforeResult.isSuccess) healthBeforeResult else bridge.health(timeoutMs = 2_500)
@@ -658,6 +666,9 @@ internal class PiSessionRuntime(
                 val error = result.exceptionOrNull() ?: IllegalStateException("Bridge event polling failed")
                 pollFailures++
                 publishReconnecting(error, needsRecovery = pollFailures >= 3)
+                // A timeout usually means the system froze Termux in the
+                // background; thaw it now instead of waiting for a restart.
+                wakeTermuxIfFrozen(error)
                 if (pollFailures < 3) delay(500L * (1L shl (pollFailures - 1)))
                 continue
             }
@@ -800,6 +811,24 @@ internal class PiSessionRuntime(
             clearRecoveryFlagsLocked()
             updatesMutable.tryEmit(PiRuntimeUpdate.Recovered(usable))
         }
+    }
+
+    /** Thaw a Termux that stopped answering; at most once per 5 s. Returns true when a wake was sent. */
+    private suspend fun wakeTermuxIfFrozen(error: Throwable?): Boolean {
+        if (classifyBridgeFailure(error) != BridgeFailureKind.UNRESPONSIVE) return false
+        val now = System.nanoTime() / 1_000_000L
+        val due = synchronized(stateLock) {
+            val last = lastTermuxWakeAtMs
+            if (closed || (last != null && now - last < 5_000L)) false
+            else {
+                lastTermuxWakeAtMs = now
+                true
+            }
+        }
+        if (!due) return false
+        return bridge.wakeTermux()
+            .onFailure { Log.w(PI_SESSION_IDENTITY_TAG, "WAKE_TERMUX failed androidSessionId=$runtimeOwnerSessionId", it) }
+            .isSuccess
     }
 
     private fun clearRecoveryFlagsLocked() {

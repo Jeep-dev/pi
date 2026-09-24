@@ -404,7 +404,7 @@ class PiBridge(
         return request("/extension-ui", body.toString()).map { Unit }
     }
 
-    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 35_000).mapCatching { raw ->
+    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 26_000).mapCatching { raw ->
         val root = JSONObject(raw)
         val array = root.optJSONArray("events") ?: JSONArray()
         val parsed = buildList {
@@ -696,6 +696,13 @@ class PiBridge(
     }
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
+    /**
+     * Run a no-op in Termux. Starting Termux's command service thaws a Termux
+     * process the system froze in the background, and with it this Bridge and
+     * its Pi child, without restarting either.
+     */
+    suspend fun wakeTermux(): Result<Unit> = runTermux(":")
 
     private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
