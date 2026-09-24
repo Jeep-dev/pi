@@ -761,6 +761,7 @@ internal class PiSessionRuntime(
     private fun publishReconnecting(error: Throwable, needsRecovery: Boolean = false) {
         synchronized(stateLock) {
             if (closed) return
+            Log.w(PI_SESSION_IDENTITY_TAG, "RECONNECTING androidSessionId=$runtimeOwnerSessionId recovery=$needsRecovery", error)
             degraded = true
             if (needsRecovery) {
                 recoveryPending = true

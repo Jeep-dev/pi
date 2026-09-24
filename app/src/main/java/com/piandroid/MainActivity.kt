@@ -710,6 +710,8 @@ private fun PiScreen(
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
     var intentionalQuit by remember { mutableStateOf(false) }
+    // Last reconnect reason shown in chat, so repeated retries do not spam it.
+    var lastReconnectError by remember { mutableStateOf("") }
     var panel by remember { mutableStateOf(Panel.Chat) }
     var currentState by remember { mutableStateOf<PiState?>(null) }
     var currentStats by remember { mutableStateOf<PiStats?>(null) }
@@ -1311,7 +1313,10 @@ private fun PiScreen(
     LaunchedEffect(runtime) {
         runtime.updates.collect { update ->
             when (update) {
-                is PiRuntimeUpdate.Ready -> applyRuntimeReady(update.value)
+                is PiRuntimeUpdate.Ready -> {
+                    lastReconnectError = ""
+                    applyRuntimeReady(update.value)
+                }
                 is PiRuntimeUpdate.State -> applyRuntimeState(update.value)
                 is PiRuntimeUpdate.Snapshot -> {
                     if (update.value.latest < lastAppliedEventSeq) lastAppliedEventSeq = 0L
@@ -1328,8 +1333,16 @@ private fun PiScreen(
                 is PiRuntimeUpdate.Reconnecting -> {
                     status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
                     connecting = true
+                    // Without this the user only sees RECONNECTING and cannot tell
+                    // whether Termux, the Bridge, or Pi itself is failing.
+                    val reason = update.error.message.orEmpty().ifBlank { update.error.javaClass.simpleName }
+                    if (reason != lastReconnectError) {
+                        lastReconnectError = reason
+                        addSystem("正在重连：$reason")
+                    }
                 }
                 is PiRuntimeUpdate.Recovered -> {
+                    lastReconnectError = ""
                     update.state?.let { applyRuntimeState(it) }
                     connected = true
                     connecting = false
