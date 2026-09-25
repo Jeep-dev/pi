@@ -14,11 +14,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -149,26 +152,34 @@ private fun inlineMarkdown(source: String, colors: PiColors) = buildAnnotatedStr
 fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
     val colors = LocalPiColors.current
     val blocks = remember(text) { parseMarkdownBlocks(text) }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Paragraph -> Text(inlineMarkdown(block.text, colors), color = colors.markdownText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 21.sp)
-                is MarkdownBlock.Heading -> Text(inlineMarkdown(block.text, colors), color = colors.markdownAccent, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = if (block.level <= 2) 16.sp else 15.sp, lineHeight = 22.sp, modifier = Modifier.padding(top = 3.dp))
-                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().background(colors.markdownCodeBg).border(1.dp, colors.markdownBorder).padding(9.dp)) {
-                    if (block.language.isNotBlank()) Text(block.language, color = colors.markdownAccent, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
-                    Text(block.text, color = colors.markdownCodeText, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.horizontalScroll(rememberScrollState()))
+                is MarkdownBlock.Paragraph -> Text(inlineMarkdown(block.text, colors), color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
+                is MarkdownBlock.Heading -> Text(
+                    inlineMarkdown(block.text, colors),
+                    color = colors.markdownStrong,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = when (block.level) { 1 -> 20.sp; 2 -> 18.sp; else -> 16.sp },
+                    lineHeight = when (block.level) { 1 -> 28.sp; 2 -> 25.sp; else -> 23.sp },
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(colors.markdownCodeBg).border(1.dp, colors.markdownBorder, RoundedCornerShape(12.dp))) {
+                    if (block.language.isNotBlank()) Text(block.language, color = colors.markdownMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 12.dp, top = 8.dp))
+                    Text(block.text, color = colors.markdownCodeText, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 19.sp, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp))
                 }
                 is MarkdownBlock.Table -> MarkdownTable(block.rows, colors)
-                is MarkdownBlock.ListBlock -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                is MarkdownBlock.ListBlock -> Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     block.items.forEachIndexed { i, item -> Row {
-                        Text(if (block.ordered) "${i + 1}. " else "• ", color = colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        Text(inlineMarkdown(item, colors), color = colors.markdownText, fontFamily = FontFamily.Monospace, fontSize = 14.sp, lineHeight = 20.sp)
+                        Text(if (block.ordered) "${i + 1}." else "•", color = colors.markdownMuted, fontSize = 15.sp, lineHeight = 23.sp, modifier = Modifier.width(if (block.ordered) 24.dp else 16.dp))
+                        Text(inlineMarkdown(item, colors), color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
                     } }
                 }
-                is MarkdownBlock.Quote -> Box(Modifier.fillMaxWidth().background(colors.markdownQuoteBg).padding(start = 10.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)) {
-                    Text(inlineMarkdown(block.text, colors), color = colors.markdownMuted, fontFamily = FontFamily.Monospace, fontSize = 13.5.sp, lineHeight = 20.sp)
+                is MarkdownBlock.Quote -> Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                    Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(colors.markdownBorder))
+                    Text(inlineMarkdown(block.text, colors), color = colors.markdownMuted, fontSize = 14.5.sp, lineHeight = 22.sp, modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp))
                 }
-                MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).background(colors.markdownBorder).padding(top = 1.dp))
+                MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp).background(colors.markdownBorder))
             }
         }
     }
@@ -182,7 +193,7 @@ private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
         val chars = rows.maxOf { it.getOrNull(column)?.length ?: 0 }.coerceIn(8, 32)
         (chars * 7 + 18).dp
     }
-    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).border(1.dp, colors.markdownBorder)) {
+    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).clip(RoundedCornerShape(10.dp)).border(1.dp, colors.markdownBorder, RoundedCornerShape(10.dp))) {
         rows.forEachIndexed { rowIndex, row ->
             Row(Modifier.height(IntrinsicSize.Min)) {
                 for (column in 0 until columns) {
@@ -190,16 +201,16 @@ private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
                         modifier = Modifier
                             .width(widths[column])
                             .fillMaxHeight()
+                            .background(if (rowIndex == 0) colors.markdownCodeBg else Color.Transparent)
                             .border(0.5.dp, colors.markdownBorder)
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         Text(
                             inlineMarkdown(row.getOrNull(column).orEmpty(), colors),
-                            color = if (rowIndex == 0) colors.markdownAccent else colors.markdownText,
-                            fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
+                            color = if (rowIndex == 0) colors.markdownStrong else colors.markdownText,
+                            fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 13.sp,
                             lineHeight = 18.sp
                         )
                     }
