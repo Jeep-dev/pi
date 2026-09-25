@@ -109,7 +109,7 @@ class AgentKeepAliveService : Service() {
                         return@launch
                     }
                     failures++
-                    updateNotification("没有在线 Pi，等待 App 恢复 · $failures")
+                    updateNotification("Pi 已掉线，正在自动重启 · $failures")
                 }
                 delay(15_000)
             }

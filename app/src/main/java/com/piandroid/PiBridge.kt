@@ -873,6 +873,17 @@ internal fun Throwable?.isSocketTimeoutFailure(): Boolean {
     return false
 }
 
+/** True when [this] or a cause is a refused connection: nothing listens on the port. */
+internal fun Throwable?.isConnectRefusedFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.ConnectException) return true
+        current = current.cause
+    }
+    return false
+}
+
 data class PiHealth(
     val piRunning: Boolean,
     val cwd: String,

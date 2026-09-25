@@ -735,7 +735,11 @@ internal class PiSessionRuntime(
                 announced = true
                 updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
             }
-            if (offlineFor >= BRIDGE_DEAD_MS && isConversationGeneration(generation)) {
+            // Connection refused means nothing listens on the port: the Bridge process
+            // is gone (Android killed it), so there is nothing to wait for. Relaunch
+            // after two refusals in a row instead of sitting in "reconnecting" for 45s.
+            val bridgeGone = failures >= 2 && error.isConnectRefusedFailure()
+            if ((bridgeGone || offlineFor >= BRIDGE_DEAD_MS) && isConversationGeneration(generation)) {
                 if (recoverFromEventFailure(generation)) {
                     failures = 0
                     offlineSince = 0L
