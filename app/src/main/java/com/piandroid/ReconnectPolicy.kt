@@ -121,8 +121,10 @@ internal class KeepAlivePolicy(
     private var idlePolls = 0
     private var uncertainPolls = 0
 
-    fun shouldStop(probes: List<KeepAliveProbe>, recovering: Boolean): Boolean {
-        if (probes.any { it == KeepAliveProbe.WORKING }) {
+    fun shouldStop(probes: List<KeepAliveProbe>, recovering: Boolean, anyOnline: Boolean = false): Boolean {
+        // An online Session keeps the service even while idle, so the next prompt
+        // is not delayed by a frozen or killed background process.
+        if (anyOnline || probes.any { it == KeepAliveProbe.WORKING }) {
             idlePolls = 0
             uncertainPolls = 0
             return false

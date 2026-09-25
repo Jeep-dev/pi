@@ -112,6 +112,16 @@ class ReconnectPolicyTest {
     }
 
     @Test
+    fun keepAliveStaysWhileAnySessionIsOnline() {
+        val policy = KeepAlivePolicy(idlePollsToStop = 2, maxUncertainPolls = 2)
+        repeat(5) {
+            assertFalse(policy.shouldStop(listOf(KeepAliveProbe.IDLE), recovering = false, anyOnline = true))
+        }
+        assertFalse(policy.shouldStop(listOf(KeepAliveProbe.IDLE), recovering = false, anyOnline = false))
+        assertTrue(policy.shouldStop(listOf(KeepAliveProbe.IDLE), recovering = false, anyOnline = false))
+    }
+
+    @Test
     fun recoveryTrackerFollowsEachSession() {
         PiRecoveryTracker.mark("a", true)
         PiRecoveryTracker.mark("b", true)
