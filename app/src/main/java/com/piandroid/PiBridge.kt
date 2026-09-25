@@ -76,7 +76,7 @@ class PiBridge(
     }
 
     suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
+        if (!termuxAvailable()) return@withContext Result.failure(TermuxSetupException("请先安装 Termux"))
         runCatching {
             request("/shutdown", "{}", 2_000)
             delay(750)
@@ -186,7 +186,9 @@ class PiBridge(
                 }
             })
         }
-        return request("/prompt", body.toString()).map { Unit }
+        // Longer than the Bridge's own 15 s RPC timeout, so the app normally gets
+        // the Bridge's definitive answer instead of an ambiguous local timeout.
+        return request("/prompt", body.toString(), 30_000).map { Unit }
     }
 
     suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
@@ -402,7 +404,7 @@ class PiBridge(
         return request("/extension-ui", body.toString()).map { Unit }
     }
 
-    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 35_000).mapCatching { raw ->
+    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 26_000).mapCatching { raw ->
         val root = JSONObject(raw)
         val array = root.optJSONArray("events") ?: JSONArray()
         val parsed = buildList {
@@ -695,6 +697,13 @@ class PiBridge(
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
+    /**
+     * Run a no-op in Termux. Starting Termux's command service thaws a Termux
+     * process the system froze in the background, and with it this Bridge and
+     * its Pi child, without restarting either.
+     */
+    suspend fun wakeTermux(): Result<Unit> = runTermux(":")
+
     private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
@@ -704,7 +713,7 @@ class PiBridge(
             context.startService(intent)
             Result.success(Unit)
         } catch (_: SecurityException) {
-            Result.failure(IllegalStateException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
+            Result.failure(TermuxSetupException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -762,6 +771,9 @@ class PiBridge(
         }
     }
 }
+
+/** A local setup problem that retrying cannot fix; the user must act first. */
+class TermuxSetupException(message: String) : IllegalStateException(message)
 
 data class PiHealth(
     val piRunning: Boolean,

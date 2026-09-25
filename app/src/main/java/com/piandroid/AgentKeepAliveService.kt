@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +30,14 @@ class AgentKeepAliveService : Service() {
 
         fun start(bridgeContext: Context) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
-            bridgeContext.startForegroundService(intent)
+            try {
+                bridgeContext.startForegroundService(intent)
+            } catch (error: IllegalStateException) {
+                // Android 12+ refuses new foreground services from the background
+                // (ForegroundServiceStartNotAllowedException). Reconnect loops call this
+                // repeatedly, so a refusal must not crash the app.
+                Log.w("AgentKeepAlive", "Keep-alive service start refused", error)
+            }
         }
 
         fun stop(bridgeContext: Context) {
@@ -49,8 +57,7 @@ class AgentKeepAliveService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
             .apply { acquire(MAX_WAKE_TIME_MS) }
         monitorJob = scope.launch {
-            var failures = 0
-            var idlePolls = 0
+            val policy = KeepAlivePolicy()
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
@@ -62,33 +69,32 @@ class AgentKeepAliveService : Service() {
                             record.token,
                             record.androidSessionId
                         )
-                        val health = endpoint.health(timeoutMs = 2_500).getOrNull()
-                        val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
-                        record to (health to state)
+                        val health = endpoint.health(timeoutMs = 2_500)
+                        val piRunning = health.getOrNull()?.piRunning == true
+                        val state = if (piRunning) endpoint.state(timeoutMs = 2_500) else null
+                        val busy = state?.getOrNull()?.let { it.streaming || it.compacting } == true
+                        classifyKeepAliveProbe(health.exceptionOrNull(), piRunning, state?.exceptionOrNull(), busy) to piRunning
                     }
                 }.awaitAll()
-                val working = probes.count { (_, result) ->
-                    val state = result.second
-                    state?.streaming == true || state?.compacting == true
+                val working = probes.count { (probe, _) -> probe == KeepAliveProbe.WORKING }
+                val running = probes.count { (_, piRunning) -> piRunning }
+                val recovering = PiRecoveryTracker.anyRecovering()
+                val uncertain = recovering || probes.any { (probe, _) -> probe == KeepAliveProbe.UNKNOWN }
+                // An unreachable or reconnecting Session is not idle: stopping here
+                // would release the wake lock exactly when recovery needs it.
+                if (policy.shouldStop(probes.map { it.first }, recovering)) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    return@launch
                 }
-                val running = probes.count { (_, result) -> result.first?.piRunning == true }
-                if (working > 0) {
-                    failures = 0
-                    idlePolls = 0
-                    updateNotification("$working 个 Pi Agent 正在工作 · 共 $running 个在线")
-                } else {
-                    idlePolls++
-                    if (idlePolls >= 2) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        return@launch
+                updateNotification(
+                    when {
+                        working > 0 -> "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
+                        uncertain -> "正在重连 Pi · 共 $running 个在线"
+                        running > 0 -> "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
+                        else -> "没有在线 Pi · 即将停止保活"
                     }
-                    failures++
-                    updateNotification(
-                        if (running > 0) "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
-                        else "没有在线 Pi，等待 App 恢复 · $failures"
-                    )
-                }
+                )
                 delay(15_000)
             }
         }
