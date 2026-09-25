@@ -95,6 +95,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -255,6 +256,10 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 5.19.38：后台 Termux 冻结时先唤醒，不再直接重启 Bridge；保活通知在重连期间保留；首次连接失败自动重试",
+    "• 去掉顶部连接按钮：Session 掉线后自动重新连接（/quit 之后除外）",
+    "• 工具卡片里被折行截断的命令/输出也能 Show all 展开",
+    "• 底部状态栏放不下时换到第二行，不再被截断；右侧 ↑/↓ 按钮停止滚动后自动隐藏",
     "• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow",
     "• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底",
     "• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留",
@@ -766,6 +771,8 @@ private fun PiScreen(
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
     var intentionalQuit by remember { mutableStateOf(false) }
+    // Set once /quit actually stopped Pi, so the screen does not reconnect by itself.
+    var quitByUser by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf(Panel.Chat) }
     var currentState by remember { mutableStateOf<PiState?>(null) }
     var currentStats by remember { mutableStateOf<PiStats?>(null) }
@@ -790,6 +797,12 @@ private fun PiScreen(
     val chatListState = rememberLazyListState()
     var followOutput by remember { mutableStateOf(true) }
     var showScrollControls by remember { mutableStateOf(false) }
+    var scrollActivity by remember { mutableIntStateOf(0) }
+    LaunchedEffect(scrollActivity) {
+        if (scrollActivity == 0) return@LaunchedEffect
+        delay(2_500)
+        showScrollControls = false
+    }
     // Highest bridge event sequence already rendered by this PiScreen.
     var lastAppliedEventSeq by remember { mutableLongStateOf(0L) }
     var steeringQueueSize by remember { mutableStateOf(0) }
@@ -1256,6 +1269,7 @@ private fun PiScreen(
                 addSystem(event.text)
                 if (intentionalQuit) {
                     intentionalQuit = false
+                    quitByUser = true
                     connected = false
                     status = "Disconnected"
                     updateSessionRecord { it.copy(status = PiSessionStatus.NOT_STARTED) }
@@ -1375,8 +1389,20 @@ private fun PiScreen(
         connecting = true
         connected = false
         intentionalQuit = false
+        quitByUser = false
         status = "Checking running agent"
         runtime.ensureConnected(session, autoStart)
+    }
+
+    // There is no Connect button: a visible Session that dropped to "not connected"
+    // connects again by itself, unless the user quit Pi. A failed connect already
+    // retried inside the runtime, so it waits longer before the next round.
+    LaunchedEffect(status, connected, connecting, quitByUser, autoStart) {
+        if (!autoStart || connected || connecting || quitByUser) return@LaunchedEffect
+        when {
+            status == "Disconnected" -> { delay(1_000); connect() }
+            status.endsWith("failed") -> { delay(15_000); connect() }
+        }
     }
 
     // The runtime owns this loop. Compose only renders its updates; removing or
@@ -2003,7 +2029,7 @@ LaunchedEffect(chatListState) {
                         hideThinking = hideThinking,
                         onQuickCommand = { command -> executeInput(command) },
                         onFollowChange = { followOutput = it },
-                        onUserScrollActivity = { showScrollControls = true },
+                        onUserScrollActivity = { showScrollControls = true; scrollActivity++ },
                         onToggleLine = ::toggleLine
                     )
                     Panel.Models -> ModelsPanel(models, currentState, thinkingLevels, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
@@ -2185,7 +2211,6 @@ private fun shortCwd(cwd: String): String = "~/" + cwd.trimEnd('/').substringAft
 @Composable
 private fun ChatTopBar(title: String, cwd: String, model: String, status: String, connected: Boolean, onMenu: () -> Unit, onModel: () -> Unit, onConnect: () -> Unit, onNewSession: () -> Unit, onSettings: () -> Unit) {
     val colors = LocalPiColors.current
-    val canConnect = !connected && (status == "Disconnected" || status.endsWith("failed"))
     Column(Modifier.fillMaxWidth().background(HeaderBg)) {
         Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             PiIconButton(Icons.Filled.Menu, "Pi Sessions", onMenu)
@@ -2205,9 +2230,7 @@ private fun ChatTopBar(title: String, cwd: String, model: String, status: String
                     }
                 }
             }
-            if (canConnect) {
-                PiChip("连接", onConnect, selected = true)
-            } else if (!connected) {
+            if (!connected && status != "Disconnected" && !status.endsWith("failed")) {
                 Text("连接中…", color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp))
             }
             PiIconButton(Icons.Filled.Add, "新建 Session", onNewSession)
@@ -2527,6 +2550,10 @@ LaunchedEffect(listState) {
                         val argsHint = toolArgsHiddenHint(line.toolArgs)
                         val renderedOutput = if (line.collapsed && outputHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
                         val renderedArgs = if (line.collapsed && argsHint.isNotBlank()) toolArgsPreview(line.toolArgs) else line.toolArgs
+                        // A command short enough to skip the text preview can still wrap past
+                        // maxLines on a phone; without this it was clipped with no way to expand.
+                        var argsClipped by remember(line.toolCallId, line.toolArgs) { mutableStateOf(false) }
+                        var outputClipped by remember(line.toolCallId, toolOutput) { mutableStateOf(false) }
                         val durationMs = when {
                             line.toolDurationMs >= 0L -> line.toolDurationMs
                             line.toolStartedAt > 0L -> (if (line.toolEndedAt > 0L) line.toolEndedAt else toolNow) - line.toolStartedAt
@@ -2536,7 +2563,7 @@ LaunchedEffect(listState) {
                         val name = line.toolName.ifBlank { "tool" }
                         val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; else -> colors.toolSuccessBg }
                         val statusTint = when { line.toolIsError -> Danger; line.streaming -> Blue; else -> colors.success }
-                        val expandable = argsHint.isNotBlank() || outputHint.isNotBlank()
+                        val expandable = argsHint.isNotBlank() || outputHint.isNotBlank() || argsClipped || outputClipped
                         val collapseInfo = when {
                             line.collapsed && outputHint.isNotBlank() -> outputHint
                             line.collapsed && argsHint.isNotBlank() -> argsHint
@@ -2554,13 +2581,13 @@ LaunchedEffect(listState) {
                                 else if (line.streaming) Text("运行中", color = Blue, fontSize = 11.sp)
                             }
                             if (renderedArgs.isNotBlank()) {
-                                Text(renderedArgs, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, maxLines = if (line.collapsed) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                                Text(renderedArgs, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 18.sp, maxLines = if (line.collapsed) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) argsClipped = true }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
                             }
                             if (line.toolMeta.isNotBlank()) Text(line.toolMeta, color = if (line.toolIsError) Danger else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp))
                             if (renderedOutput.isNotBlank()) {
                                 val outputLines = renderedOutput.lines()
                                 val styledOutput = buildAnnotatedString { outputLines.forEachIndexed { index, outputLine -> val color = when { outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded; outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved; else -> colors.toolOutput }; pushStyle(SpanStyle(color = color)); append(outputLine); pop(); if (index != outputLines.lastIndex) append('\n') } }
-                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(10.dp)).background(colors.markdownCodeBg).padding(horizontal = 10.dp, vertical = 8.dp))
+                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) outputClipped = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(10.dp)).background(colors.markdownCodeBg).padding(horizontal = 10.dp, vertical = 8.dp))
                             }
                             if (expandable) {
                                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2695,9 +2722,10 @@ private fun compactCount(value: Long): String = when { value >= 1_000_000_000 ->
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
     val compactStatus = when { status.startsWith("WORKING") -> "WORKING"; status.startsWith("RECONNECTING") -> "RECONNECTING"; else -> "" }
     val parts = if (stats == null) buildList { if (compactStatus.isNotBlank()) add(compactStatus); add("—/—") } else buildList { if (compactStatus.isNotBlank()) add(compactStatus); if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}"); val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—"; add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "") }
-    val scroll = rememberScrollState()
     Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
-        Text(parts.joinToString("  "), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, maxLines = 1, softWrap = false, modifier = Modifier.horizontalScroll(scroll))
+        // Wrap onto a second line rather than clip the context usage off the right edge.
+        // Non-breaking spaces keep each figure (e.g. "$0.094 (sub)") in one piece.
+        Text(parts.joinToString("  ") { it.replace(' ', '\u00A0') }, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, maxLines = 2, textAlign = TextAlign.Center)
     }
 }
 
