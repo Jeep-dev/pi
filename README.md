@@ -4,9 +4,9 @@
 
 ## 下载
 
-当前可用版本：**v5.19.27**
+当前可用版本：**v5.19.37**
 
-[下载 Release APK](https://github.com/Jeep-dev/pi/releases/download/v5.19.27/Pi-Android-v5.19.27-release.apk)
+[下载 Release APK](https://github.com/Jeep-dev/pi/releases/download/v5.19.37/Pi-Android-v5.19.37-release.apk)
 
 ## 当前功能
 
