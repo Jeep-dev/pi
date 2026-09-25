@@ -1,5 +1,5 @@
 name: Build Pi Android
-# v5.19.27 closed Session resume validation
+# v5.19.28 reconnect hardening validation
 
 on:
   workflow_dispatch:
@@ -70,5 +70,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7
         with:
-          name: pi-android-v5.19.27-apks
+          name: pi-android-v5.19.28-apks
           path: app/build/outputs/apk/**/*.apk
