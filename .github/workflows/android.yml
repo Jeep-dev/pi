@@ -1,5 +1,5 @@
 name: Build Pi Android
-# v5.19.27 closed Session resume validation
+# v5.19.37 validation
 
 on:
   workflow_dispatch:
@@ -74,5 +74,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7
         with:
-          name: pi-android-v5.19.27-ci${{ github.run_number }}-apks
+          name: pi-android-v5.19.37-ci${{ github.run_number }}-apks
           path: app/build/outputs/apk/**/*.apk

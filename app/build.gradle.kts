@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.
+// v5.19.37 build 137: redesigned UI, native Pi commands, push-stream reconnect, always-on keep-alive.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -24,8 +24,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 127
-        versionName = "5.19.27"
+        versionCode = 137
+        versionName = "5.19.37"
     }
 
     signingConfigs {
