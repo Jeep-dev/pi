@@ -316,13 +316,16 @@ function sendRaw(value) {
   child.stdin.write(JSON.stringify(value) + "\n");
 }
 
+// Model switches and prompt preflight can refresh provider OAuth over the network.
+const SLOW_RPC_TIMEOUT_MS = 30000;
+
 function rpc(command, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     if (!child || child.exitCode != null || !child.stdin.writable) return reject(new Error("Pi is not running"));
     const id = command.id || randomUUID();
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`RPC timeout: ${command.type}`));
+      reject(new Error(`RPC timeout after ${Math.round(timeoutMs / 1000)}s: ${command.type}`));
     }, timeoutMs);
     pending.set(id, { resolve, reject, timer, command: command.type });
     try {
@@ -1091,7 +1094,7 @@ const server = http.createServer(async (req, res) => {
         type: "prompt",
         message,
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
-      });
+      }, SLOW_RPC_TIMEOUT_MS);
     }
 
     if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {
@@ -1201,14 +1204,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/model") {
       if (stopFence) throw new Error("Stop in progress; model change rejected");
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") });
+      return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") }, SLOW_RPC_TIMEOUT_MS);
     }
     if (req.method === "POST" && url.pathname === "/cycle-model") return rpcResponse(res, { type: "cycle_model" });
 
     if (req.method === "POST" && url.pathname === "/thinking") {
       if (stopFence) throw new Error("Stop in progress; thinking change rejected");
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") });
+      return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") }, SLOW_RPC_TIMEOUT_MS);
     }
     if (req.method === "POST" && url.pathname === "/cycle-thinking") return rpcResponse(res, { type: "cycle_thinking_level" });
 

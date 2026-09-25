@@ -186,7 +186,7 @@ class PiBridge(
                 }
             })
         }
-        return request("/prompt", body.toString()).map { Unit }
+        return request("/prompt", body.toString(), SLOW_RPC_TIMEOUT_MS).map { Unit }
     }
 
     suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
@@ -293,7 +293,7 @@ class PiBridge(
 
     suspend fun setModel(model: PiModel): Result<Unit> {
         val body = JSONObject().put("provider", model.provider).put("modelId", model.id).toString()
-        return request("/model", body).map { Unit }
+        return request("/model", body, SLOW_RPC_TIMEOUT_MS).map { Unit }
     }
 
     private fun runtimePreferences() = context.getSharedPreferences("pi_runtime", Context.MODE_PRIVATE)
@@ -336,7 +336,7 @@ class PiBridge(
     }
 
     suspend fun setThinking(level: String): Result<Unit> {
-        return request("/thinking", JSONObject().put("level", level).toString()).map { Unit }
+        return request("/thinking", JSONObject().put("level", level).toString(), SLOW_RPC_TIMEOUT_MS).map { Unit }
     }
 
     suspend fun setAutoCompaction(enabled: Boolean): Result<Unit> {
@@ -725,7 +725,11 @@ class PiBridge(
                 }
             }
             try {
-                val code = connection.responseCode
+                val code = try {
+                    connection.responseCode
+                } catch (timeout: java.net.SocketTimeoutException) {
+                    throw IllegalStateException("Pi ${timeoutMs / 1000} 秒内没有响应（$path）；可能是模型 provider 网络不通或登录刷新卡住", timeout)
+                }
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 if (code !in 200..299) {
@@ -743,6 +747,8 @@ class PiBridge(
 
     companion object {
         const val DEFAULT_PORT = 17649
+        /** Must stay above the Bridge's SLOW_RPC_TIMEOUT_MS so the Bridge reports which RPC stalled. */
+        const val SLOW_RPC_TIMEOUT_MS = 40_000
         const val DEFAULT_ENDPOINT_KEY = "default"
 
         internal fun endpointToken(context: Context, key: String): String {

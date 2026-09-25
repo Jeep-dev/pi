@@ -74,6 +74,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -82,7 +83,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -122,6 +122,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.SpanStyle
@@ -907,7 +908,19 @@ private fun PiScreen(
     }
 
     fun addSystem(text: String) {
-        if (text.isNotBlank()) lines.add(ChatLine("system", text))
+        if (text.isBlank()) return
+        // Collapse identical consecutive notices (e.g. repeated timeouts) into one counted row.
+        val last = lines.lastOrNull()
+        if (last != null && last.role == "system") {
+            val match = Regex("^(.*) ×(\\d+)$", RegexOption.DOT_MATCHES_ALL).find(last.text)
+            val base = match?.groupValues?.get(1) ?: last.text
+            if (base == text) {
+                val count = (match?.groupValues?.get(2)?.toIntOrNull() ?: 1) + 1
+                lines[lines.lastIndex] = last.copy(text = "$text ×$count")
+                return
+            }
+        }
+        lines.add(ChatLine("system", text))
     }
 
     fun appendStream(role: String, delta: String) {
@@ -1318,6 +1331,17 @@ private fun PiScreen(
                 is PiRuntimeUpdate.Reconnecting -> {
                     status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
                     connecting = true
+                }
+                PiRuntimeUpdate.Recovered -> {
+                    // A transient poll failure must not leave the header stuck on "reconnecting".
+                    connected = true
+                    connecting = false
+                    status = when {
+                        currentState?.compacting == true -> "Compacting"
+                        currentState?.streaming == true -> "Working"
+                        else -> "Ready"
+                    }
+                    scope.launch { refreshMeta() }
                 }
                 is PiRuntimeUpdate.Unavailable -> {
                     connected = false
@@ -1882,7 +1906,7 @@ LaunchedEffect(chatListState) {
             .statusBarsPadding()
             .pointerInput(Unit) {
                 val edgeExclusion = with(density) { 24.dp.toPx() }
-                val contentTop = with(density) { 56.dp.toPx() }
+                val contentTop = with(density) { 52.dp.toPx() }
                 val touchSlop = with(density) { 18.dp.toPx() }
                 val drawerWidthPx = size.width * 0.86f
                 awaitEachGesture {
@@ -1940,9 +1964,11 @@ LaunchedEffect(chatListState) {
                 ChatTopBar(
                     title = sessionDisplayName(session),
                     cwd = cwd,
+                    model = modelLabel,
                     status = chatStatus,
                     connected = connected,
                     onMenu = { settleDrawer(1f) },
+                    onModel = { modelInitialSearch = ""; panel = Panel.Models },
                     onConnect = connect,
                     onNewSession = onNewSession,
                     onSettings = { panel = Panel.Settings }
@@ -2031,14 +2057,10 @@ LaunchedEffect(chatListState) {
                     busy = busy,
                     attachments = pendingAttachments,
                     attachmentNotice = attachmentNotice,
-                    model = modelLabel,
-                    thinkingLevel = currentState?.thinkingLevel.orEmpty(),
                     focusRequester = composerFocusRequester,
                     onValue = { input = it },
                     onAttach = { attachmentNotice = ""; filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
-                    onModel = { modelInitialSearch = ""; panel = Panel.Models },
-                    onThinking = { panel = Panel.Thinking },
                     onStop = { executeInput("/abort") },
                     onPrimary = {
                         val value = input; if (value.trimStart().startsWith("/")) { keyboardController?.hide(); focusManager.clearFocus() }; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments)
@@ -2103,24 +2125,26 @@ private fun chatStatusText(status: String): String {
 private fun shortCwd(cwd: String): String = "~/" + cwd.trimEnd('/').substringAfterLast('/').ifBlank { "home" }
 
 @Composable
-private fun ChatTopBar(title: String, cwd: String, status: String, connected: Boolean, onMenu: () -> Unit, onConnect: () -> Unit, onNewSession: () -> Unit, onSettings: () -> Unit) {
+private fun ChatTopBar(title: String, cwd: String, model: String, status: String, connected: Boolean, onMenu: () -> Unit, onModel: () -> Unit, onConnect: () -> Unit, onNewSession: () -> Unit, onSettings: () -> Unit) {
     val colors = LocalPiColors.current
     val canConnect = !connected && (status == "Disconnected" || status.endsWith("failed"))
     Column(Modifier.fillMaxWidth().background(HeaderBg)) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             PiIconButton(Icons.Filled.Menu, "Pi Sessions", onMenu)
             Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp)) {
-                Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text("  ${shortCwd(cwd)}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(chatStatusColor(status), 7.dp)
                     Spacer(Modifier.width(6.dp))
-                    Text(
-                        "${chatStatusText(status)} · ${shortCwd(cwd)}",
-                        color = TextMuted,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text(chatStatusText(status), color = TextMuted, fontSize = 12.sp, maxLines = 1)
+                    Text(" · ", color = TextMuted, fontSize = 12.sp)
+                    Row(Modifier.weight(1f, fill = false).clip(RoundedCornerShape(6.dp)).clickable(onClick = onModel), verticalAlignment = Alignment.CenterVertically) {
+                        Text(model.ifBlank { "选择模型" }, color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = TextMuted, modifier = Modifier.size(14.dp))
+                    }
                 }
             }
             if (canConnect) {
@@ -2547,54 +2571,56 @@ private fun CommandPalette(query: String, local: List<LocalCommand>, remote: Lis
 }
 
 @Composable
-private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachment>, attachmentNotice: String, model: String, thinkingLevel: String, focusRequester: FocusRequester, onValue: (String) -> Unit, onAttach: () -> Unit, onRemoveAttachment: (PiAttachment) -> Unit, onModel: () -> Unit, onThinking: () -> Unit, onStop: () -> Unit, onPrimary: () -> Unit) {
+private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachment>, attachmentNotice: String, focusRequester: FocusRequester, onValue: (String) -> Unit, onAttach: () -> Unit, onRemoveAttachment: (PiAttachment) -> Unit, onStop: () -> Unit, onPrimary: () -> Unit) {
     val colors = LocalPiColors.current
-    val composerShape = RoundedCornerShape(26.dp)
+    val composerShape = RoundedCornerShape(24.dp)
     val canSend = value.isNotBlank() || attachments.isNotEmpty()
     val showStop = busy && !canSend
-    Column(Modifier.fillMaxWidth().background(Bg).padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 2.dp)) {
-        Column(Modifier.fillMaxWidth().clip(composerShape).background(colors.composerBg).border(1.dp, Border, composerShape).padding(start = 6.dp, end = 8.dp, top = 4.dp, bottom = 8.dp)) {
-            if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                attachments.forEach { attachment ->
-                    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(CardBg).clickable { onRemoveAttachment(attachment) }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("${attachment.name}${if (attachment.byteCount >= 0) " · ${compactCount(attachment.byteCount)}B" else ""}", color = TextMain, fontSize = 12.sp, maxLines = 1)
-                        Icon(Icons.Filled.Close, contentDescription = "移除附件", tint = TextMuted, modifier = Modifier.padding(start = 4.dp).size(14.dp))
+    Column(Modifier.fillMaxWidth().background(Bg).padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 2.dp)) {
+        if (attachments.isNotEmpty() || attachmentNotice.isNotBlank()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            attachments.forEach { attachment ->
+                Row(Modifier.clip(RoundedCornerShape(10.dp)).background(CardBg).clickable { onRemoveAttachment(attachment) }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${attachment.name}${if (attachment.byteCount >= 0) " · ${compactCount(attachment.byteCount)}B" else ""}", color = TextMain, fontSize = 12.sp, maxLines = 1)
+                    Icon(Icons.Filled.Close, contentDescription = "移除附件", tint = TextMuted, modifier = Modifier.padding(start = 4.dp).size(14.dp))
+                }
+            }
+            if (attachmentNotice.isNotBlank()) Text(attachmentNotice, color = Danger, fontSize = 12.sp)
+        }
+        Row(
+            Modifier.fillMaxWidth().clip(composerShape).background(colors.composerBg).border(1.dp, Border, composerShape).padding(5.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Box(Modifier.size(34.dp).clip(CircleShape).clickable(onClick = onAttach), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Add, contentDescription = "添加附件", tint = TextMuted, modifier = Modifier.size(22.dp))
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = onValue,
+                modifier = Modifier.weight(1f).heightIn(max = 140.dp).padding(horizontal = 6.dp, vertical = 7.dp).focusRequester(focusRequester),
+                textStyle = TextStyle(color = TextMain, fontSize = 15.sp, lineHeight = 20.sp),
+                cursorBrush = SolidColor(Accent),
+                maxLines = 6,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { onPrimary() }),
+                decorationBox = { innerTextField ->
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (value.isEmpty()) Text(if (busy) "继续补充指令（steering）…" else "给 Pi 发消息，/ 查看命令", color = TextMuted, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        innerTextField()
                     }
                 }
-                if (attachmentNotice.isNotBlank()) Text(attachmentNotice, color = Danger, fontSize = 12.sp)
-            }
-            OutlinedTextField(value = value, onValueChange = onValue, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp, max = 168.dp).focusRequester(focusRequester), textStyle = TextStyle(color = TextMain, fontSize = 15.sp, lineHeight = 22.sp), placeholder = { Text(if (busy) "继续补充指令（steering）…" else "给 Pi 发消息，输入 / 查看命令", color = TextMuted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }, singleLine = false, minLines = 1, maxLines = 6, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { onPrimary() }), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, disabledBorderColor = Color.Transparent, errorBorderColor = Color.Transparent, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent, cursorColor = Accent))
-            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(36.dp).clip(CircleShape).border(1.dp, Border, CircleShape).clickable(onClick = onAttach), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Add, contentDescription = "添加附件", tint = TextMain, modifier = Modifier.size(20.dp))
-                }
-                Spacer(Modifier.width(8.dp))
-                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ComposerChip(model.ifBlank { "模型" }, onModel)
-                    ComposerChip(if (thinkingLevel.isBlank()) "思考" else "思考 · $thinkingLevel", onThinking)
-                }
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(when { showStop -> TextMain; canSend -> Accent; else -> colors.disabledAction })
-                        .clickable(enabled = showStop || canSend) { if (showStop) onStop() else onPrimary() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (showStop) Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(Bg))
-                    else Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "发送", tint = if (canSend) colors.onAccent else TextMuted, modifier = Modifier.size(26.dp))
-                }
+            )
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(when { showStop -> TextMain; canSend -> Accent; else -> colors.disabledAction })
+                    .clickable(enabled = showStop || canSend) { if (showStop) onStop() else onPrimary() },
+                contentAlignment = Alignment.Center
+            ) {
+                if (showStop) Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Bg))
+                else Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "发送", tint = if (canSend) colors.onAccent else TextMuted, modifier = Modifier.size(24.dp))
             }
         }
-    }
-}
-
-@Composable
-private fun ComposerChip(text: String, onClick: () -> Unit) {
-    Row(Modifier.clip(PillShape).clickable(onClick = onClick).padding(start = 8.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, color = TextMuted, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
-        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
     }
 }
 
@@ -2605,8 +2631,8 @@ private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComp
     val compactStatus = when { status.startsWith("WORKING") -> "WORKING"; status.startsWith("RECONNECTING") -> "RECONNECTING"; else -> "" }
     val parts = if (stats == null) buildList { if (compactStatus.isNotBlank()) add(compactStatus); add("—/—") } else buildList { if (compactStatus.isNotBlank()) add(compactStatus); if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}"); val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—"; add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "") }
     val scroll = rememberScrollState()
-    Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 5.dp), contentAlignment = Alignment.Center) {
-        Text(parts.joinToString("  "), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, maxLines = 1, softWrap = false, modifier = Modifier.horizontalScroll(scroll))
+    Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+        Text(parts.joinToString("  "), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, maxLines = 1, softWrap = false, modifier = Modifier.horizontalScroll(scroll))
     }
 }
 

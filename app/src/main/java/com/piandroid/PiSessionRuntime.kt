@@ -72,6 +72,8 @@ internal sealed class PiRuntimeUpdate {
     data class Snapshot(val value: PiRecoverySnapshot) : PiRuntimeUpdate()
     data class Events(val value: PiEventBatch) : PiRuntimeUpdate()
     data class Reconnecting(val error: Throwable) : PiRuntimeUpdate()
+    /** Event polling works again after a transient failure; clears the UI's reconnecting state. */
+    object Recovered : PiRuntimeUpdate()
     data class Failed(val error: Throwable) : PiRuntimeUpdate()
     object Unavailable : PiRuntimeUpdate()
     object Disconnected : PiRuntimeUpdate()
@@ -574,6 +576,7 @@ internal class PiSessionRuntime(
             if (!isConversationGeneration(generation)) continue
             if (result.isSuccess) {
                 val batch = result.getOrThrow()
+                if (failures > 0) updatesMutable.emit(PiRuntimeUpdate.Recovered)
                 failures = 0
                 if (batch.gap) {
                     val snapshot = bridge.recoverySnapshot()
