@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +30,13 @@ class AgentKeepAliveService : Service() {
 
         fun start(bridgeContext: Context) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
-            bridgeContext.startForegroundService(intent)
+            try {
+                bridgeContext.startForegroundService(intent)
+            } catch (error: IllegalStateException) {
+                // Android 12+ refuses new foreground services from the background
+                // (ForegroundServiceStartNotAllowedException); a refusal must not crash the app.
+                Log.w("AgentKeepAlive", "Keep-alive service start refused", error)
+            }
         }
 
         fun stop(bridgeContext: Context) {
@@ -72,10 +79,15 @@ class AgentKeepAliveService : Service() {
                     state?.streaming == true || state?.compacting == true
                 }
                 val running = probes.count { (_, result) -> result.first?.piRunning == true }
-                if (working > 0) {
+                // An online Session keeps the service even while idle; stop only once
+                // no Session has been online for two polls in a row.
+                if (working > 0 || running > 0) {
                     failures = 0
                     idlePolls = 0
-                    updateNotification("$working 个 Pi Agent 正在工作 · 共 $running 个在线")
+                    updateNotification(
+                        if (working > 0) "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
+                        else "$running 个 Pi Session 在线，当前空闲 · 保活中"
+                    )
                 } else {
                     idlePolls++
                     if (idlePolls >= 2) {
@@ -84,10 +96,7 @@ class AgentKeepAliveService : Service() {
                         return@launch
                     }
                     failures++
-                    updateNotification(
-                        if (running > 0) "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
-                        else "没有在线 Pi，等待 App 恢复 · $failures"
-                    )
+                    updateNotification("没有在线 Pi，等待 App 恢复 · $failures")
                 }
                 delay(15_000)
             }

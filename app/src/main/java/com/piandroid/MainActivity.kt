@@ -608,7 +608,8 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            if (merged.any { it.status == PiSessionStatus.WORKING }) {
+            // Keep the service while any Session is online, idle included.
+            if (merged.any { it.status == PiSessionStatus.WORKING || it.status == PiSessionStatus.IDLE }) {
                 AgentKeepAliveService.start(context)
             } else {
                 AgentKeepAliveService.stop(context)
@@ -1364,11 +1365,8 @@ private fun PiScreen(
         panel = Panel.Chat
         refreshMeta()
         requestLoadedResources()
-        if (currentState?.streaming == true || currentState?.compacting == true) {
-            AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
-        } else {
-            AgentKeepAliveService.stop(bridge.applicationContext())
-        }
+        // A connected Session is online, so keep the service even when Pi is idle.
+        AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
     }
 
     val connect: () -> Unit = connect@{
