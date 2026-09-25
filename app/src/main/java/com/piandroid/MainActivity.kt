@@ -109,6 +109,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -259,7 +260,7 @@ private val ANDROID_CHANGELOG = listOf(
     "• 5.19.38：后台 Termux 冻结时先唤醒，不再直接重启 Bridge；保活通知在重连期间保留；首次连接失败自动重试",
     "• 去掉顶部连接按钮：Session 掉线后自动重新连接（/quit 之后除外）",
     "• 工具卡片里被折行截断的命令/输出也能 Show all 展开",
-    "• 底部状态栏放不下时换到第二行，不再被截断；右侧 ↑/↓ 按钮停止滚动后自动隐藏",
+    "• 底部状态栏保持一行，放不下时自动缩小字号，不再被截断；右侧 ↑/↓ 按钮停止滚动后自动隐藏",
     "• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow",
     "• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底",
     "• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留",
@@ -2722,10 +2723,27 @@ private fun compactCount(value: Long): String = when { value >= 1_000_000_000 ->
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
     val compactStatus = when { status.startsWith("WORKING") -> "WORKING"; status.startsWith("RECONNECTING") -> "RECONNECTING"; else -> "" }
     val parts = if (stats == null) buildList { if (compactStatus.isNotBlank()) add(compactStatus); add("—/—") } else buildList { if (compactStatus.isNotBlank()) add(compactStatus); if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}"); val context = if (stats.contextPercent >= 0 && stats.contextWindow > 0) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—"; add(context + if (state?.autoCompactionEnabled == true) " (auto)" else "") }
-    Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
-        // Wrap onto a second line rather than clip the context usage off the right edge.
-        // Non-breaking spaces keep each figure (e.g. "$0.094 (sub)") in one piece.
-        Text(parts.joinToString("  ") { it.replace(' ', '\u00A0') }, color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp, maxLines = 2, textAlign = TextAlign.Center)
+    val text = parts.joinToString(" ")
+    // One line that always fits: when the figures are wider than the screen, shrink
+    // the font a step at a time instead of clipping the context usage off the edge.
+    var fontSize by remember(text) { mutableStateOf(10.sp) }
+    var fitted by remember(text) { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().background(Bg).clickable(onClick = onFocusComposer).navigationBarsPadding().padding(horizontal = 8.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+        Text(
+            text,
+            color = TextMuted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = fontSize,
+            lineHeight = 13.sp,
+            letterSpacing = (-0.2).sp,
+            maxLines = 1,
+            softWrap = false,
+            onTextLayout = { layout ->
+                if (layout.didOverflowWidth && fontSize.value > 7f) fontSize = (fontSize.value - 0.5f).sp
+                else fitted = true
+            },
+            modifier = Modifier.drawWithContent { if (fitted) drawContent() }
+        )
     }
 }
 
