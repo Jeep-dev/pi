@@ -24,6 +24,7 @@ const bridgeCapabilities = [
   "hard-stop-v1",
   "conversation-owner-v1",
   "tool-history-metadata-v1",
+  "native-settings-v1",
   "tool-args-lossless-v1",
   "cwd-shared-resume-v1",
   "closed-session-resume-v1",
@@ -336,6 +337,24 @@ function rpc(command, timeoutMs = 15000) {
       reject(error);
     }
   });
+}
+
+/** Native /changelog: the newest entries of the installed Pi package's CHANGELOG.md. */
+async function piChangelog(limit) {
+  let directory = path.dirname(await realpath(termuxPi).catch(() => termuxPi));
+  for (let depth = 0; depth < 6; depth++) {
+    const candidate = path.join(directory, "CHANGELOG.md");
+    if (existsSync(candidate) && existsSync(path.join(directory, "package.json"))) {
+      const text = await readFile(candidate, "utf8");
+      const sections = text.split(/\n(?=## \[)/).filter(section => section.startsWith("## ["));
+      const version = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")).version || "";
+      return { version, text: sections.slice(0, limit).join("\n\n").trim() };
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error(`Pi CHANGELOG.md not found near ${termuxPi}`);
 }
 
 function sessionDirForCwd(baseCwd) {
@@ -1214,6 +1233,24 @@ const server = http.createServer(async (req, res) => {
       return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") }, SLOW_RPC_TIMEOUT_MS);
     }
     if (req.method === "POST" && url.pathname === "/cycle-thinking") return rpcResponse(res, { type: "cycle_thinking_level" });
+
+    // Native Pi /settings queue behaviour, auto-retry, and per-model thinking levels.
+    if (req.method === "POST" && (url.pathname === "/steering-mode" || url.pathname === "/follow-up-mode")) {
+      if (stopFence) throw new Error("Stop in progress; queue mode change rejected");
+      const input = JSON.parse(await readBody(req));
+      const mode = input.mode === "all" ? "all" : "one-at-a-time";
+      const type = url.pathname === "/steering-mode" ? "set_steering_mode" : "set_follow_up_mode";
+      return rpcResponse(res, { type, mode });
+    }
+    if (req.method === "POST" && url.pathname === "/auto-retry") {
+      const input = JSON.parse(await readBody(req));
+      return rpcResponse(res, { type: "set_auto_retry", enabled: Boolean(input.enabled) });
+    }
+    if (req.method === "GET" && url.pathname === "/thinking-levels") return rpcResponse(res, { type: "get_available_thinking_levels" });
+    if (req.method === "GET" && url.pathname === "/changelog") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 3, 1), 20);
+      return send(res, 200, { ok: true, ...(await piChangelog(limit)) });
+    }
 
     if (req.method === "POST" && url.pathname === "/auto-compaction") {
       if (stopFence) throw new Error("Stop in progress; compaction setting rejected");

@@ -199,7 +199,7 @@ private const val ANDROID_EXTENSIONS_WIDGET = "__android_loaded_extensions"
 private const val ANDROID_RESOURCES_WIDGET = "__android_loaded_resources"
 private const val ANDROID_RESOURCES_COMMAND = "__android_loaded_resources"
 
-private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes }
+private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes, Changelog }
 internal data class LoadedResourceSection(val title: String, val items: List<String>)
 
 internal fun parseLoadedResourceWidget(lines: List<String>): List<LoadedResourceSection> {
@@ -254,6 +254,74 @@ private data class ChatLine(
     val toolEndedAt: Long = 0L,
     val toolDurationMs: Long = -1L
 )
+private val ANDROID_CHANGELOG = listOf(
+    "• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow",
+    "• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底",
+    "• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留",
+    "• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间",
+    "• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效",
+    "• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底",
+    "• 只有纵向手势会暂停自动跟随，横向表格/代码滑动不再误关 follow",
+    "• Markdown 表格和代码块优先接管横向滑动，不再误触 Session 侧栏",
+    "• 宽表格使用完整屏幕宽度作为横向滚动视口，可左右查看全部列",
+    "• /settings 显示并可编辑每个 Session 的附加启动参数",
+    "• 按 Pi 原生 CLI 分类提示常用模型、工具、资源和提示词启动参数",
+    "• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面",
+    "• 自动跟随监听完整可见内容；工具参数、输出和状态增长也会持续贴底",
+    "• 工具卡片改为接近原生 Pi 的中性终端布局，不再把整条命令染成绿色",
+    "• 长命令和长输出默认同时折叠；单行超长命令也限制视觉行数",
+    "• 工具执行时间移到底部，不再挤压命令正文宽度",
+    "• Show all 同时展开完整参数和完整输出，不丢失工具结果",
+    "• 重建 Android Session / Runtime owner / Pi conversation 三层状态模型",
+    "• 修复重复 legacy conversation 所有权与仅按 cwd 重连造成的串会话",
+    "• Runtime 独占 history/state 提交并隔离重建客户端与过期事件",
+    "• 修复 /resume 把 Pi conversation.id 错当 Android session.id 导致的身份错误",
+    "• /resume 显式携带 Android session.id，并阻止其他 runtime 认领切换",
+    "• 丢弃 /resume 期间过期的后台 poll，避免覆盖当前 conversation 绑定",
+    "• Session 选择全链路只使用 Android session.id，并记录切换诊断日志",
+    "• Session 条目先提交 activeSession，再关闭侧栏，修复点击无效",
+    "• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史",
+    "• 选择旧版历史后重启仍保持绑定，不迁移或删除旧文件",
+    "• /resume 切换后同步 Activity runtime，恢复的历史不会被旧快照覆盖",
+    "• /resume 只切换 Pi conversation，不改变 Android Session 隔离身份",
+    "• 无 Session 启动时自动展开侧栏，删除最后一个后可立即新建",
+    "• 删除最后一个 Session 后保留打开的侧栏，可直接新建第一个 Session",
+    "• 新建 Session 支持独立启动参数，并在恢复时保留参数",
+    "• Session 长按支持重命名、置顶和确认删除",
+    "• Stop 会清空 Pi 队列并取消当前任务，阻止后续操作继续执行",
+    "• Session 侧栏改为从中间区域右滑触发，保留左边缘返回手势",
+    "• 多个 Pi Session 以独立 Termux RPC 进程并行运行",
+    "• 从中间区域右滑打开 Session 侧栏，切换不会停止后台任务",
+    "• Session 列表、cwd、端口和恢复文件持久保存",
+    "• 恢复 edit 工具的原生 diff 数据，默认折叠且可展开全文",
+    "• 重连快照按持久历史边界去重，并保留未完成输出、工具结果和 steering 队列",
+    "• 显示真实工具失败和模型错误；限制 Bridge 事件缓存内存",
+    "• /reload 使用新 runtime 发布扩展列表和完成通知",
+    "• 超过 2 MB 的文件只提供安全只读预览，避免截断覆盖",
+    "• /fork 明确区分当前、已压缩及其他分支，并在历史 Fork 前确认",
+    "• /fork 现在真实切换到独立 session，并将所选消息恢复到输入框",
+    "• session 选择器自动遮蔽常见 API key、token 与私钥预览",
+    "• /compact 完成后立即切换到实际压缩上下文，可展开查看完整摘要",
+    "• 压缩后的旧原文仍安全保留在 append-only session 文件中，但不再错误显示为当前上下文",
+    "• 掉线重连始终恢复断线前实际活跃的 session，不再回到启动时的旧会话",
+    "• 顶部按原版 Pi 风格显示当前实际加载的 [Extensions] 列表",
+    "• 合并流式滚动与工具更新，生成中使用稳定文本渲染，减少闪烁和掉帧",
+    "• 底栏工作状态固定为简洁的 WORKING / RECONNECTING",
+    "• 修复 /tree 对话框等待导致的 timeout，并自动定位最新当前消息",
+    "• 恢复旧 session 时严格保留该会话的模型与 thinking level",
+    "• 补齐原版 Pi 核心斜杠命令入口",
+    "• /tree 只显示用户消息分支点，不显示工具执行过程",
+    "• /export、/import、/share、/copy、/trust、/reload、/quit",
+    "• /model 与 /thinking 支持直接参数",
+    "• 支持原版 ! / !! bash 语义",
+    "• 通用文件附件使用路径引用；可访问文件不复制、不内嵌",
+    "• /themes 支持完整暗色、亮色与灰色主题并持久化",
+    "• 重启后恢复完整思考、工具调用、执行输出和未关闭的 /tree",
+    "• 自动重连活动 Session，修复恢复期间的事件竞态"
+)
+
+private val DEFAULT_THINKING_LEVELS = listOf("off", "minimal", "low", "medium", "high", "xhigh")
+
 private data class LocalCommand(val name: String, val description: String)
 
 private val Bg: Color
@@ -747,6 +815,12 @@ private fun PiScreen(
     var resumeFilter by remember { mutableStateOf("") }
     var modelInitialSearch by remember { mutableStateOf("") }
     var defaultModelKey by remember { mutableStateOf(bridge.defaultModelKey()) }
+    // Levels the current model supports; native /thinking only offers these.
+    var thinkingLevels by remember { mutableStateOf(DEFAULT_THINKING_LEVELS) }
+    var changelogText by remember { mutableStateOf("") }
+    val uiPreferences = remember { context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE) }
+    var hideThinking by remember { mutableStateOf(uiPreferences.getBoolean("hide_thinking", false)) }
+    var autoRetry by remember { mutableStateOf(uiPreferences.getBoolean("auto_retry", true)) }
     val pendingAttachments = remember { mutableStateListOf<PiAttachment>() }
     var attachmentNotice by remember { mutableStateOf("") }
 
@@ -889,10 +963,12 @@ private fun PiScreen(
         val stats = async { bridge.stats().getOrNull() }
         val availableModels = async { bridge.models().getOrNull() }
         val availableCommands = async { bridge.commands().getOrNull() }
+        val availableThinking = async { bridge.thinkingLevels().getOrNull() }
         state.await()
         stats.await()?.let { currentStats = it }
         availableModels.await()?.let { models = it }
         availableCommands.await()?.let { remoteCommands = it }
+        availableThinking.await()?.takeIf { it.isNotEmpty() }?.let { thinkingLevels = it }
     }
 
     fun requestLoadedResources(delayMillis: Long = 0L) {
@@ -1376,7 +1452,7 @@ private fun PiScreen(
         }
     }
 
-    fun executeInput(raw: String, attachments: List<PiAttachment> = emptyList()) {
+    fun executeInput(raw: String, attachments: List<PiAttachment> = emptyList(), followUp: Boolean = false) {
         val text = raw.trim()
         if (text.isBlank() && attachments.isEmpty()) return
         val firstToken = text.substringBefore(' ').lowercase()
@@ -1390,18 +1466,19 @@ private fun PiScreen(
         }
         if (attachments.isNotEmpty()) {
             followOutput = true
-            val steering = currentState?.streaming == true || status == "Working"
+            val queued = currentState?.streaming == true || status == "Working"
+            val steering = queued && !followUp
             if (steering) steeringQueueSize += 1
             val attachmentSummary = attachments.joinToString(", ") { "[附件: ${it.name}]" }
             lines.add(
                 ChatLine(
                     "user",
                     listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"),
-                    delivery = if (steering) "steering_queued" else "normal"
+                    delivery = when { steering -> "steering_queued"; queued -> "follow_up"; else -> "normal" }
                 )
             )
             runtime.launchTask {
-                val behavior = if (steering) "steer" else null
+                val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
                 bridge.prompt(text, behavior, attachments).fold(
                     onSuccess = { status = "Working" },
                     onFailure = {
@@ -1502,7 +1579,7 @@ private fun PiScreen(
             "/thinking" -> {
                 if (args.isBlank()) panel = Panel.Thinking
                 else {
-                    val levels = setOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+                    val levels = thinkingLevels
                     val level = args.lowercase()
                     if (level !in levels) addSystem("未知 thinking level：$args；可用：${levels.joinToString()}")
                     else runtime.launchTask {
@@ -1524,6 +1601,7 @@ private fun PiScreen(
                 |• 工作中且输入框为空时，发送键变为 ■ 停止（等同 /abort）
                 |• 输入 /：打开可搜索命令面板
                 |• 工作中仍可直接发送：按 Pi 规则作为 steering message 排队
+                |• 工作中长按发送键：作为 follow-up 在本轮结束后发送（原生 Alt+Enter）
                 |• 输入 /abort 或点 ■ 停止键才会中止当前 Agent
                 |• 滑动离开底部：暂停跟随；回到底部自动恢复
                 |• 右侧 ↑/↓：直接跳到消息顶部/底部
@@ -1531,72 +1609,16 @@ private fun PiScreen(
                 |• 工具卡片：默认紧凑折叠，Show all 展开完整参数与输出
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
-            "/changelog" -> addSystem(
-                """Pi Android v5.19.21
-                |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow
-                |• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底
-                |• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留
-                |• 工具卡片底栏：左侧折叠行数 · 中间 Show all / Collapse · 右侧执行时间
-                |• 修复 web search / 工具结束后 Compose 延迟重排导致的偶发自动跟随失效
-                |• 自动贴底等待布局连续稳定多帧；手动上滑会立即中止贴底
-                |• 只有纵向手势会暂停自动跟随，横向表格/代码滑动不再误关 follow
-                |• Markdown 表格和代码块优先接管横向滑动，不再误触 Session 侧栏
-                |• 宽表格使用完整屏幕宽度作为横向滚动视口，可左右查看全部列
-                |• /settings 显示并可编辑每个 Session 的附加启动参数
-                |• 按 Pi 原生 CLI 分类提示常用模型、工具、资源和提示词启动参数
-                |• 丢弃恢复快照与实时事件的重复/过期事件，避免旧回答串到新消息后面
-                |• 自动跟随监听完整可见内容；工具参数、输出和状态增长也会持续贴底
-                |• 工具卡片改为接近原生 Pi 的中性终端布局，不再把整条命令染成绿色
-                |• 长命令和长输出默认同时折叠；单行超长命令也限制视觉行数
-                |• 工具执行时间移到底部，不再挤压命令正文宽度
-                |• Show all 同时展开完整参数和完整输出，不丢失工具结果
-                |• 重建 Android Session / Runtime owner / Pi conversation 三层状态模型
-                |• 修复重复 legacy conversation 所有权与仅按 cwd 重连造成的串会话
-                |• Runtime 独占 history/state 提交并隔离重建客户端与过期事件
-                |• 修复 /resume 把 Pi conversation.id 错当 Android session.id 导致的身份错误
-                |• /resume 显式携带 Android session.id，并阻止其他 runtime 认领切换
-                |• 丢弃 /resume 期间过期的后台 poll，避免覆盖当前 conversation 绑定
-                |• Session 选择全链路只使用 Android session.id，并记录切换诊断日志
-                |• Session 条目先提交 activeSession，再关闭侧栏，修复点击无效
-                |• /resume 同时发现旧版 cwd 历史和当前 Android Session 私有历史
-                |• 选择旧版历史后重启仍保持绑定，不迁移或删除旧文件
-                |• /resume 切换后同步 Activity runtime，恢复的历史不会被旧快照覆盖
-                |• /resume 只切换 Pi conversation，不改变 Android Session 隔离身份
-                |• 无 Session 启动时自动展开侧栏，删除最后一个后可立即新建
-                |• 删除最后一个 Session 后保留打开的侧栏，可直接新建第一个 Session
-                |• 新建 Session 支持独立启动参数，并在恢复时保留参数
-                |• Session 长按支持重命名、置顶和确认删除
-                |• Stop 会清空 Pi 队列并取消当前任务，阻止后续操作继续执行
-                |• Session 侧栏改为从中间区域右滑触发，保留左边缘返回手势
-                |• 多个 Pi Session 以独立 Termux RPC 进程并行运行
-                |• 从中间区域右滑打开 Session 侧栏，切换不会停止后台任务
-                |• Session 列表、cwd、端口和恢复文件持久保存
-                |• 恢复 edit 工具的原生 diff 数据，默认折叠且可展开全文
-                |• 重连快照按持久历史边界去重，并保留未完成输出、工具结果和 steering 队列
-                |• 显示真实工具失败和模型错误；限制 Bridge 事件缓存内存
-                |• /reload 使用新 runtime 发布扩展列表和完成通知
-                |• 超过 2 MB 的文件只提供安全只读预览，避免截断覆盖
-                |• /fork 明确区分当前、已压缩及其他分支，并在历史 Fork 前确认
-                |• /fork 现在真实切换到独立 session，并将所选消息恢复到输入框
-                |• session 选择器自动遮蔽常见 API key、token 与私钥预览
-                |• /compact 完成后立即切换到实际压缩上下文，可展开查看完整摘要
-                |• 压缩后的旧原文仍安全保留在 append-only session 文件中，但不再错误显示为当前上下文
-                |• 掉线重连始终恢复断线前实际活跃的 session，不再回到启动时的旧会话
-                |• 顶部按原版 Pi 风格显示当前实际加载的 [Extensions] 列表
-                |• 合并流式滚动与工具更新，生成中使用稳定文本渲染，减少闪烁和掉帧
-                |• 底栏工作状态固定为简洁的 WORKING / RECONNECTING
-                |• 修复 /tree 对话框等待导致的 timeout，并自动定位最新当前消息
-                |• 恢复旧 session 时严格保留该会话的模型与 thinking level
-                |• 补齐原版 Pi 核心斜杠命令入口
-                |• /tree 只显示用户消息分支点，不显示工具执行过程
-                |• /export、/import、/share、/copy、/trust、/reload、/quit
-                |• /model 与 /thinking 支持直接参数
-                |• 支持原版 ! / !! bash 语义
-                |• 通用文件附件使用路径引用；可访问文件不复制、不内嵌
-                |• /themes 支持完整暗色、亮色与灰色主题并持久化
-                |• 重启后恢复完整思考、工具调用、执行输出和未关闭的 /tree
-                |• 自动重连活动 Session，修复恢复期间的事件竞态""".trimMargin()
-            )
+            "/changelog" -> {
+                panel = Panel.Changelog
+                changelogText = ""
+                runtime.launchTask {
+                    bridge.changelog().fold(
+                        onSuccess = { (version, text) -> changelogText = "# Pi ${version.ifBlank { "" }}\n\n$text" },
+                        onFailure = { changelogText = "Pi 更新日志读取失败：${it.message}" }
+                    )
+                }
+            }
             "/run" -> {
                 panel = Panel.Bash
                 if (args.isNotBlank()) {
@@ -1685,11 +1707,12 @@ private fun PiScreen(
             "/settings" -> panel = Panel.Settings
             else -> {
                 followOutput = true
-                val steering = currentState?.streaming == true || status == "Working"
+                val queued = currentState?.streaming == true || status == "Working"
+                val steering = queued && !followUp
                 if (steering) steeringQueueSize += 1
-                lines.add(ChatLine("user", text, delivery = if (steering) "steering_queued" else "normal"))
+                lines.add(ChatLine("user", text, delivery = when { steering -> "steering_queued"; queued -> "follow_up"; else -> "normal" }))
                 runtime.launchTask {
-                    val behavior = if (steering) "steer" else null
+                    val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
                     bridge.prompt(text, behavior).fold(
                         onSuccess = { status = "Working" },
                         onFailure = {
@@ -1983,15 +2006,16 @@ LaunchedEffect(chatListState) {
                         model = modelLabel,
                         resourceSections = loadedResourceSections,
                         connected = connected,
+                        hideThinking = hideThinking,
                         onQuickCommand = { command -> executeInput(command) },
                         onFollowChange = { followOutput = it },
                         onUserScrollActivity = { showScrollControls = true },
                         onToggleLine = ::toggleLine
                     )
-                    Panel.Models -> ModelsPanel(models, currentState, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
+                    Panel.Models -> ModelsPanel(models, currentState, thinkingLevels, modelInitialSearch, defaultModelKey, { panel = Panel.Chat }, { model ->
                         bridge.saveDefaultModel(model); defaultModelKey = "${model.provider}/${model.id}"; addSystem("新对话默认模型：$defaultModelKey")
                     }, { model -> runtime.launchTask { bridge.setModel(model).fold(onSuccess = { refreshMeta(); addSystem("模型已切换为 ${model.provider}/${model.id}") }, onFailure = { addSystem("切换模型失败：${it.message}") }) } }, { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); addSystem("reasoning_effort = $level") }, onFailure = { addSystem("reasoning_effort 设置失败：${it.message}") }) } })
-                    Panel.Thinking -> ThinkingPanel(currentState?.thinkingLevel.orEmpty(), { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
+                    Panel.Thinking -> ThinkingPanel(thinkingLevels, currentState?.thinkingLevel.orEmpty(), { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
                     Panel.Bash -> BashPanel(bashInput, bashOutput, bashRunning, { bashInput = it }, { panel = Panel.Chat }, {
                         val command = bashInput.trim(); if (command.isNotBlank()) runtime.launchTask { bashRunning = true; bashOutput = "$ $command\n"; bridge.bash(command).fold(onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]" }, onFailure = { bashOutput += "ERROR: ${it.message}" }); bashRunning = false; refreshMeta() }
                     }, { val stop = runtime.stopCurrentAgent(); scope.launch { stop.await(); bashRunning = false } })
@@ -2004,12 +2028,17 @@ LaunchedEffect(chatListState) {
                     Panel.Diff -> TextPanel("Git diff", diffText) { panel = Panel.Chat }
                     Panel.Stats -> StatsPanel(currentStats, currentState) { panel = Panel.Chat }
                     Panel.Themes -> ThemesPanel(themeMode, { panel = Panel.Chat }, onTheme)
+                    Panel.Changelog -> ChangelogPanel(changelogText) { panel = Panel.Chat }
                     Panel.Settings -> SettingsPanel(
                         cwd = cwd,
                         launchCommand = launchCommand,
                         startupArguments = startupArguments,
                         connected = connected,
                         autoCompaction = currentState?.autoCompactionEnabled ?: true,
+                        steeringMode = currentState?.steeringMode ?: "one-at-a-time",
+                        followUpMode = currentState?.followUpMode ?: "one-at-a-time",
+                        autoRetry = autoRetry,
+                        hideThinking = hideThinking,
                         themeMode = themeMode,
                         onCwd = { value ->
                             cwd = value
@@ -2036,6 +2065,38 @@ LaunchedEffect(chatListState) {
                             }
                         },
                         onOpenPanel = { command -> executeInput(command) },
+                        onSteeringMode = { mode ->
+                            runtime.launchTask {
+                                bridge.setSteeringMode(mode).fold(
+                                    onSuccess = { refreshMeta(); addSystem("Steering 模式：$mode") },
+                                    onFailure = { addSystem("Steering 模式设置失败：${it.message}") }
+                                )
+                            }
+                        },
+                        onFollowUpMode = { mode ->
+                            runtime.launchTask {
+                                bridge.setFollowUpMode(mode).fold(
+                                    onSuccess = { refreshMeta(); addSystem("Follow-up 模式：$mode") },
+                                    onFailure = { addSystem("Follow-up 模式设置失败：${it.message}") }
+                                )
+                            }
+                        },
+                        onAutoRetry = { enabled ->
+                            runtime.launchTask {
+                                bridge.setAutoRetry(enabled).fold(
+                                    onSuccess = {
+                                        autoRetry = enabled
+                                        uiPreferences.edit().putBoolean("auto_retry", enabled).apply()
+                                        addSystem("自动重试：${if (enabled) "开启" else "关闭"}")
+                                    },
+                                    onFailure = { addSystem("自动重试设置失败：${it.message}") }
+                                )
+                            }
+                        },
+                        onHideThinking = { hidden ->
+                            hideThinking = hidden
+                            uiPreferences.edit().putBoolean("hide_thinking", hidden).apply()
+                        },
                         onBack = { panel = Panel.Chat }
                     )
                 }
@@ -2062,6 +2123,9 @@ LaunchedEffect(chatListState) {
                     onAttach = { attachmentNotice = ""; filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
                     onStop = { executeInput("/abort") },
+                    onFollowUp = {
+                        val value = input; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments, followUp = true)
+                    },
                     onPrimary = {
                         val value = input; if (value.trimStart().startsWith("/")) { keyboardController?.hide(); focusManager.clearFocus() }; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments)
                     }
@@ -2394,7 +2458,7 @@ private fun WelcomeState(cwd: String, model: String, connected: Boolean, onQuick
 }
 
 @Composable
-private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, onQuickCommand: (String) -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
+private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, hideThinking: Boolean, onQuickCommand: (String) -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
     fun isAtBottom(): Boolean = !listState.canScrollForward
     val userScrollLock = remember(listState) {
     object : NestedScrollConnection {
@@ -2428,21 +2492,21 @@ LaunchedEffect(listState) {
             SelectionContainer {
                 when (line.role) {
                     "user" -> Box(Modifier.fillMaxWidth().padding(start = 44.dp), contentAlignment = Alignment.CenterEnd) {
-                        val steering = line.delivery in setOf("steering", "steering_queued", "steering_sent", "steering_failed")
+                        val steering = line.delivery in setOf("steering", "steering_queued", "steering_sent", "steering_failed", "follow_up")
                         Column(Modifier.clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp)).background(UserBg).padding(horizontal = 14.dp, vertical = 10.dp)) {
                             if (steering) {
                                 val steeringColor = if (line.delivery == "steering_failed") Danger else Blue
                                 Row(Modifier.padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                     StatusDot(steeringColor, 6.dp)
                                     Spacer(Modifier.width(6.dp))
-                                    Text(when (line.delivery) { "steering_sent" -> "Steering · 已送达"; "steering_failed" -> "Steering · 发送失败"; else -> "Steering · 排队中" }, color = steeringColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(when (line.delivery) { "steering_sent" -> "Steering · 已送达"; "steering_failed" -> "Steering · 发送失败"; "follow_up" -> "Follow-up · 本轮结束后发送"; else -> "Steering · 排队中" }, color = steeringColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                             Text(visibleText, color = TextMain, fontSize = 15.sp, lineHeight = 22.sp)
                         }
                     }
                     "assistant" -> if (line.streaming) Text(visibleText, color = LocalPiColors.current.markdownText, fontSize = 15.sp, lineHeight = 23.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp)) else PiMarkdown(visibleText, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp))
-                    "thinking" -> Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                    "thinking" -> if (hideThinking) Text(if (line.streaming) "思考中…" else "思考过程已隐藏", color = TextMuted, fontStyle = FontStyle.Italic, fontSize = 12.sp) else Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                         Box(Modifier.width(2.dp).fillMaxHeight().clip(PillShape).background(Border))
                         Column(Modifier.padding(start = 12.dp)) {
                             Text(if (line.streaming) "思考中…" else "思考过程", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 2.dp))
@@ -2571,7 +2635,8 @@ private fun CommandPalette(query: String, local: List<LocalCommand>, remote: Lis
 }
 
 @Composable
-private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachment>, attachmentNotice: String, focusRequester: FocusRequester, onValue: (String) -> Unit, onAttach: () -> Unit, onRemoveAttachment: (PiAttachment) -> Unit, onStop: () -> Unit, onPrimary: () -> Unit) {
+@OptIn(ExperimentalFoundationApi::class)
+private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachment>, attachmentNotice: String, focusRequester: FocusRequester, onValue: (String) -> Unit, onAttach: () -> Unit, onRemoveAttachment: (PiAttachment) -> Unit, onStop: () -> Unit, onFollowUp: () -> Unit, onPrimary: () -> Unit) {
     val colors = LocalPiColors.current
     val composerShape = RoundedCornerShape(24.dp)
     val canSend = value.isNotBlank() || attachments.isNotEmpty()
@@ -2604,7 +2669,7 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
                 keyboardActions = KeyboardActions(onSend = { onPrimary() }),
                 decorationBox = { innerTextField ->
                     Box(contentAlignment = Alignment.CenterStart) {
-                        if (value.isEmpty()) Text(if (busy) "继续补充指令（steering）…" else "给 Pi 发消息，/ 查看命令", color = TextMuted, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (value.isEmpty()) Text(if (busy) "发送 = steer · 长按发送 = follow-up" else "给 Pi 发消息，/ 查看命令", color = TextMuted, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         innerTextField()
                     }
                 }
@@ -2614,7 +2679,13 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
                     .size(34.dp)
                     .clip(CircleShape)
                     .background(when { showStop -> TextMain; canSend -> Accent; else -> colors.disabledAction })
-                    .clickable(enabled = showStop || canSend) { if (showStop) onStop() else onPrimary() },
+                    // Native Pi: Enter steers the running agent, Alt+Enter queues a follow-up.
+                    // On mobile a long press on send queues the follow-up.
+                    .combinedClickable(
+                        enabled = showStop || canSend,
+                        onLongClick = if (busy && canSend) onFollowUp else null,
+                        onClick = { if (showStop) onStop() else onPrimary() }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 if (showStop) Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Bg))
@@ -2637,8 +2708,8 @@ private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComp
 }
 
 @Composable
-private fun ModelsPanel(models: List<PiModel>, state: PiState?, initialSearch: String, defaultModelKey: String, onBack: () -> Unit, onSetDefault: (PiModel) -> Unit, onPick: (PiModel) -> Unit, onEffort: (String) -> Unit) {
-    val effortLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"); var search by remember(initialSearch) { mutableStateOf(initialSearch) }; val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleModels = models.filter { model -> val searchable = "${model.provider} ${model.id} ${model.name}".lowercase(); tokens.all { it in searchable } }
+private fun ModelsPanel(models: List<PiModel>, state: PiState?, effortLevels: List<String>, initialSearch: String, defaultModelKey: String, onBack: () -> Unit, onSetDefault: (PiModel) -> Unit, onPick: (PiModel) -> Unit, onEffort: (String) -> Unit) {
+    var search by remember(initialSearch) { mutableStateOf(initialSearch) }; val tokens = search.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleModels = models.filter { model -> val searchable = "${model.provider} ${model.id} ${model.name}".lowercase(); tokens.all { it in searchable } }
     Column(Modifier.fillMaxSize()) {
         PanelHeader("模型", onBack, subtitle = state?.let { "${it.provider}/${it.modelId}" }.orEmpty())
         LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp)) {
@@ -2684,10 +2755,9 @@ private val thinkingDescriptions = mapOf(
 )
 
 @Composable
-private fun ThinkingPanel(current: String, onBack: () -> Unit, onPick: (String) -> Unit) {
-    val levels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+private fun ThinkingPanel(levels: List<String>, current: String, onBack: () -> Unit, onPick: (String) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        PanelHeader("思考强度", onBack, subtitle = "thinking level")
+        PanelHeader("思考强度", onBack, subtitle = "当前模型支持的 thinking level")
         PiCard(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
             levels.forEachIndexed { index, level ->
                 if (index > 0) HairlineDivider(Modifier.padding(horizontal = 16.dp))
@@ -2871,6 +2941,10 @@ private fun SettingsPanel(
     startupArguments: String,
     connected: Boolean,
     autoCompaction: Boolean,
+    steeringMode: String,
+    followUpMode: String,
+    autoRetry: Boolean,
+    hideThinking: Boolean,
     themeMode: PiThemeMode,
     onCwd: (String) -> Unit,
     onLaunch: (String) -> Unit,
@@ -2878,6 +2952,10 @@ private fun SettingsPanel(
     onConnect: () -> Unit,
     onAutoCompaction: (Boolean) -> Unit,
     onOpenPanel: (String) -> Unit,
+    onSteeringMode: (String) -> Unit,
+    onFollowUpMode: (String) -> Unit,
+    onAutoRetry: (Boolean) -> Unit,
+    onHideThinking: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
     val startupError = startupArgumentsError(startupArguments)
@@ -2936,6 +3014,18 @@ private fun SettingsPanel(
                 SettingRow("自动上下文压缩", "接近模型上下文上限时自动生成 compaction summary", onClick = if (connected) { { onAutoCompaction(!autoCompaction) } } else null) {
                     Switch(checked = autoCompaction, onCheckedChange = { onAutoCompaction(it) }, enabled = connected)
                 }
+                HairlineDivider(Modifier.padding(horizontal = 16.dp))
+                SettingRow("自动重试", "provider 临时错误（过载、限流）时自动重试", onClick = if (connected) { { onAutoRetry(!autoRetry) } } else null) {
+                    Switch(checked = autoRetry, onCheckedChange = { onAutoRetry(it) }, enabled = connected)
+                }
+                HairlineDivider(Modifier.padding(horizontal = 16.dp))
+                QueueModeRow("Steering 模式", "工作中发送的消息如何插入当前任务", steeringMode, connected, onSteeringMode)
+                HairlineDivider(Modifier.padding(horizontal = 16.dp))
+                QueueModeRow("Follow-up 模式", "长按发送排队的消息在本轮结束后如何发送", followUpMode, connected, onFollowUpMode)
+                HairlineDivider(Modifier.padding(horizontal = 16.dp))
+                SettingRow("隐藏思考过程", "只显示一行占位，不展开模型的 thinking 内容", onClick = { onHideThinking(!hideThinking) }) {
+                    Switch(checked = hideThinking, onCheckedChange = { onHideThinking(it) })
+                }
             }
 
             SectionLabel("常用", Modifier.padding(top = 20.dp))
@@ -2947,6 +3037,7 @@ private fun SettingsPanel(
                     Triple("Session 统计", "tokens、费用与上下文", "/session"),
                     Triple("文件", "浏览并编辑项目文件", "/files"),
                     Triple("Git diff", "查看未提交改动", "/diff"),
+                    Triple("更新日志", "Pi 与 Android 版本更新内容", "/changelog"),
                     Triple("终端", "通过 Pi RPC 执行 bash", "/run")
                 )
                 shortcuts.forEachIndexed { index, (title, subtitle, command) ->
@@ -2974,5 +3065,34 @@ private fun ExtensionDialog(request: PiUiRequest, input: String, onInput: (Strin
         "select" -> { val isSessionTree = request.title == "Session Tree"; var filter by remember(request.id) { mutableStateOf("") }; val tokens = filter.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }; val visibleOptions = if (tokens.isEmpty()) request.options else request.options.filter { option -> val searchable = option.lowercase(); tokens.all { it in searchable } }; val optionsState = rememberLazyListState(); LaunchedEffect(request.id, filter, visibleOptions.size) { if (isSessionTree && filter.isBlank()) { val currentIndex = visibleOptions.indexOfFirst { "◆" in it }; if (currentIndex >= 0) optionsState.scrollToItem(currentIndex) } }; AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "选择" }, fontWeight = FontWeight.SemiBold) }, text = { Column(Modifier.fillMaxWidth()) { if (isSessionTree) OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(bottom = 6.dp), placeholder = { Text("搜索消息、标签或节点 ID") }, leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = TextMuted) }, singleLine = true, shape = RoundedCornerShape(12.dp), colors = piFieldColors(), textStyle = TextStyle(fontSize = 13.sp)); if (isSessionTree) Text("◆ 当前消息 · ● 当前分支 · 共 ${visibleOptions.size} 条", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 4.dp)); LazyColumn(state = optionsState, modifier = Modifier.heightIn(max = if (isSessionTree) 500.dp else 460.dp)) { items(visibleOptions) { option -> Text(option, color = if (isSessionTree && ("◆" in option || "●" in option)) Accent else TextMain, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { onSelect(option) }.padding(horizontal = 8.dp, vertical = 10.dp)) } }; if (visibleOptions.isEmpty()) Text("没有匹配的节点", color = TextMuted, modifier = Modifier.padding(vertical = 12.dp)) } }, confirmButton = {}, dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = TextMuted) } }) }
         "confirm" -> AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "确认" }, fontWeight = FontWeight.SemiBold) }, text = { Text(request.message, lineHeight = 21.sp) }, confirmButton = { TextButton(onClick = { onConfirm(true) }) { Text("确认", fontWeight = FontWeight.SemiBold) } }, dismissButton = { TextButton(onClick = { onConfirm(false) }) { Text("取消", color = TextMuted) } })
         "input", "editor" -> AlertDialog(onDismissRequest = onDismiss, title = { Text(request.title.ifBlank { "输入" }, fontWeight = FontWeight.SemiBold) }, text = { OutlinedTextField(input, onInput, Modifier.fillMaxWidth().heightIn(min = if (request.method == "editor") 180.dp else 56.dp), placeholder = { Text(request.placeholder) }, singleLine = request.method == "input", shape = RoundedCornerShape(12.dp), colors = piFieldColors()) }, confirmButton = { TextButton(onClick = onSubmit) { Text("确定", fontWeight = FontWeight.SemiBold) } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = TextMuted) } })
+    }
+}
+
+@Composable
+private fun QueueModeRow(title: String, subtitle: String, mode: String, enabled: Boolean, onMode: (String) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        Text(subtitle, color = TextMuted, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("one-at-a-time" to "逐条", "all" to "全部一起").forEach { (value, label) ->
+                PiChip(label, { if (enabled && value != mode) onMode(value) }, selected = value == mode)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChangelogPanel(piChangelog: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val androidVersion = remember { runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty() }
+    val androidNotes = remember { ANDROID_CHANGELOG.joinToString("\n") { "- " + it.removePrefix("• ").trim() } }
+    Column(Modifier.fillMaxSize()) {
+        PanelHeader("更新日志", onBack, subtitle = "Pi 原生 /changelog")
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (piChangelog.isBlank()) Text("正在读取 Pi 更新日志…", color = TextMuted, fontSize = 14.sp)
+            else PiMarkdown(piChangelog, modifier = Modifier.fillMaxWidth())
+            HairlineDivider()
+            PiMarkdown("# Pi Android ${androidVersion}\n\n$androidNotes", modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp))
+        }
     }
 }

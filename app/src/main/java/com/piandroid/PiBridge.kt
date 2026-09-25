@@ -339,6 +339,26 @@ class PiBridge(
         return request("/thinking", JSONObject().put("level", level).toString(), SLOW_RPC_TIMEOUT_MS).map { Unit }
     }
 
+    suspend fun setSteeringMode(mode: String): Result<Unit> =
+        request("/steering-mode", JSONObject().put("mode", mode).toString()).map { Unit }
+
+    suspend fun setFollowUpMode(mode: String): Result<Unit> =
+        request("/follow-up-mode", JSONObject().put("mode", mode).toString()).map { Unit }
+
+    suspend fun setAutoRetry(enabled: Boolean): Result<Unit> =
+        request("/auto-retry", JSONObject().put("enabled", enabled).toString()).map { Unit }
+
+    /** Thinking levels the current model actually supports (native /thinking only offers these). */
+    suspend fun thinkingLevels(): Result<List<String>> = rpcData("/thinking-levels").mapCatching { data ->
+        val array = data.optJSONArray("levels") ?: JSONArray()
+        List(array.length()) { array.optString(it) }.filter { it.isNotBlank() }
+    }
+
+    suspend fun changelog(limit: Int = 3): Result<Pair<String, String>> = request("/changelog?limit=$limit", null).mapCatching { raw ->
+        val json = JSONObject(raw)
+        json.optString("version") to json.optString("text")
+    }
+
     suspend fun setAutoCompaction(enabled: Boolean): Result<Unit> {
         return request("/auto-compaction", JSONObject().put("enabled", enabled).toString()).map { Unit }
     }
@@ -459,7 +479,9 @@ class PiBridge(
             piConversationId = data.optString("sessionId"),
             sessionName = data.optString("sessionName"),
             messageCount = data.optInt("messageCount"),
-            autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
+            autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true),
+            steeringMode = data.optString("steeringMode").ifBlank { "one-at-a-time" },
+            followUpMode = data.optString("followUpMode").ifBlank { "one-at-a-time" }
         )
         if (state.sessionFile.isNotBlank()) {
             val preferences = runtimePreferences()
@@ -799,7 +821,10 @@ data class PiState(
     val piConversationId: String,
     val sessionName: String,
     val messageCount: Int,
-    val autoCompactionEnabled: Boolean
+    val autoCompactionEnabled: Boolean,
+    /** Pi queue delivery: "one-at-a-time" or "all" (native /settings). */
+    val steeringMode: String = "one-at-a-time",
+    val followUpMode: String = "one-at-a-time"
 )
 data class PiStats(
     val sessionFile: String,

@@ -16,6 +16,7 @@ on:
       - "tools/test_mobile_resume.mjs"
       - "tools/test_stop_fence.mjs"
       - "tools/test_themes.mjs"
+      - "tools/test_native_settings.mjs"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle/**"
@@ -54,6 +55,7 @@ jobs:
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_tree.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_fork.mjs
           PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_mobile_resources.mjs
+          PI_BIN="$(npm root --global)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" node tools/test_native_settings.mjs
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
