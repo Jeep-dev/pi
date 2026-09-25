@@ -46,4 +46,11 @@ assert.ok(runtime.includes("bridge.stream("), "event loop must use the push stre
 assert.ok(!runtime.includes("bridge.events("), "event loop must not long-poll /events");
 assert.ok(runtime.includes("patientHealth()"), "attach must wait for a thawing Bridge before declaring it dead");
 assert.ok(bridge.includes('url.pathname === "/stream"'), "bridge must serve the push stream");
+// A frozen Termux must be woken, not replaced, and the keep-alive must survive it.
+const keepAlive = await readFile("app/src/main/java/com/piandroid/AgentKeepAliveService.kt", "utf8");
+assert.ok(runtime.includes("wakeTermuxIfDue()"), "runtime must wake a frozen Termux before giving up on it");
+assert.ok(/lastHealthError\.isSocketTimeoutFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRACE_MS[\s\S]*?installAndStartBridge\(\)/.test(runtime), "an unanswering Bridge must get a grace window before relaunch");
+assert.ok(runtime.includes("isRetryableConnectFailure(error)"), "a failed first connect must retry");
+assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a Termux that stopped answering");
+assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");
 console.log("Reconnect-without-restart guards passed");
