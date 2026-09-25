@@ -1539,7 +1539,9 @@ private fun PiScreen(
                 |• ! 执行 bash 并加入上下文；!! 执行但不加入上下文""".trimMargin()
             )
             "/changelog" -> addSystem(
-                """Pi Android v5.19.21
+                """Pi Android v5.19.29
+                |• 后台被系统冻结的 Termux 会被自动唤醒，回到前台即可恢复连接，不重启 Pi
+                |• 重连失败时在聊天区显示原因；自动重连有次数上限，之后提示手动 Connect
                 |• 自动跟随只在用户实际滚离底部后关闭；底部触摸/无效拖动不再误关 follow
                 |• 监听 LazyColumn 实际布局变化，web search / Markdown / 工具卡延迟变高也会重新贴底
                 |• 工具执行时间写入 durable history，恢复、重连和 /resume 后仍保留
