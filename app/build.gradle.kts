@@ -16,6 +16,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        // CI builds carry their run number and commit, e.g. 5.19.27+ci371.aacaf7e,
+        // so installs of same-version builds can be told apart in App info.
+        val ciRun = System.getenv("GITHUB_RUN_NUMBER")
+        val ciSha = System.getenv("GITHUB_SHA")?.take(7)
+        if (!ciRun.isNullOrBlank() && !ciSha.isNullOrBlank()) versionNameSuffix = "+ci$ciRun.$ciSha"
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
