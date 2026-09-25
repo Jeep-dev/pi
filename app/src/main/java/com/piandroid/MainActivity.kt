@@ -536,9 +536,10 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            // A reconnecting runtime may be about to resume a working agent;
-            // keep the service so recovery is not suspended in the background.
-            if (merged.any { it.status == PiSessionStatus.WORKING } || PiRecoveryTracker.anyRecovering()) {
+            // Keep the service while any Session is online, idle included, and while a
+            // reconnecting runtime may be about to resume a working agent.
+            val online = merged.any { it.status == PiSessionStatus.WORKING || it.status == PiSessionStatus.IDLE }
+            if (online || PiRecoveryTracker.anyRecovering()) {
                 AgentKeepAliveService.start(context)
             } else {
                 AgentKeepAliveService.stop(context)
@@ -1292,11 +1293,8 @@ private fun PiScreen(
         panel = Panel.Chat
         refreshMeta()
         requestLoadedResources()
-        if (currentState?.streaming == true || currentState?.compacting == true) {
-            AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
-        } else {
-            AgentKeepAliveService.stop(bridge.applicationContext())
-        }
+        // A connected Session is online, so keep the service even when Pi is idle.
+        AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
     }
 
     val connect: () -> Unit = connect@{

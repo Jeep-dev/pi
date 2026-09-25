@@ -82,7 +82,7 @@ class AgentKeepAliveService : Service() {
                 val uncertain = recovering || probes.any { (probe, _) -> probe == KeepAliveProbe.UNKNOWN }
                 // An unreachable or reconnecting Session is not idle: stopping here
                 // would release the wake lock exactly when recovery needs it.
-                if (policy.shouldStop(probes.map { it.first }, recovering)) {
+                if (policy.shouldStop(probes.map { it.first }, recovering, anyOnline = running > 0)) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     return@launch
@@ -91,7 +91,7 @@ class AgentKeepAliveService : Service() {
                     when {
                         working > 0 -> "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
                         uncertain -> "正在重连 Pi · 共 $running 个在线"
-                        running > 0 -> "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
+                        running > 0 -> "$running 个 Pi Session 在线，当前空闲 · 保活中"
                         else -> "没有在线 Pi · 即将停止保活"
                     }
                 )
