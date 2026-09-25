@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -24,7 +26,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-14.3"
+    private val expectedBridgeVersion = "2026-09-25.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -36,6 +38,8 @@ class PiBridge(
         "hard-stop-v1",
         "conversation-owner-v1",
         "tool-history-metadata-v1",
+        "native-settings-v1",
+        "sse-stream-v1",
         "tool-args-lossless-v1",
         "cwd-shared-resume-v1",
         "closed-session-resume-v1"
@@ -126,13 +130,6 @@ class PiBridge(
         return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 $remoteLogFile"))
     }
 
-    suspend fun attachToRunningBridge(): Result<PiState> = runCatching {
-        waitForBridge(1_500).getOrThrow()
-        val health = health().getOrThrow()
-        check(health.piRunning) { "Pi is not running" }
-        state(3_000).getOrThrow()
-    }
-
     suspend fun start(cwd: String, launchCommand: String): Result<PiState> {
         val body = JSONObject().put("cwd", cwd).put("launchCommand", launchCommand).toString()
         return request("/start", body, 65_000).mapCatching {
@@ -158,7 +155,11 @@ class PiBridge(
             piPid = root.optLong("piPid"),
             port = root.optInt("port"),
             runtimeOwnerSessionId = root.optString("endpointKey"),
-            stopInProgress = root.optBoolean("stopInProgress")
+            stopInProgress = root.optBoolean("stopInProgress"),
+            compatible = root.optString("bridgeVersion") == expectedBridgeVersion &&
+                (root.optJSONArray("capabilities") ?: JSONArray()).let { array ->
+                    requiredBridgeCapabilities.all { required -> (0 until array.length()).any { array.optString(it) == required } }
+                }
         )
     }
 
@@ -420,6 +421,64 @@ class PiBridge(
             if (cancelled) put("cancelled", true)
         }
         return request("/extension-ui", body.toString()).map { Unit }
+    }
+
+    /**
+     * Hold one text/event-stream open and deliver every batch in order. Returns
+     * normally when the server ends the stream; throws on socket failure. The
+     * Bridge sends a heartbeat every 10s, so a read timeout means a dead link,
+     * never a quiet agent. [onOpen] fires once the first frame arrives.
+     */
+    suspend fun stream(after: Long, onOpen: () -> Unit, onBatch: suspend (PiEventBatch) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val connection = (URL("http://127.0.0.1:$port/stream?after=$after").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8_000
+                readTimeout = 30_000
+                useCaches = false
+                setRequestProperty("Authorization", "Bearer $authToken")
+                setRequestProperty("Accept", "text/event-stream")
+            }
+            val job = coroutineContext[Job]
+            // Blocking reads ignore cancellation; closing the socket unblocks them.
+            val cancelHandle = job?.invokeOnCompletion { connection.disconnect() }
+            try {
+                val code = connection.responseCode
+                check(code == 200) { "stream HTTP $code" }
+                val reader = connection.inputStream.bufferedReader(Charsets.UTF_8)
+                val data = StringBuilder()
+                var opened = false
+                while (true) {
+                    job?.ensureActive()
+                    val line = reader.readLine() ?: break
+                    when {
+                        line.isEmpty() -> if (data.isNotEmpty()) {
+                            val batch = parseEventBatch(JSONObject(data.toString()), after)
+                            data.setLength(0)
+                            if (!opened) { opened = true; onOpen() }
+                            onBatch(batch)
+                        }
+                        line.startsWith("data:") -> data.append(line.removePrefix("data:").trimStart())
+                        else -> Unit // ": ping" heartbeat or unknown field
+                    }
+                }
+            } finally {
+                cancelHandle?.dispose()
+                connection.disconnect()
+            }
+        }
+    }
+
+    private fun parseEventBatch(root: JSONObject, after: Long): PiEventBatch {
+        val array = root.optJSONArray("events") ?: JSONArray()
+        val parsed = buildList {
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val value = item.optJSONObject("value") ?: JSONObject().put("type", "raw").put("line", item.optString("value"))
+                add(parseEvent(item.optLong("seq"), value))
+            }
+        }
+        return PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
     }
 
     suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 35_000).mapCatching { raw ->
@@ -803,7 +862,9 @@ data class PiHealth(
     val piPid: Long = 0L,
     val port: Int = 0,
     val runtimeOwnerSessionId: String = "",
-    val stopInProgress: Boolean = false
+    val stopInProgress: Boolean = false,
+    /** Bridge build matches this APK; an incompatible bridge must be replaced (only while Pi is idle). */
+    val compatible: Boolean = true
 )
 
 data class PiQueue(

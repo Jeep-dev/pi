@@ -36,3 +36,14 @@ assert.ok(main.includes("line.toolDurationMs >= 0L"), "tool renderer must prefer
 assert.ok(extras.includes("val toolDurationMs: Long = -1L"), "history DTO must carry tool duration metadata");
 assert.ok(bridge.includes("tool-history-metadata-v1"), "bridge must advertise durable tool-history metadata");
 assert.ok(bridge.includes("row.toolDurationMs = startedAtMs > 0"), "durable history must derive tool duration from persisted session timestamps");
+
+// Reconnect must never kill Pi: the Bridge is replaced only when it is gone or
+// from an older APK, and the event loop rides the push stream.
+const relaunches = runtime.split("installAndStartBridge()").length - 1;
+assert.equal(relaunches, 1, "Bridge relaunch must have exactly one guarded call site");
+assert.ok(/if \(!bridgeUsable\) \{[\s\S]*?installAndStartBridge\(\)/.test(runtime), "Bridge relaunch must be guarded by bridgeUsable");
+assert.ok(runtime.includes("bridge.stream("), "event loop must use the push stream");
+assert.ok(!runtime.includes("bridge.events("), "event loop must not long-poll /events");
+assert.ok(runtime.includes("patientHealth()"), "attach must wait for a thawing Bridge before declaring it dead");
+assert.ok(bridge.includes('url.pathname === "/stream"'), "bridge must serve the push stream");
+console.log("Reconnect-without-restart guards passed");

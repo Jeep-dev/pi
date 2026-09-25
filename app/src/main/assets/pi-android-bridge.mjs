@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-14.3";
+const bridgeVersion = "2026-09-25.1";
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -25,6 +25,7 @@ const bridgeCapabilities = [
   "conversation-owner-v1",
   "tool-history-metadata-v1",
   "native-settings-v1",
+  "sse-stream-v1",
   "tool-args-lossless-v1",
   "cwd-shared-resume-v1",
   "closed-session-resume-v1",
@@ -57,6 +58,9 @@ let eventBytes = 0;
 const responseEventSequence = Symbol("responseEventSequence");
 const pending = new Map();
 const eventWaiters = new Set();
+// Open /stream subscribers. Each is a flush function that pushes unsent events.
+const streamClients = new Set();
+let streamFlushScheduled = false;
 const pendingUiRequests = new Map();
 const persistentUiEvents = new Map();
 let latestQueueEvent = null;
@@ -84,6 +88,14 @@ function addEvent(value) {
   }
   for (const wake of eventWaiters) wake();
   eventWaiters.clear();
+  // Coalesce bursts (streaming deltas) into one frame per tick for every subscriber.
+  if (streamClients.size && !streamFlushScheduled) {
+    streamFlushScheduled = true;
+    setImmediate(() => {
+      streamFlushScheduled = false;
+      for (const flush of streamClients) flush();
+    });
+  }
 }
 
 function waitForEvent(after, timeoutMs) {
@@ -1287,6 +1299,44 @@ const server = http.createServer(async (req, res) => {
       pendingUiRequests.delete(String(input.id || ""));
       sendRaw({ type: "extension_ui_response", ...input });
       return send(res, 200, { ok: true });
+    }
+
+    // Push transport: one long-lived text/event-stream per client. Each frame
+    // carries the same batch shape as /events. Comment heartbeats every 10s let
+    // the client tell a dead socket from a quiet agent without restarting Pi.
+    if (req.method === "GET" && url.pathname === "/stream") {
+      let cursor = Math.max(0, Number(url.searchParams.get("after") || 0));
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        connection: "keep-alive",
+      });
+      req.socket.setTimeout(0);
+      req.socket.setNoDelay(true);
+      req.socket.setKeepAlive(true, 10_000);
+      const flush = (force = false) => {
+        if (res.writableEnded || res.destroyed) return;
+        const earliest = events[0]?.seq ?? sequence;
+        const gap = cursor > sequence || (cursor > 0 && cursor < earliest - 1);
+        const batch = gap ? [] : events.filter(item => item.seq > cursor);
+        if (!force && !gap && batch.length === 0) return;
+        res.write(`data: ${JSON.stringify({ events: batch, latest: sequence, earliest, gap })}\n\n`);
+        cursor = sequence;
+      };
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded && !res.destroyed) res.write(`: ping ${sequence}\n\n`);
+      }, 10_000);
+      const close = () => {
+        clearInterval(heartbeat);
+        streamClients.delete(flush);
+      };
+      req.on("close", close);
+      res.on("close", close);
+      res.on("error", close);
+      streamClients.add(flush);
+      // First frame always goes out so the client knows the stream is live.
+      flush(true);
+      return;
     }
 
     if (req.method === "GET" && url.pathname === "/events") {

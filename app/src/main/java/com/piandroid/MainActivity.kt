@@ -471,10 +471,9 @@ private fun bridgeHealthDiagnostic(health: PiHealth): String = listOf(
 
 private suspend fun pollPiSession(context: Context, record: PiSessionRecord): PiSessionRecord {
     val bridge = PiBridge(context, record.port, record.token, record.androidSessionId)
-    val health = bridge.health(timeoutMs = 2_500).getOrNull()
-        ?: return record.copy(
-            status = if (record.lastError.isBlank()) PiSessionStatus.NOT_STARTED else PiSessionStatus.ERROR
-        )
+    // A slow answer (Termux thawing from Doze) is not a status change. The
+    // Session's own runtime owns reconnects; this poll only refreshes the drawer.
+    val health = bridge.health(timeoutMs = 6_000).getOrNull() ?: return record
     if (!health.piRunning) {
         val diagnostic = bridgeHealthDiagnostic(health)
         return record.copy(
@@ -483,11 +482,7 @@ private suspend fun pollPiSession(context: Context, record: PiSessionRecord): Pi
             lastError = diagnostic.ifBlank { record.lastError }
         )
     }
-    val stateResult = bridge.state(timeoutMs = 4_000)
-    val state = stateResult.getOrElse {
-        val detail = listOf(it.message.orEmpty(), bridgeHealthDiagnostic(health)).filter { text -> text.isNotBlank() }.joinToString("\n")
-        return record.copy(status = PiSessionStatus.ERROR, lastError = detail.ifBlank { "无法读取 Pi 状态" })
-    }
+    val state = bridge.state(timeoutMs = 8_000).getOrNull() ?: return record
     if (health.runtimeOwnerSessionId != record.androidSessionId || !runtimeConversationMatches(record, state)) {
         return record.copy(
             status = PiSessionStatus.ERROR,
@@ -618,7 +613,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
             } else {
                 AgentKeepAliveService.stop(context)
             }
-            delay(3_000)
+            delay(10_000)
         }
     }
 
