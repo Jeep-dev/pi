@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.37 build 137: redesigned UI, native Pi commands, push-stream reconnect, always-on keep-alive.
+// v5.19.38 build 138: wake frozen Termux instead of restarting the Bridge, retry the first connect, keep the keep-alive while Pi does not answer.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -24,8 +24,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 137
-        versionName = "5.19.37"
+        versionCode = 138
+        versionName = "5.19.38"
     }
 
     signingConfigs {

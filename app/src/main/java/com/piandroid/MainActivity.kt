@@ -608,11 +608,12 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                 sessions = merged
                 sessionStore.save(merged, latestActiveId)
             }
-            // Keep the service while any Session is online, idle included.
+            // Keep the service while any Session is online, idle included. Only the
+            // service stops itself, after every Session stays confirmed offline: a
+            // Session marked failed while it reconnects must not drop the keep-alive,
+            // because Android refuses to start it again from the background.
             if (merged.any { it.status == PiSessionStatus.WORKING || it.status == PiSessionStatus.IDLE }) {
                 AgentKeepAliveService.start(context)
-            } else {
-                AgentKeepAliveService.stop(context)
             }
             delay(10_000)
         }

@@ -80,7 +80,7 @@ class PiBridge(
     }
 
     suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
+        if (!termuxAvailable()) return@withContext Result.failure(TermuxSetupException("请先安装 Termux"))
         runCatching {
             request("/shutdown", "{}", 2_000)
             delay(750)
@@ -776,6 +776,15 @@ class PiBridge(
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
+    /**
+     * Run a no-op in Termux. Starting Termux's command service thaws a Termux the
+     * system froze in the background, and with it this Bridge and its Pi child,
+     * without restarting either. It also asks Termux to hold its wake lock so the
+     * Bridge keeps running while the screen is off.
+     */
+    suspend fun wakeTermux(): Result<Unit> =
+        runTermux("command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock; :")
+
     private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
@@ -785,7 +794,7 @@ class PiBridge(
             context.startService(intent)
             Result.success(Unit)
         } catch (_: SecurityException) {
-            Result.failure(IllegalStateException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
+            Result.failure(TermuxSetupException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -848,6 +857,20 @@ class PiBridge(
                 .edit().remove(preferenceKey).commit()
         }
     }
+}
+
+/** A local setup problem that retrying cannot fix; the user must act first. */
+class TermuxSetupException(message: String) : IllegalStateException(message)
+
+/** True when [this] or a cause is a socket timeout: something holds the port but did not answer. */
+internal fun Throwable?.isSocketTimeoutFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.SocketTimeoutException) return true
+        current = current.cause
+    }
+    return false
 }
 
 data class PiHealth(

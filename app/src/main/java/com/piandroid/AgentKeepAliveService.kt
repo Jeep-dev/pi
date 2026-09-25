@@ -27,6 +27,8 @@ class AgentKeepAliveService : Service() {
         private const val NOTIFICATION_ID = 17649
         private const val ACTION_STOP = "com.piandroid.STOP_LONG_TASK_KEEPALIVE"
         private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
+        /** Polls in a row with every Session confirmed offline before the service stops (~2 min). */
+        private const val OFFLINE_POLLS_TO_STOP = 8
 
         fun start(bridgeContext: Context) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
@@ -69,19 +71,30 @@ class AgentKeepAliveService : Service() {
                             record.token,
                             record.androidSessionId
                         )
-                        val health = endpoint.health(timeoutMs = 2_500).getOrNull()
+                        val healthResult = endpoint.health(timeoutMs = 2_500)
+                        val health = healthResult.getOrNull()
+                        // A timeout means something holds the port but did not answer:
+                        // usually Termux frozen in the background, not a dead Session.
+                        val unanswered = health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure()
+                        if (unanswered) endpoint.wakeTermux()
                         val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
-                        record to (health to state)
+                        Triple(record, health to state, unanswered)
                     }
                 }.awaitAll()
-                val working = probes.count { (_, result) ->
+                val working = probes.count { (_, result, _) ->
                     val state = result.second
                     state?.streaming == true || state?.compacting == true
                 }
-                val running = probes.count { (_, result) -> result.first?.piRunning == true }
-                // An online Session keeps the service even while idle; stop only once
-                // no Session has been online for two polls in a row.
-                if (working > 0 || running > 0) {
+                val running = probes.count { (_, result, _) -> result.first?.piRunning == true }
+                val unanswered = probes.count { (_, _, timedOut) -> timedOut }
+                // An online Session keeps the service even while idle. A Session that
+                // did not answer is not offline: stopping then released the wake lock
+                // and dropped the notification exactly while recovery needed them, and
+                // Android does not let the app restart the service from the background.
+                if (unanswered > 0 && working == 0 && running == 0) {
+                    idlePolls = 0
+                    updateNotification("Pi 暂时没有响应，正在唤醒 Termux · 保活中")
+                } else if (working > 0 || running > 0) {
                     failures = 0
                     idlePolls = 0
                     updateNotification(
@@ -90,7 +103,7 @@ class AgentKeepAliveService : Service() {
                     )
                 } else {
                     idlePolls++
-                    if (idlePolls >= 2) {
+                    if (idlePolls >= OFFLINE_POLLS_TO_STOP) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                         return@launch

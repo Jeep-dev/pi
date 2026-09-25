@@ -181,6 +181,14 @@ internal class PiSessionRuntime(
     private var lastState: PiState? = null
     private var lastSnapshot: PiRecoverySnapshot? = null
 
+    // Guarded by stateLock; throttles Termux wake-ups.
+    private var lastTermuxWakeAtMs = 0L
+
+    // Only touched under connectMutex: when the Bridge first held its port
+    // without answering, and why the last patient probe failed.
+    private var unresponsiveSinceMs = 0L
+    private var lastHealthError: Throwable? = null
+
     fun update(next: PiSessionRecord) {
         check(next.androidSessionId == runtimeOwnerSessionId) {
             "Runtime owner mismatch: owner=$runtimeOwnerSessionId record=${next.androidSessionId}"
@@ -402,13 +410,31 @@ internal class PiSessionRuntime(
         val startIfMissing = autoStartRequested
         val requestedRecord = record
         connectionJob = scope.launch {
-            var result = runCatching { connectInternal(requestedRecord, startIfMissing) }
+            var allowStart = startIfMissing
+            var result = runCatching { connectInternal(requestedRecord, allowStart) }
             // If an inactive tab was being probed while the user selected it,
             // promote that same runtime to an active start instead of waiting for
             // a second Compose effect.
             if (result.isFailure && result.exceptionOrNull() is RuntimeUnavailable) {
                 val promote = synchronized(stateLock) { autoStartRequested && !startIfMissing && !closed }
-                if (promote) result = runCatching { connectInternal(currentRecord(), true) }
+                if (promote) {
+                    allowStart = true
+                    result = runCatching { connectInternal(currentRecord(), true) }
+                }
+            }
+            // A first connect that fails (Termux frozen or still starting after the
+            // process was killed in the background) used to stop at "connection
+            // failed" until the user tapped Connect. Keep retrying with backoff
+            // while this Session is meant to run.
+            var retryDelayMs = FIRST_CONNECT_RETRY_MIN_MS
+            while (result.isFailure && allowStart) {
+                val error = result.exceptionOrNull() ?: break
+                if (!isRetryableConnectFailure(error) || !shouldKeepConnecting()) break
+                updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+                delay(retryDelayMs)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(FIRST_CONNECT_RETRY_MAX_MS)
+                if (!shouldKeepConnecting()) break
+                result = runCatching { connectInternal(currentRecord(), true) }
             }
             if (result.isSuccess) {
                 if (publishReady(result.getOrThrow())) {
@@ -459,9 +485,34 @@ internal class PiSessionRuntime(
     private suspend fun patientHealth(totalMillis: Long = 12_000): PiHealth? {
         val deadline = android.os.SystemClock.elapsedRealtime() + totalMillis
         while (true) {
-            bridge.health(timeoutMs = 4_000).getOrNull()?.let { return it }
+            val result = bridge.health(timeoutMs = 4_000)
+            result.getOrNull()?.let {
+                lastHealthError = null
+                unresponsiveSinceMs = 0L
+                return it
+            }
+            val error = result.exceptionOrNull()
+            lastHealthError = error
+            // Waiting alone does not thaw a Termux the system froze; poke it.
+            if (error.isSocketTimeoutFailure()) wakeTermuxIfDue()
             if (android.os.SystemClock.elapsedRealtime() >= deadline) return null
             delay(1_000)
+        }
+    }
+
+    /** Thaw a Termux that stopped answering; at most once per [TERMUX_WAKE_INTERVAL_MS]. */
+    private suspend fun wakeTermuxIfDue() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val due = synchronized(stateLock) {
+            if (closed || (lastTermuxWakeAtMs != 0L && now - lastTermuxWakeAtMs < TERMUX_WAKE_INTERVAL_MS)) false
+            else {
+                lastTermuxWakeAtMs = now
+                true
+            }
+        }
+        if (!due) return
+        bridge.wakeTermux().onFailure {
+            Log.w(PI_SESSION_IDENTITY_TAG, "WAKE_TERMUX failed androidSessionId=$runtimeOwnerSessionId", it)
         }
     }
 
@@ -480,6 +531,17 @@ internal class PiSessionRuntime(
         if (!bridgeUsable) {
             if (!allowStart) throw RuntimeUnavailable()
             val current = health
+            if (current == null && lastHealthError.isSocketTimeoutFailure()) {
+                // Something holds the port but does not answer: a frozen Termux,
+                // not a dead Bridge. Relaunching kills Pi and any running task, so
+                // keep waking Termux and only replace a Bridge that stays hung.
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (unresponsiveSinceMs == 0L) unresponsiveSinceMs = now
+                if (now - unresponsiveSinceMs < FROZEN_BRIDGE_GRACE_MS) {
+                    throw BridgeUnresponsive(lastHealthError)
+                }
+            }
+            unresponsiveSinceMs = 0L
             if (current != null && current.piRunning) {
                 val busy = bridge.state(timeoutMs = 8_000).getOrNull()
                 check(busy?.streaming != true && busy?.compacting != true) {
@@ -665,6 +727,7 @@ internal class PiSessionRuntime(
             if (error == null || error is StaleGeneration) continue
 
             failures++
+            if (error.isSocketTimeoutFailure()) wakeTermuxIfDue()
             val now = android.os.SystemClock.elapsedRealtime()
             if (offlineSince == 0L) offlineSince = now
             val offlineFor = now - offlineSince
@@ -707,12 +770,20 @@ internal class PiSessionRuntime(
         !closed && conversationGeneration == expected
     }
     private fun canRecover(): Boolean = synchronized(stateLock) { !closed && recoveryEnabled }
+    private fun shouldKeepConnecting(): Boolean = synchronized(stateLock) {
+        !closed && !connected && recoveryEnabled && autoStartRequested
+    }
+    private fun isRetryableConnectFailure(error: Throwable): Boolean =
+        error !is RuntimeUnavailable && error !is TermuxSetupException && error !is CancellationException
     private fun isClosed(): Boolean = synchronized(stateLock) { closed }
 
     private fun sameCwd(configured: String, running: String): Boolean =
         configured.trim().isNotBlank() && running.trim().isNotBlank() && configured.trim() == running.trim()
 
     private class RuntimeUnavailable : IllegalStateException("Pi runtime is not running")
+
+    private class BridgeUnresponsive(cause: Throwable?) :
+        IllegalStateException("Termux 没有响应，正在唤醒；暂不重启 Bridge 以免中断任务", cause)
     /** Ends the current stream so the loop reopens it from a fresh cursor/generation. */
     private class StaleGeneration : IllegalStateException("stale stream generation")
 
@@ -721,6 +792,11 @@ internal class PiSessionRuntime(
         const val RECONNECT_NOTICE_MS = 8_000L
         /** Only this long without any Bridge answer counts as a dead Bridge. */
         const val BRIDGE_DEAD_MS = 45_000L
+        /** A Bridge that holds its port but never answers is replaced only after this long. */
+        const val FROZEN_BRIDGE_GRACE_MS = 3 * 60_000L
+        const val TERMUX_WAKE_INTERVAL_MS = 10_000L
+        const val FIRST_CONNECT_RETRY_MIN_MS = 2_000L
+        const val FIRST_CONNECT_RETRY_MAX_MS = 30_000L
     }
 }
 
