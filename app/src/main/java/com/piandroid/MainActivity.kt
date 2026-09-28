@@ -257,6 +257,8 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 修复一直卡在「重连中」：Pi 退出后重启失败时会持续重试；Bridge 和 Pi 都正常时自动恢复为就绪",
+    "• Bridge 日志记录启动、Pi 退出码/信号和异常，方便查掉线原因；单个请求出错不再拖垮整个 Bridge",
     "• 5.19.38：后台 Termux 冻结时先唤醒，不再直接重启 Bridge；保活通知在重连期间保留；首次连接失败自动重试",
     "• 去掉顶部连接按钮：Session 掉线后自动重新连接（/quit 之后除外）",
     "• 工具卡片里被折行截断的命令/输出也能 Show all 展开",

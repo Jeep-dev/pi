@@ -10,7 +10,15 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-25.1";
+const bridgeVersion = "2026-09-28.1";
+
+// Lifecycle lines go to stderr, which the launcher appends to bridge.log. They are
+// the evidence for why a Session dropped: which process ended, with what code or
+// signal, and when. A SIGKILL here with nothing logged before it means Android
+// killed the process from outside.
+function lifecycleLog(message) {
+  try { process.stderr.write(`[${new Date().toISOString()}] pid=${process.pid} ${message}\n`); } catch {}
+}
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -305,7 +313,9 @@ async function startPi(nextCwd, nextLaunchCommand) {
     lastStderr = (lastStderr + `\n${error.message}`).slice(-8000);
     addEvent({ type: "stderr", text: error.message });
   });
+  lifecycleLog(`pi started pid=${startedChild.pid} cwd=${cwd}`);
   startedChild.on("exit", (code, signal) => {
+    lifecycleLog(`pi exited pid=${startedChild.pid} code=${code} signal=${signal} current=${child === startedChild} stderr=${JSON.stringify(lastStderr.slice(-400))}`);
     if (child !== startedChild) return;
     lastExit = { code, signal };
     addEvent({ type: "process_exit", code, signal, stderr: lastStderr, stdout: lastStdoutTail });
@@ -1009,7 +1019,8 @@ async function sessionStats() {
 
 let shuttingDown = false;
 
-function shutdownBridge() {
+function shutdownBridge(reason = "shutdown") {
+  lifecycleLog(`bridge stopping: ${reason}`);
   if (shuttingDown) return;
   shuttingDown = true;
   try { stopPi(); } catch {}
@@ -1022,8 +1033,15 @@ function shutdownBridge() {
   }
 }
 
-process.on("SIGTERM", shutdownBridge);
-process.on("SIGINT", shutdownBridge);
+process.on("SIGTERM", () => shutdownBridge("SIGTERM"));
+process.on("SIGINT", () => shutdownBridge("SIGINT"));
+// A hang-up from the Termux task that launched us is not a reason to drop Pi.
+process.on("SIGHUP", () => lifecycleLog("SIGHUP ignored"));
+// An unexpected error in one request handler must not take the whole Bridge (and
+// every running Pi task) down; log it and keep serving.
+process.on("uncaughtException", error => lifecycleLog(`uncaughtException ${error?.stack || error}`));
+process.on("unhandledRejection", error => lifecycleLog(`unhandledRejection ${error?.stack || error}`));
+process.on("exit", code => lifecycleLog(`bridge exit code=${code}`));
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -1421,4 +1439,5 @@ server.timeout = 0;
 server.listen(port, "127.0.0.1", () => {
   writeFileSync(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
   console.log(`Pi Android bridge ${bridgeVersion} listening on 127.0.0.1:${port}`);
+  lifecycleLog(`bridge listening version=${bridgeVersion} port=${port}`);
 });

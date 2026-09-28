@@ -53,4 +53,6 @@ assert.ok(/lastHealthError\.isSocketTimeoutFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRAC
 assert.ok(runtime.includes("isRetryableConnectFailure(error)"), "a failed first connect must retry");
 assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a Termux that stopped answering");
 assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");
+assert.ok(runtime.includes("reconcileDegraded(generation)"), "a reconnecting header must be re-checked against the live Bridge");
+assert.equal(runtime.split("updatesMutable.emit(PiRuntimeUpdate.Reconnecting(").length - 1, 1, "every Reconnecting must go through emitReconnecting so it can be cleared");
 console.log("Reconnect-without-restart guards passed");

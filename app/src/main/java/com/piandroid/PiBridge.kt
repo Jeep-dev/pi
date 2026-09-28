@@ -26,7 +26,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-25.1"
+    private val expectedBridgeVersion = "2026-09-28.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -429,7 +429,12 @@ class PiBridge(
      * Bridge sends a heartbeat every 10s, so a read timeout means a dead link,
      * never a quiet agent. [onOpen] fires once the first frame arrives.
      */
-    suspend fun stream(after: Long, onOpen: () -> Unit, onBatch: suspend (PiEventBatch) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun stream(
+        after: Long,
+        onOpen: () -> Unit,
+        keepOpen: () -> Boolean = { true },
+        onBatch: suspend (PiEventBatch) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = (URL("http://127.0.0.1:$port/stream?after=$after").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -451,6 +456,7 @@ class PiBridge(
                 while (true) {
                     job?.ensureActive()
                     val line = reader.readLine() ?: break
+                    if (!keepOpen()) break
                     when {
                         line.isEmpty() -> if (data.isNotEmpty()) {
                             val batch = parseEventBatch(JSONObject(data.toString()), after)
