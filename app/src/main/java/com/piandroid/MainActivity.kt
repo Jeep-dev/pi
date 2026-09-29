@@ -177,6 +177,15 @@ class MainActivity : ComponentActivity() {
         setContent { PiTouchApp(runtimeManager) }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Coming back from the background: thaw Termux now and let every Session
+        // probe its Bridge at once instead of finishing a backoff or a 25s read.
+        if (started) runtimeManager.onForeground()
+        started = true
+    }
+    private var started = false
+
     override fun onDestroy() {
         runtimeManager.close()
         super.onDestroy()
@@ -257,6 +266,9 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 新建 Session 更快：不再白等 12 秒才启动 Bridge；旧 Session 残留的 Bridge 占着端口时直接清掉，不再卡几分钟",
+    "• 回到前台立刻唤醒 Termux 并重新探测；推送流 25 秒无心跳就提示重连，不再像没反应",
+    "• 唤醒 Termux 改成轻量命令，全 App 共用节流；Bridge 处理超大历史不再卡住，端口冲突会明确报错",
     "• 修复一直卡在「重连中」：Pi 退出后重启失败时会持续重试；Bridge 和 Pi 都正常时自动恢复为就绪",
     "• Bridge 日志记录启动、Pi 退出码/信号和异常，方便查掉线原因；单个请求出错不再拖垮整个 Bridge",
     "• 5.19.38：后台 Termux 冻结时先唤醒，不再直接重启 Bridge；保活通知在重连期间保留；首次连接失败自动重试",
@@ -984,6 +996,18 @@ private fun PiScreen(
         availableThinking.await()?.takeIf { it.isNotEmpty() }?.let { thinkingLevels = it }
     }
 
+    // Runs beside the update collector: awaiting it inline stopped every event from
+    // rendering while /stats or a connect holding the runtime lock was slow.
+    val metaJob = remember(runtime) { java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.Job?>(null) }
+    fun refreshMetaSoon(then: () -> Unit = {}) {
+        metaJob.getAndSet(
+            scope.launch {
+                refreshMeta()
+                then()
+            }
+        )?.cancel()
+    }
+
     fun requestLoadedResources(delayMillis: Long = 0L) {
         // This is an extension command, so older Pi runtimes simply do not
         // advertise it. Keep the legacy widget untouched in that case.
@@ -1234,7 +1258,7 @@ private fun PiScreen(
                 reconcileSteeringQueue(0)
                 status = "Ready"
                 updateSessionRecord { it.copy(status = PiSessionStatus.IDLE, lastError = "") }
-                refreshMeta()
+                refreshMetaSoon()
             }
             "message_update" -> when (event.subtype) {
                 "text_delta" -> appendStream("assistant", event.text)
@@ -1381,8 +1405,7 @@ private fun PiScreen(
             else -> "Ready"
         }
         panel = Panel.Chat
-        refreshMeta()
-        requestLoadedResources()
+        refreshMetaSoon { requestLoadedResources() }
         // A connected Session is online, so keep the service even when Pi is idle.
         AgentKeepAliveService.start(bridgeContext = bridge.applicationContext())
     }
@@ -1440,7 +1463,7 @@ private fun PiScreen(
                         currentState?.streaming == true -> "Working"
                         else -> "Ready"
                     }
-                    scope.launch { refreshMeta() }
+                    refreshMetaSoon()
                 }
                 is PiRuntimeUpdate.Unavailable -> {
                     connected = false
@@ -1465,7 +1488,19 @@ private fun PiScreen(
         }
     }
 
+    var screenAttached by remember(runtime) { mutableStateOf(false) }
+    var attachedLaunch by remember(runtime) { mutableStateOf("") }
     LaunchedEffect(runtime, autoStart, session.cwd, session.launchCommand, session.startupArguments, session.sessionFile) {
+        val launchKey = "$autoStart|${session.launchCommand}|${session.startupArguments}"
+        // The first Ready binds the conversation file (and expands ~ in cwd), which
+        // changes these keys. That is the runtime reporting what it already runs,
+        // not a request: do not tear the fresh stream down for a second full attach.
+        if (screenAttached && launchKey == attachedLaunch && runtime.alreadyRunning(session)) {
+            runtime.update(session)
+            return@LaunchedEffect
+        }
+        screenAttached = true
+        attachedLaunch = launchKey
         runtime.ensureConnected(session, autoStart)
     }
 
