@@ -536,13 +536,16 @@ internal class PiSessionRuntime(
         if (!bridgeUsable) {
             if (!allowStart) throw RuntimeUnavailable()
             val current = health
-            if (current == null && lastHealthError.isSocketTimeoutFailure()) {
-                // Something holds the port but does not answer: a frozen Termux,
-                // not a dead Bridge. Relaunching kills Pi and any running task, so
-                // keep waking Termux and only replace a Bridge that stays hung.
+            if (current == null && !lastHealthError.isConnectRefusedFailure()) {
+                // Relaunching kills Pi and any running task, so only a Bridge that is
+                // provably gone (connection refused: nothing listens on the port) is
+                // replaced at once. Anything else (a timeout from a frozen Termux, a
+                // reset, an error reply) means a process still holds the port; wake
+                // Termux and only replace a Bridge that stays like that.
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (unresponsiveSinceMs == 0L) unresponsiveSinceMs = now
                 if (now - unresponsiveSinceMs < FROZEN_BRIDGE_GRACE_MS) {
+                    wakeTermuxIfDue()
                     throw BridgeUnresponsive(lastHealthError)
                 }
             }
@@ -561,7 +564,13 @@ internal class PiSessionRuntime(
                 "BRIDGE_RELAUNCH androidSessionId=${configuredRecord.androidSessionId} reachable=${current != null} " +
                     "compatible=${current?.compatible} owner=${current?.runtimeOwnerSessionId.orEmpty()}"
             )
-            bridge.installAndStartBridge().getOrThrow()
+            val reason = when {
+                current == null -> "unreachable: ${lastHealthError?.javaClass?.simpleName}: ${lastHealthError?.message.orEmpty().take(120)}"
+                !current.compatible -> "incompatible bridge version"
+                else -> "owner mismatch ${current.runtimeOwnerSessionId}"
+            }
+            Log.w(PI_SESSION_IDENTITY_TAG, "BRIDGE_RELAUNCH_REASON androidSessionId=${configuredRecord.androidSessionId} $reason")
+            bridge.installAndStartBridge(reason).getOrThrow()
             bridge.waitForBridge(30_000).getOrThrow()
             health = bridge.health(timeoutMs = 8_000).getOrThrow()
         }

@@ -1093,8 +1093,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/shutdown") {
+      let reason = "shutdown request";
+      try { reason = String(JSON.parse(await readBody(req) || "{}").reason || reason).slice(0, 300); } catch {}
       send(res, 200, { ok: true });
-      setImmediate(shutdownBridge);
+      setImmediate(() => shutdownBridge(`/shutdown: ${reason}`));
       return;
     }
 

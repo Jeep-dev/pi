@@ -39,9 +39,9 @@ assert.ok(bridge.includes("row.toolDurationMs = startedAtMs > 0"), "durable hist
 
 // Reconnect must never kill Pi: the Bridge is replaced only when it is gone or
 // from an older APK, and the event loop rides the push stream.
-const relaunches = runtime.split("installAndStartBridge()").length - 1;
+const relaunches = runtime.split("installAndStartBridge(").length - 1;
 assert.equal(relaunches, 1, "Bridge relaunch must have exactly one guarded call site");
-assert.ok(/if \(!bridgeUsable\) \{[\s\S]*?installAndStartBridge\(\)/.test(runtime), "Bridge relaunch must be guarded by bridgeUsable");
+assert.ok(/if \(!bridgeUsable\) \{[\s\S]*?installAndStartBridge\(/.test(runtime), "Bridge relaunch must be guarded by bridgeUsable");
 assert.ok(runtime.includes("bridge.stream("), "event loop must use the push stream");
 assert.ok(!runtime.includes("bridge.events("), "event loop must not long-poll /events");
 assert.ok(runtime.includes("patientHealth()"), "attach must wait for a thawing Bridge before declaring it dead");
@@ -49,7 +49,7 @@ assert.ok(bridge.includes('url.pathname === "/stream"'), "bridge must serve the 
 // A frozen Termux must be woken, not replaced, and the keep-alive must survive it.
 const keepAlive = await readFile("app/src/main/java/com/piandroid/AgentKeepAliveService.kt", "utf8");
 assert.ok(runtime.includes("wakeTermuxIfDue()"), "runtime must wake a frozen Termux before giving up on it");
-assert.ok(/lastHealthError\.isSocketTimeoutFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRACE_MS[\s\S]*?installAndStartBridge\(\)/.test(runtime), "an unanswering Bridge must get a grace window before relaunch");
+assert.ok(/!lastHealthError\.isConnectRefusedFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRACE_MS[\s\S]*?installAndStartBridge\(/.test(runtime), "only a Bridge that refuses connections may be relaunched without a grace window");
 assert.ok(runtime.includes("isRetryableConnectFailure(error)"), "a failed first connect must retry");
 assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a Termux that stopped answering");
 assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");

@@ -72,17 +72,17 @@ class PiBridge(
     /** Close this Android Session like a terminal tab: stop its runtime and keep all files/history. */
     suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            request("/shutdown", "{}", 5_000).getOrThrow()
+            request("/shutdown", JSONObject().put("reason", "Android Session closed").toString(), 5_000).getOrThrow()
             delay(750)
             // Deliberately keep bridge files, session directories, JSONL history,
             // endpoint tokens, and runtime preferences. Closing a tab is not deletion.
         }
     }
 
-    suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun installAndStartBridge(reason: String = "install"): Result<Unit> = withContext(Dispatchers.IO) {
         if (!termuxAvailable()) return@withContext Result.failure(TermuxSetupException("请先安装 Termux"))
         runCatching {
-            request("/shutdown", "{}", 2_000)
+            request("/shutdown", JSONObject().put("reason", "app relaunch: $reason").toString(), 2_000)
             delay(750)
             val bridge = context.assets.open("pi-android-bridge.mjs").use {
                 Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
