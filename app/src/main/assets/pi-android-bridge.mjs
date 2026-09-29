@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-28.1";
+const bridgeVersion = "2026-09-30.1";
 
 // Lifecycle lines go to stderr, which the launcher appends to bridge.log. They are
 // the evidence for why a Session dropped: which process ended, with what code or
@@ -140,17 +140,23 @@ function settlePending(id, value) {
 
 function attachJsonl(stream) {
   const decoder = new StringDecoder("utf8");
-  let buffer = "";
+  // Pieces of the current, unfinished line. A multi-MB RPC reply (get_entries on a
+  // long Session) arrives in 64KB chunks; re-scanning one growing string from the
+  // start for every chunk was quadratic and blocked /health for seconds.
+  let parts = [];
   stream.on("data", chunk => {
-    buffer += decoder.write(chunk);
+    const text = decoder.write(chunk);
+    let start = 0;
     while (true) {
-      const index = buffer.indexOf("\n");
+      const index = text.indexOf("\n", start);
       if (index < 0) break;
-      let line = buffer.slice(0, index);
-      buffer = buffer.slice(index + 1);
+      parts.push(text.slice(start, index));
+      start = index + 1;
+      let line = parts.length === 1 ? parts[0] : parts.join("");
+      parts = [];
       if (line.endsWith("\r")) line = line.slice(0, -1);
       if (!line.trim()) continue;
-      lastStdoutTail = (lastStdoutTail + line + "\n").slice(-8000);
+      lastStdoutTail = (lastStdoutTail + line.slice(-8000) + "\n").slice(-8000);
       try {
         const value = JSON.parse(line);
         if (value.type === "response" && value.id && settlePending(value.id, value)) continue;
@@ -159,9 +165,11 @@ function attachJsonl(stream) {
         addEvent({ type: "raw", line });
       }
     }
+    if (start < text.length) parts.push(text.slice(start));
   });
   stream.on("end", () => {
-    const rest = buffer + decoder.end();
+    const rest = parts.join("") + decoder.end();
+    parts = [];
     if (rest.trim()) {
       lastStdoutTail = (lastStdoutTail + rest + "\n").slice(-8000);
       try {
@@ -1334,8 +1342,22 @@ const server = http.createServer(async (req, res) => {
       req.socket.setTimeout(0);
       req.socket.setNoDelay(true);
       req.socket.setKeepAlive(true, 10_000);
+      // A reader that stopped reading (the app frozen in the background) must not
+      // make this process buffer every event in memory: wait for 'drain', and drop
+      // a client that stays that far behind. It reconnects with its cursor.
+      let stalledSince = 0;
+      const stalled = () => {
+        if (!res.writableNeedDrain) { stalledSince = 0; return false; }
+        if (!stalledSince) stalledSince = Date.now();
+        if (res.writableLength > 4 * 1024 * 1024 || Date.now() - stalledSince > 60_000) {
+          lifecycleLog(`stream client dropped: ${res.writableLength} bytes unread`);
+          res.destroy();
+        }
+        return true;
+      };
       const flush = (force = false) => {
         if (res.writableEnded || res.destroyed) return;
+        if (stalled()) return;
         const earliest = events[0]?.seq ?? sequence;
         const gap = cursor > sequence || (cursor > 0 && cursor < earliest - 1);
         const batch = gap ? [] : events.filter(item => item.seq > cursor);
@@ -1344,7 +1366,8 @@ const server = http.createServer(async (req, res) => {
         cursor = sequence;
       };
       const heartbeat = setInterval(() => {
-        if (!res.writableEnded && !res.destroyed) res.write(`: ping ${sequence}\n\n`);
+        if (res.writableEnded || res.destroyed || stalled()) return;
+        res.write(`: ping ${sequence}\n\n`);
       }, 10_000);
       const close = () => {
         clearInterval(heartbeat);
@@ -1353,6 +1376,7 @@ const server = http.createServer(async (req, res) => {
       req.on("close", close);
       res.on("close", close);
       res.on("error", close);
+      res.on("drain", () => flush());
       streamClients.add(flush);
       // First frame always goes out so the client knows the stream is live.
       flush(true);
@@ -1438,6 +1462,17 @@ function removeOwnPidFile() {
 process.on("exit", removeOwnPidFile);
 server.requestTimeout = 0;
 server.timeout = 0;
+// Without this, EADDRINUSE went to the uncaughtException logger and node exited 0
+// silently while the app waited 30s for a Bridge that would never come.
+let listenRetries = 0;
+server.on("error", error => {
+  lifecycleLog(`listen failed: ${error.code || error.message}`);
+  if (error.code === "EADDRINUSE" && listenRetries++ < 10) {
+    setTimeout(() => server.listen(port, "127.0.0.1"), 500);
+    return;
+  }
+  process.exit(98);
+});
 server.listen(port, "127.0.0.1", () => {
   writeFileSync(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
   console.log(`Pi Android bridge ${bridgeVersion} listening on 127.0.0.1:${port}`);

@@ -55,4 +55,16 @@ assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a T
 assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");
 assert.ok(runtime.includes("reconcileDegraded(generation)"), "a reconnecting header must be re-checked against the live Bridge");
 assert.equal(runtime.split("updatesMutable.emit(PiRuntimeUpdate.Reconnecting(").length - 1, 1, "every Reconnecting must go through emitReconnecting so it can be cleared");
+// A new Session must not wait out the patient probe on a port nothing listens on,
+// and a port held by another Session's Bridge (401) is not "frozen".
+const piBridge = await readFile("app/src/main/java/com/piandroid/PiBridge.kt", "utf8");
+assert.ok(/if \(error\.isConnectRefusedFailure\(\)\) \{\s*if \(\+\+refused >= 2\) return null/.test(runtime), "patientHealth must give up quickly on a refused port");
+assert.ok(runtime.includes("!lastHealthError.isForeignBridgeFailure()"), "a 401 from a foreign Bridge must skip the frozen grace");
+assert.ok(runtime.includes("markAlive()"), "any proof of life must reset the frozen-Bridge window");
+assert.ok(piBridge.includes("val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis"), "waitForBridge must be bounded by wall-clock time");
+assert.ok(piBridge.includes("PI_ANDROID_PORT=$port"), "the launcher must clear a stale Bridge holding this port");
+assert.ok(piBridge.includes('"/data/data/com.termux/files/usr/bin/true"'), "waking Termux must not start a login shell");
+assert.ok(main.includes("runtimeManager.onForeground()"), "returning to the foreground must wake Termux and probe at once");
+assert.ok(main.includes("runtime.alreadyRunning(session)"), "the first Ready must not trigger a second full attach");
+assert.ok(!/is PiRuntimeUpdate\.Ready -> applyRuntimeReady[\s\S]{0,40}\n[\s\S]*?suspend fun applyRuntimeReady[\s\S]*?\n        refreshMeta\(\)\n/.test(main), "Ready must not await refreshMeta inside the update collector");
 console.log("Reconnect-without-restart guards passed");
