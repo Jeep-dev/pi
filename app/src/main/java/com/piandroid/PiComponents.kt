@@ -46,7 +46,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-internal val CardShape = RoundedCornerShape(16.dp)
+internal val CardShape = RoundedCornerShape(18.dp)
 internal val PillShape = RoundedCornerShape(50)
 
 /** Material roles derived from the Pi palette so stock components (dialogs, fields, switches) match. */
@@ -96,13 +96,14 @@ internal fun piFieldColors(): TextFieldColors {
         unfocusedTextColor = colors.textMain,
         focusedBorderColor = colors.accent,
         unfocusedBorderColor = colors.border,
+        disabledBorderColor = colors.border,
         focusedLabelColor = colors.accent,
         unfocusedLabelColor = colors.textMuted,
         cursorColor = colors.accent,
         focusedPlaceholderColor = colors.textMuted,
         unfocusedPlaceholderColor = colors.textMuted,
-        focusedContainerColor = colors.cardBg.copy(alpha = 0.35f),
-        unfocusedContainerColor = colors.cardBg.copy(alpha = 0.35f)
+        focusedContainerColor = colors.bg.copy(alpha = 0.6f),
+        unfocusedContainerColor = colors.bg.copy(alpha = 0.6f)
     )
 }
 
@@ -110,13 +111,13 @@ internal fun piFieldColors(): TextFieldColors {
 internal fun PiLogo(size: Dp = 32.dp) {
     val colors = LocalPiColors.current
     Box(
-        Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(colors.textMain),
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.32f)).background(colors.accent),
         contentAlignment = Alignment.Center
     ) {
         Image(
             painter = painterResource(R.drawable.ic_pi_foreground),
             contentDescription = "Pi",
-            colorFilter = ColorFilter.tint(colors.bg),
+            colorFilter = ColorFilter.tint(colors.onAccent),
             modifier = Modifier.size(size * 1.25f)
         )
     }
@@ -128,9 +129,15 @@ internal fun StatusDot(color: Color, size: Dp = 8.dp) {
 }
 
 @Composable
-internal fun PiIconButton(icon: ImageVector, description: String, onClick: () -> Unit, tint: Color = LocalPiColors.current.textMain, enabled: Boolean = true) {
+internal fun PiIconButton(icon: ImageVector, description: String, onClick: () -> Unit, tint: Color = LocalPiColors.current.textMain, enabled: Boolean = true, tonal: Boolean = false) {
+    val colors = LocalPiColors.current
     IconButton(onClick = onClick, enabled = enabled) {
-        Icon(icon, contentDescription = description, tint = if (enabled) tint else LocalPiColors.current.disabledAction)
+        Box(
+            Modifier.size(36.dp).clip(CircleShape).then(if (tonal) Modifier.background(colors.cardBg) else Modifier),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = description, tint = if (enabled) tint else colors.disabledAction, modifier = Modifier.size(if (tonal) 20.dp else 24.dp))
+        }
     }
 }
 
@@ -138,7 +145,7 @@ internal fun PiIconButton(icon: ImageVector, description: String, onClick: () ->
 internal fun PiCard(modifier: Modifier = Modifier, contentPadding: PaddingValues = PaddingValues(16.dp), content: @Composable ColumnScope.() -> Unit) {
     val colors = LocalPiColors.current
     Column(
-        modifier.fillMaxWidth().clip(CardShape).background(colors.panelBg).border(1.dp, colors.border, CardShape).padding(contentPadding),
+        modifier.fillMaxWidth().clip(CardShape).background(colors.panelBg).then(if (colors.isLight) Modifier.border(1.dp, colors.border, CardShape) else Modifier).padding(contentPadding),
         content = content
     )
 }
@@ -146,12 +153,12 @@ internal fun PiCard(modifier: Modifier = Modifier, contentPadding: PaddingValues
 @Composable
 internal fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
-        text.uppercase(),
-        color = LocalPiColors.current.textMuted,
-        fontSize = 11.sp,
+        text,
+        color = LocalPiColors.current.accent,
+        fontSize = 12.5.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 0.8.sp,
-        modifier = modifier.padding(start = 4.dp, bottom = 8.dp, top = 4.dp)
+        letterSpacing = 0.3.sp,
+        modifier = modifier.padding(start = 6.dp, bottom = 8.dp, top = 6.dp)
     )
 }
 
@@ -161,17 +168,16 @@ internal fun PiChip(text: String, onClick: () -> Unit, modifier: Modifier = Modi
     Row(
         modifier
             .clip(PillShape)
-            .background(if (selected) colors.accent.copy(alpha = 0.16f) else colors.cardBg)
-            .border(1.dp, if (selected) colors.accent else Color.Transparent, PillShape)
+            .background(if (selected) colors.accent else colors.cardBg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         leading?.invoke(this)
         Text(
             text,
-            color = if (selected) colors.accent else colors.textMain,
+            color = if (selected) colors.onAccent else colors.textMain,
             fontSize = 13.sp,
             fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
@@ -187,11 +193,11 @@ internal fun PiPrimaryButton(text: String, onClick: () -> Unit, modifier: Modifi
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(48.dp),
-        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.height(50.dp),
+        shape = PillShape,
         colors = ButtonDefaults.buttonColors(
             containerColor = if (danger) colors.stopButtonBg else colors.accent,
-            contentColor = if (danger) colors.textMain else colors.onAccent,
+            contentColor = if (danger) Color.White else colors.onAccent,
             disabledContainerColor = colors.disabledAction,
             disabledContentColor = colors.textMuted
         )
@@ -202,14 +208,14 @@ internal fun PiPrimaryButton(text: String, onClick: () -> Unit, modifier: Modifi
 internal fun PanelHeader(title: String, onBack: () -> Unit, subtitle: String = "", actions: @Composable RowScope.() -> Unit = {}) {
     val colors = LocalPiColors.current
     Row(
-        Modifier.fillMaxWidth().background(colors.headerBg).padding(start = 4.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        Modifier.fillMaxWidth().background(colors.headerBg).padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        PiIconButton(Icons.AutoMirrored.Filled.ArrowBack, "返回", onBack)
-        Spacer(Modifier.width(4.dp))
+        PiIconButton(Icons.AutoMirrored.Filled.ArrowBack, "返回", onBack, tonal = true)
+        Spacer(Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = colors.textMain, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (subtitle.isNotBlank()) Text(subtitle, color = colors.textMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = colors.textMain, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle.isNotBlank()) Text(subtitle, color = colors.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
         }
         actions()
     }
@@ -224,13 +230,14 @@ internal fun SettingRow(title: String, subtitle: String = "", onClick: (() -> Un
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, color = colors.textMain, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-            if (subtitle.isNotBlank()) Text(subtitle, color = colors.textMuted, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 2.dp))
+            if (subtitle.isNotBlank()) Text(subtitle, color = colors.textMuted, fontSize = 12.5.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 2.dp))
         }
+        Spacer(Modifier.width(12.dp))
         trailing()
     }
 }
 
 @Composable
 internal fun HairlineDivider(modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth().height(1.dp).background(LocalPiColors.current.border))
+    Box(modifier.fillMaxWidth().height(1.dp).background(LocalPiColors.current.border.copy(alpha = 0.7f)))
 }

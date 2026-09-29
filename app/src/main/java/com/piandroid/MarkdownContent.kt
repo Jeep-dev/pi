@@ -164,8 +164,8 @@ fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
                     lineHeight = when (block.level) { 1 -> 28.sp; 2 -> 25.sp; else -> 23.sp },
                     modifier = Modifier.padding(top = 4.dp)
                 )
-                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(colors.markdownCodeBg).border(1.dp, colors.markdownBorder, RoundedCornerShape(12.dp))) {
-                    if (block.language.isNotBlank()) Text(block.language, color = colors.markdownMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 12.dp, top = 8.dp))
+                is MarkdownBlock.Code -> Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.markdownCodeBg).border(1.dp, colors.markdownBorder.copy(alpha = if (colors.isLight) 1f else 0.6f), RoundedCornerShape(14.dp))) {
+                    if (block.language.isNotBlank()) Text(block.language, color = colors.markdownMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.fillMaxWidth().background(colors.markdownInlineCodeBg.copy(alpha = 0.5f)).padding(horizontal = 12.dp, vertical = 6.dp))
                     Text(block.text, color = colors.markdownCodeText, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 19.sp, modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp))
                 }
                 is MarkdownBlock.Table -> MarkdownTable(block.rows, colors)
@@ -176,7 +176,7 @@ fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
                     } }
                 }
                 is MarkdownBlock.Quote -> Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-                    Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(colors.markdownBorder))
+                    Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(colors.markdownAccent.copy(alpha = 0.5f)))
                     Text(inlineMarkdown(block.text, colors), color = colors.markdownMuted, fontSize = 14.5.sp, lineHeight = 22.sp, modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp))
                 }
                 MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp).background(colors.markdownBorder))
