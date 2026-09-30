@@ -77,6 +77,8 @@ class ToolPresentationTest {
         assertEquals("0.0s", formatToolDuration(0))
         assertEquals("1.2s", formatToolDuration(1_249))
         assertEquals("12.3s", formatToolDuration(12_345))
+        assertEquals("1m40s", formatToolDuration(100_100))
+        assertEquals("1h05m", formatToolDuration(3_930_000))
     }
 
     @Test

@@ -297,6 +297,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 工具卡片从出现起就实时计时（超过一分钟显示 1m40s）；消息旁用 ○ ✓ ↓ ⚠ 表示插话状态；思考块、侧栏、页脚、工具参数去掉多余文字；edit 参数改为路径加 -/+ 行",
     "• write 等工具在模型生成参数时就实时显示内容；工具卡片去掉「运行中」「展开全部」「失败」等文字，改用呼吸点、箭头、警告图标，折叠行数只显示 +N",
     "• 发送后自动收起键盘；顶栏压矮、模型名改为常规字重；呼吸灯加外圈光晕更醒目",
     "• 工作中改为呼吸圆点（不再像重连的转圈）；底栏去掉 WORKING；输入框 + 和发送键去掉底色，发送改为 ↲",
@@ -449,7 +450,13 @@ private fun toolDraftArgs(toolName: String, raw: String): String {
     return when (toolName) {
         "write" -> listOf(path, partialJsonString(raw, "content").orEmpty()).filter { it.isNotEmpty() }.joinToString("\n")
         "bash", "powershell" -> partialJsonString(raw, "command") ?: raw
-        "edit" -> listOf(path, raw.substringAfter("\"edits\"", "").ifBlank { raw.substringAfter("\"newText\"", "") }.trimStart(':', ' ')).filter { it.isNotEmpty() }.joinToString("\n")
+        "edit" -> {
+            // Show the edit being written as -/+ lines rather than raw JSON.
+            fun latest(key: String): String? = raw.lastIndexOf("\"$key\"").takeIf { it >= 0 }?.let { partialJsonString(raw.substring(it), key) }
+            val old = latest("oldText")?.lines()?.joinToString("\n") { "- $it" }.orEmpty()
+            val new = latest("newText")?.lines()?.joinToString("\n") { "+ $it" }.orEmpty()
+            listOf(path, old, new).filter { it.isNotEmpty() }.joinToString("\n")
+        }
         else -> raw
     }
 }
@@ -1093,7 +1100,9 @@ private fun PiScreen(
                 toolCallId = toolCallId,
                 contentIndex = contentIndex,
                 collapsed = true,
-                toolName = toolName
+                toolName = toolName,
+                // The clock starts when the card appears, not when the tool finally runs.
+                toolStartedAt = android.os.SystemClock.uptimeMillis()
             )
         )
     }
@@ -1145,7 +1154,7 @@ private fun PiScreen(
         )
         if (existingIndex >= 0) {
             val existing = lines[existingIndex]
-            lines[existingIndex] = next.copy(collapsed = existing.collapsed)
+            lines[existingIndex] = next.copy(collapsed = existing.collapsed, toolStartedAt = existing.toolStartedAt.takeIf { it > 0L } ?: startedAt)
         } else {
             lines.add(next)
         }
@@ -1319,8 +1328,8 @@ private fun PiScreen(
                         if (lines[i].role == "tool-draft" && lines[i].streaming) {
                             lines[i] = lines[i].copy(
                                 text = "",
-                                toolMeta = "Cancelled",
-                                streaming = false
+                                streaming = false,
+                                toolEndedAt = android.os.SystemClock.uptimeMillis()
                             )
                         }
                     }
@@ -2204,7 +2213,7 @@ LaunchedEffect(chatListState) {
 
                 if (panel == Panel.Chat && showScrollControls) {
                     ScrollControls(
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp),
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 12.dp).graphicsLayer { alpha = 0.92f },
                         onTop = { followOutput = false; showScrollControls = false; scope.launch { chatListState.scrollToItem(0) } },
                         onBottom = { showScrollControls = false; followOutput = true; scope.launch { if (lines.isNotEmpty()) chatListState.scrollToRealBottom() } }
                     )
@@ -2338,11 +2347,11 @@ private fun ScrollControls(modifier: Modifier, onTop: () -> Unit, onBottom: () -
         modifier.shadow(6.dp, PillShape).clip(PillShape).background(colors.scrollBg).border(1.dp, colors.scrollBorder, PillShape),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(Modifier.size(40.dp).clickable(onClick = onTop), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(36.dp).clickable(onClick = onTop), contentAlignment = Alignment.Center) {
             Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "跳到顶部", tint = colors.scrollText)
         }
         Box(Modifier.width(22.dp).height(1.dp).background(colors.scrollDivider))
-        Box(Modifier.size(40.dp).clickable(onClick = onBottom), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(36.dp).clickable(onClick = onBottom), contentAlignment = Alignment.Center) {
             Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "跳到底部", tint = colors.scrollText)
         }
     }
@@ -2357,11 +2366,7 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
         Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 6.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             PiLogo(38.dp)
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Pi", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                val working = sessions.count { it.status == PiSessionStatus.WORKING }
-                Text(if (working > 0) "${sessions.size} 个 Session · $working 个工作中" else "${sessions.size} 个 Session", color = TextMuted, fontSize = 12.5.sp)
-            }
+            Text("Pi", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         }
         Row(
             Modifier
@@ -2378,7 +2383,7 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
             Spacer(Modifier.width(8.dp))
             Text("新建 Session", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         }
-        SectionLabel("会话", Modifier.padding(start = 16.dp, top = 12.dp))
+        Spacer(Modifier.height(8.dp))
         LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(start = 10.dp, end = 10.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (sessions.isEmpty()) item {
                 Text("还没有 Session，点上方按钮新建第一个。", color = TextMuted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
@@ -2403,7 +2408,7 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
                         contentAlignment = Alignment.Center
                     ) {
                         Text(sessionDisplayName(record).trim().take(1).uppercase().ifBlank { "π" }, color = if (selected) Accent else TextMain, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                        Box(Modifier.align(Alignment.BottomEnd).offset(x = 2.dp, y = 2.dp).clip(CircleShape).background(PanelBg).padding(2.dp)) { StatusDot(statusColor, 8.dp) }
+                        Box(Modifier.align(Alignment.BottomEnd).offset(x = 2.dp, y = 2.dp).clip(CircleShape).background(PanelBg).padding(2.dp).semantics { contentDescription = sessionStatusLabel(record) }) { StatusDot(statusColor, 8.dp) }
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
@@ -2420,8 +2425,7 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
                             if (record.pinned) Icon(Icons.Filled.Star, contentDescription = "已置顶", tint = Accent, modifier = Modifier.padding(start = 4.dp).size(14.dp))
                         }
                         Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(sessionStatusLabel(record), color = statusColor, fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
-                            Text(" · ${termuxPath(record.cwd)}", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                            Text(termuxPath(record.cwd), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                             if (record.lastActivity > 0) Text(" · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(record.lastActivity)), color = TextMuted, fontSize = 11.sp, maxLines = 1)
                         }
                         if (record.status == PiSessionStatus.ERROR && record.lastError.isNotBlank()) Text(record.lastError, color = Danger, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
@@ -2429,7 +2433,6 @@ private fun SessionDrawer(sessions: List<PiSessionRecord>, activeAndroidSessionI
                 }
             }
         }
-        Text("从中间区域右滑打开 · 长按管理 Session", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
     }
 }
 
@@ -2531,9 +2534,7 @@ private fun ResourcesCard(sections: List<LoadedResourceSection>) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Build, contentDescription = null, tint = Accent, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(8.dp))
-            Text("已加载资源", color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.width(8.dp))
-            Text(sections.joinToString(" · ") { "${it.title} ${it.items.size}" }, color = TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(sections.joinToString(" · ") { "${it.title} ${it.items.size}" }, color = TextMain, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Icon(if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, contentDescription = if (expanded) "收起" else "展开", tint = TextMuted, modifier = Modifier.size(18.dp))
         }
         if (expanded) sections.forEach { section ->
@@ -2618,46 +2619,44 @@ LaunchedEffect(listState) {
             val fullText = line.text.trimEnd(); val visibleText = fullText
             SelectionContainer {
                 when (line.role) {
-                    "user" -> Box(Modifier.fillMaxWidth().padding(start = 48.dp), contentAlignment = Alignment.CenterEnd) {
-                        val steering = line.delivery in setOf("steering", "steering_queued", "steering_sent", "steering_failed", "follow_up")
-                        Column(Modifier.clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 22.dp, bottomEnd = 8.dp)).background(UserBg).padding(horizontal = 16.dp, vertical = 11.dp)) {
-                            if (steering) {
-                                val steeringColor = if (line.delivery == "steering_failed") Danger else Blue
-                                Row(Modifier.padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    StatusDot(steeringColor, 6.dp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(when (line.delivery) { "steering_sent" -> "Steering · 已送达"; "steering_failed" -> "Steering · 发送失败"; "follow_up" -> "Follow-up · 本轮结束后发送"; else -> "Steering · 排队中" }, color = steeringColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
+                    "user" -> Row(Modifier.fillMaxWidth().padding(start = 40.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.Bottom) {
+                        // Delivery of a message sent mid-turn is a mark beside the bubble, like a chat tick:
+                        // ○ waiting to steer, ✓ steered in, ↓ runs after this turn, ⚠ failed.
+                        when (line.delivery) {
+                            "steering", "steering_queued" -> Text("○", color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp).semantics { contentDescription = "排队中" })
+                            "steering_sent" -> Icon(Icons.Filled.Check, contentDescription = "已送达", tint = Blue, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp).size(14.dp))
+                            "follow_up" -> Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "本轮结束后发送", tint = Blue, modifier = Modifier.padding(end = 4.dp, bottom = 2.dp).size(18.dp))
+                            "steering_failed" -> Icon(Icons.Filled.Warning, contentDescription = "发送失败", tint = Danger, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp).size(14.dp))
+                            else -> Unit
+                        }
+                        Box(Modifier.weight(1f, fill = false).clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 22.dp, bottomEnd = 8.dp)).background(UserBg).padding(horizontal = 16.dp, vertical = 11.dp)) {
                             Text(visibleText, color = TextMain, fontSize = 15.sp, lineHeight = 22.sp)
                         }
                     }
                     "assistant" -> if (line.streaming) Text(visibleText, color = LocalPiColors.current.markdownText, fontSize = 15.sp, lineHeight = 23.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp)) else PiMarkdown(visibleText, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp))
-                    "thinking" -> if (hideThinking) Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(if (line.streaming) Accent else TextMuted, 6.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (line.streaming) "思考中…" else "思考过程已隐藏", color = TextMuted, fontSize = 12.5.sp)
-                    } else Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                    // The accent rule and italics already say "thinking"; no label on top.
+                    "thinking" -> if (hideThinking) Row(Modifier.height(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.width(2.dp).fillMaxHeight().clip(PillShape).background(Accent.copy(alpha = 0.45f)))
-                        Column(Modifier.padding(start = 12.dp)) {
-                            Text(if (line.streaming) "思考中…" else "思考过程", color = Accent, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 3.dp))
-                            Text(visibleText, color = ThinkingText, fontStyle = FontStyle.Italic, fontSize = 13.5.sp, lineHeight = 20.sp)
-                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text("···", color = if (line.streaming) Accent else TextMuted, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.semantics { contentDescription = "思考过程已隐藏" })
+                    } else Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                        Box(Modifier.width(2.dp).fillMaxHeight().clip(PillShape).background(Accent.copy(alpha = if (line.streaming) 0.8f else 0.45f)))
+                        Text(visibleText, color = ThinkingText, fontStyle = FontStyle.Italic, fontSize = 13.5.sp, lineHeight = 20.sp, modifier = Modifier.padding(start = 12.dp))
                     }
                     "compaction" -> Column(Modifier.fillMaxWidth().clip(CardShape).background(PanelBg).padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.Info, contentDescription = null, tint = Blue, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("上下文已压缩", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text("上下文已压缩", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            if (line.tokensBefore > 0) Text("${compactCount(line.tokensBefore)} →", color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                         }
-                        Text(if (line.tokensBefore > 0) "已从 ${java.text.NumberFormat.getIntegerInstance().format(line.tokensBefore)} tokens 压缩" else "旧消息已合并为摘要", color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                         if (!line.collapsed) PiMarkdown(fullText, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
                         TextButton(onClick = { onToggleLine(lineIndex) }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) { Icon(if (line.collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp, contentDescription = if (line.collapsed) "展开" else "收起", tint = Accent, modifier = Modifier.size(22.dp)) }
                     }
                     "tool", "tool-draft" -> {
                         val colors = LocalPiColors.current
                         var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
-                        LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(250) } }
+                        LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(100) } }
                         val hasStructuredTool = line.toolName.isNotBlank() || line.toolArgs.isNotBlank() || line.toolOutput.isNotBlank() || line.toolDurationMs >= 0L
                         val toolOutput = if (hasStructuredTool) line.toolOutput else fullText
                         val outputHint = toolHiddenHint(toolOutput)
@@ -2680,8 +2679,10 @@ LaunchedEffect(listState) {
                         }
                         val duration = if (durationMs >= 0L) formatToolDuration(durationMs) else ""
                         val name = line.toolName.ifBlank { "tool" }
-                        val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; else -> colors.toolSuccessBg }
-                        val statusTint = when { line.toolIsError -> Danger; line.streaming -> Blue; else -> colors.success }
+                        // A draft that stopped streaming never ran: the turn was aborted under it.
+                        val cancelled = line.role == "tool-draft" && !line.streaming
+                        val background = when { line.toolIsError -> colors.toolErrorBg; line.streaming -> colors.toolPendingBg; cancelled -> colors.markdownCodeBg; else -> colors.toolSuccessBg }
+                        val statusTint = when { line.toolIsError -> Danger; line.streaming -> Blue; cancelled -> TextMuted; else -> colors.success }
                         val expandable = argsHint.isNotBlank() || outputHint.isNotBlank() || argsClipped || outputClipped
                         val collapseInfo = when {
                             line.collapsed && outputHint.isNotBlank() -> outputHint
@@ -2690,11 +2691,11 @@ LaunchedEffect(listState) {
                             line.toolArgs.isNotBlank() -> "${line.toolArgs.trimEnd().lines().size} lines"
                             else -> ""
                         }.let { info ->
-                            // Numbers only: "… +19 lines" -> "+19", a plain total is left out.
-                            Regex("\\+(\\d+)").find(info)?.let { "+${it.groupValues[1]}" }.orEmpty()
+                            // Numbers only: "… +19 lines" -> "+19"; a plain total or a char count is left out.
+                            Regex("\\+(\\d+) (arg )?lines").find(info)?.let { "+${it.groupValues[1]}" }.orEmpty()
                         }
                         val toolShape = RoundedCornerShape(16.dp)
-                        val toolIcon = if (line.toolIsError) Icons.Filled.Warning else when (name.lowercase()) {
+                        val toolIcon = if (line.toolIsError) Icons.Filled.Warning else if (cancelled) Icons.Filled.Close else when (name.lowercase()) {
                             "bash" -> Icons.Filled.PlayArrow
                             "read" -> Icons.Filled.Info
                             "edit", "write" -> Icons.Filled.Edit
@@ -2708,18 +2709,29 @@ LaunchedEffect(listState) {
                                 }
                                 Spacer(Modifier.width(9.dp))
                                 Text(name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                if (line.streaming && !line.toolIsError) BreathingDot(Blue)
-                                else if (!expandable && duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
+                                // Live clock from the moment the card appears; an expandable card keeps it in the footer.
+                                if (!expandable && duration.isNotBlank()) Text(duration, color = if (line.streaming) Blue else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
+                                if (line.streaming && !line.toolIsError) { Spacer(Modifier.width(6.dp)); BreathingDot(Blue) }
                             }
                             if (renderedArgs.isNotBlank()) {
-                                val argsText = if (name == "bash") buildAnnotatedString { pushStyle(SpanStyle(color = Accent)); append("$ "); pop(); append(renderedArgs) } else buildAnnotatedString { append(renderedArgs) }
+                                val argsText = when (name) {
+                                    "bash" -> buildAnnotatedString { pushStyle(SpanStyle(color = Accent)); append("$ "); pop(); append(renderedArgs) }
+                                    "edit" -> buildAnnotatedString {
+                                        renderedArgs.lines().forEachIndexed { index, argLine ->
+                                            if (index > 0) append('\n')
+                                            val tint = when { argLine.startsWith("+ ") -> colors.toolDiffAdded; argLine.startsWith("- ") -> colors.toolDiffRemoved; else -> null }
+                                            if (tint != null) { pushStyle(SpanStyle(color = tint)); append(argLine); pop() } else append(argLine)
+                                        }
+                                    }
+                                    else -> buildAnnotatedString { append(renderedArgs) }
+                                }
                                 Text(argsText, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 19.sp, maxLines = if (!line.collapsed) Int.MAX_VALUE else if (line.role == "tool-draft" && line.streaming) 6 else 3, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) argsClipped = true }, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp))
                             }
                             if (line.toolMeta.isNotBlank()) Text(line.toolMeta, color = if (line.toolIsError) Danger else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, lineHeight = 15.sp, modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp))
                             if (renderedOutput.isNotBlank()) {
                                 val outputLines = renderedOutput.lines()
                                 val styledOutput = buildAnnotatedString { outputLines.forEachIndexed { index, outputLine -> val color = when { outputLine.startsWith("+") && !outputLine.startsWith("+++") -> colors.toolDiffAdded; outputLine.startsWith("-") && !outputLine.startsWith("---") -> colors.toolDiffRemoved; else -> colors.toolOutput }; pushStyle(SpanStyle(color = color)); append(outputLine); pop(); if (index != outputLines.lastIndex) append('\n') } }
-                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) outputClipped = true }, modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp).clip(RoundedCornerShape(11.dp)).background(colors.markdownCodeBg).padding(horizontal = 10.dp, vertical = 8.dp))
+                                Text(styledOutput, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp, maxLines = if (line.collapsed) 6 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) outputClipped = true }, modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp).clip(RoundedCornerShape(11.dp)).background(if (colors.isLight) colors.markdownCodeBg else Color.Black.copy(alpha = 0.28f)).padding(horizontal = 10.dp, vertical = 8.dp))
                             }
                             if (expandable) {
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2736,7 +2748,7 @@ LaunchedEffect(listState) {
                                         }
                                     }
                                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                                        if (duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
+                                        if (duration.isNotBlank()) Text(duration, color = if (line.streaming) Blue else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
                                     }
                                 }
                             } else {
@@ -2825,7 +2837,7 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
                 keyboardActions = KeyboardActions(onSend = { onPrimary() }),
                 decorationBox = { innerTextField ->
                     Box(contentAlignment = Alignment.CenterStart) {
-                        if (value.isEmpty()) Text(if (busy) "发送 = steer · 长按发送 = follow-up" else "给 Pi 发消息，/ 查看命令", color = TextMuted, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (value.isEmpty()) Text(if (busy) "↲ 插话 · 长按 ↲ 排队" else "给 Pi 发消息，/ 命令", color = TextMuted, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         innerTextField()
                     }
                 }
@@ -2856,9 +2868,9 @@ private fun compactCount(value: Long): String = when { value >= 1_000_000_000 ->
 @Composable
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
     val colors = LocalPiColors.current
-    val usage = if (stats == null) emptyList() else buildList { if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}") }
+    val usage = if (stats == null) emptyList() else buildList { if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 && !subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}") }
     val contextFraction = stats?.takeIf { it.contextPercent >= 0 && it.contextWindow > 0 }?.let { (it.contextPercent / 100.0).toFloat().coerceIn(0f, 1f) }
-    val context = (if (stats != null && contextFraction != null) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—") + if (state?.autoCompactionEnabled == true) " (auto)" else ""
+    val context = (if (stats != null && contextFraction != null) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—")
     val contextColor = when { contextFraction == null -> colors.textMuted; contextFraction >= 0.85f -> colors.danger; contextFraction >= 0.6f -> colors.accent; else -> colors.textMuted }
     val text = buildAnnotatedString {
         usage.forEachIndexed { index, part -> if (index > 0) append(" "); append(part) }

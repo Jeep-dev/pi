@@ -9,12 +9,6 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
     if (args == null || args.length() == 0) return ""
 
     fun path(): String = args.optString("path")
-    fun pretty(value: Any?): String = when (value) {
-        is JSONObject -> value.toString(2)
-        is JSONArray -> value.toString(2)
-        null -> ""
-        else -> value.toString()
-    }
     fun extras(excluded: Set<String>): String {
         val extra = JSONObject()
         val keys = args.keys()
@@ -33,7 +27,7 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val timeout = args.optInt("timeout", 0)
             val summary = buildString {
                 append(command)
-                if (timeout > 0) append("  (${timeout}s timeout)")
+                if (timeout > 0) append("  ⏱${timeout}s")
             }
             join(summary, extra = extras(setOf("command", "timeout")))
         }
@@ -42,12 +36,11 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val limit = args.optInt("limit", 0)
             val summary = buildString {
                 append(path())
+                // path:10-59, like an editor jump target, instead of "[offset 10, limit 50]".
                 if (offset > 0 || limit > 0) {
-                    append("  [")
-                    if (offset > 0) append("offset $offset")
-                    if (offset > 0 && limit > 0) append(", ")
-                    if (limit > 0) append("limit $limit")
-                    append(']')
+                    val first = if (offset > 0) offset else 1
+                    append(':').append(first)
+                    if (limit > 0) append('-').append(first + limit - 1) else append('-')
                 }
             }
             join(summary, extra = extras(setOf("path", "offset", "limit")))
@@ -56,7 +49,6 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val content = args.optString("content")
             val summary = buildString {
                 append(path())
-                if (content.isNotEmpty()) append("  ·  ${content.length} chars")
             }
             join(summary, content, extras(setOf("path", "content")))
         }
@@ -67,17 +59,10 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val count = edits?.length() ?: if (legacyOld.isNotEmpty() || legacyNew.isNotEmpty()) 1 else 0
             val summary = buildString {
                 append(path())
-                if (count > 0) append("  ·  $count edits")
+                if (count > 1) append("  ×$count")
             }
-            val body = when {
-                edits != null && edits.length() > 0 -> pretty(edits)
-                legacyOld.isNotEmpty() || legacyNew.isNotEmpty() -> JSONObject()
-                    .put("oldText", legacyOld)
-                    .put("newText", legacyNew)
-                    .toString(2)
-                else -> ""
-            }
-            join(summary, body, extras(setOf("path", "edits", "oldText", "newText")))
+            // The result carries the diff; repeating the edits as JSON only buried it.
+            join(summary, extra = extras(setOf("path", "edits", "oldText", "newText")))
         }
         "grep" -> {
             val pattern = args.optString("pattern")
@@ -91,10 +76,10 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
                 append(pattern)
                 if (searchPath.isNotBlank()) append("  $searchPath")
                 if (glob.isNotBlank()) append("  ($glob)")
-                if (ignoreCase) append("  ignore-case")
-                if (literal) append("  literal")
-                if (context > 0) append("  context $context")
-                if (limit > 0) append("  limit $limit")
+                if (ignoreCase) append("  -i")
+                if (literal) append("  -F")
+                if (context > 0) append("  -C$context")
+                if (limit > 0) append("  ≤$limit")
             }
             join(summary, extra = extras(setOf("pattern", "path", "glob", "ignoreCase", "literal", "context", "limit")))
         }
@@ -105,7 +90,7 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val summary = buildString {
                 append(pattern)
                 if (searchPath.isNotBlank()) append("  $searchPath")
-                if (limit > 0) append("  (limit $limit)")
+                if (limit > 0) append("  ≤$limit")
             }
             join(summary, extra = extras(setOf("pattern", "query", "path", "limit")))
         }
@@ -113,7 +98,7 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             val limit = args.optInt("limit", 0)
             val summary = buildString {
                 append(path())
-                if (limit > 0) append("  (limit $limit)")
+                if (limit > 0) append("  ≤$limit")
             }
             join(summary, extra = extras(setOf("path", "limit")))
         }
@@ -126,7 +111,7 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
                     }
                 }.distinct()
                 if (tasks.length() == 1) agents.firstOrNull().orEmpty()
-                else "${tasks.length()} tasks${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
+                else "×${tasks.length()}${if (agents.isNotEmpty()) " · ${agents.joinToString(", ")}" else ""}"
             } else {
                 args.optString("agent")
             }
@@ -203,8 +188,13 @@ internal fun toolArgsHiddenHint(args: String, maxLines: Int = 2, maxChars: Int =
     }
 }
 
-internal fun formatToolDuration(durationMs: Long): String =
-    String.format(Locale.US, "%.1fs", durationMs.coerceAtLeast(0L) / 1000.0)
+internal fun formatToolDuration(durationMs: Long): String {
+    val ms = durationMs.coerceAtLeast(0L)
+    if (ms < 60_000L) return String.format(Locale.US, "%.1fs", ms / 1000.0)
+    val totalSeconds = ms / 1000L
+    return if (totalSeconds < 3600L) "${totalSeconds / 60}m${(totalSeconds % 60).toString().padStart(2, '0')}s"
+    else "${totalSeconds / 3600}h${((totalSeconds % 3600) / 60).toString().padStart(2, '0')}m"
+}
 
 internal fun assistantCompletionNotice(
     stopReason: String,
