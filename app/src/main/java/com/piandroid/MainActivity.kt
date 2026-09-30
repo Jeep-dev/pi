@@ -90,7 +90,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -298,6 +297,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• write 等工具在模型生成参数时就实时显示内容；工具卡片去掉「运行中」「展开全部」「失败」等文字，改用呼吸点、箭头、警告图标，折叠行数只显示 +N",
     "• 发送后自动收起键盘；顶栏压矮、模型名改为常规字重；呼吸灯加外圈光晕更醒目",
     "• 工作中改为呼吸圆点（不再像重连的转圈）；底栏去掉 WORKING；输入框 + 和发送键去掉底色，发送改为 ↲",
     "• 顶栏精简：一行显示「模型名 思考级别」，状态只用圆点表示；去掉 Session 名、工作目录、括号来源和 + 号",
@@ -443,19 +443,14 @@ private fun partialJsonString(raw: String, key: String): String? {
     }
 }
 
-private fun toolDraftPreview(raw: String, count: Int): String {
-    val path = partialJsonString(raw, "path")
-    val content = partialJsonString(raw, "content")
-    val preview = when {
-        content != null -> content
-        raw.isNotBlank() -> raw
-        else -> "等待参数数据…"
-    }
-    return buildString {
-        if (!path.isNullOrBlank()) append("目标：$path\n")
-        append("实时生成内容：\n")
-        append(preview)
-        append("\n\n已生成 ${compactCount(count.toLong())} 字符 · 正常运行")
+/** Live arguments for a tool call the model is still writing, laid out like the finished card. */
+private fun toolDraftArgs(toolName: String, raw: String): String {
+    val path = partialJsonString(raw, "path").orEmpty()
+    return when (toolName) {
+        "write" -> listOf(path, partialJsonString(raw, "content").orEmpty()).filter { it.isNotEmpty() }.joinToString("\n")
+        "bash", "powershell" -> partialJsonString(raw, "command") ?: raw
+        "edit" -> listOf(path, raw.substringAfter("\"edits\"", "").ifBlank { raw.substringAfter("\"newText\"", "") }.trimStart(':', ' ')).filter { it.isNotEmpty() }.joinToString("\n")
+        else -> raw
     }
 }
 
@@ -1103,13 +1098,25 @@ private fun PiScreen(
         )
     }
 
+    fun refreshToolDraft(contentIndex: Int, force: Boolean) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now - (toolDraftRefreshAt[contentIndex] ?: 0L) < 120L) return
+        toolDraftRefreshAt[contentIndex] = now
+        val raw = toolDraftBuffers[contentIndex]?.toString() ?: return
+        val index = lines.indexOfLast { it.role == "tool-draft" && it.contentIndex == contentIndex }
+        if (index >= 0) lines[index] = lines[index].let { it.copy(toolArgs = toolDraftArgs(it.toolName, raw)) }
+    }
+
     fun updateToolDraft(contentIndex: Int, delta: String) {
         if (contentIndex < 0) return
         toolDraftChars[contentIndex] = (toolDraftChars[contentIndex] ?: 0) + delta.length
         toolDraftBuffers.getOrPut(contentIndex) { StringBuilder() }.append(delta)
+        // Show what the model is writing as it arrives; a long write used to sit empty until it ran.
+        refreshToolDraft(contentIndex, force = false)
     }
 
     fun finishToolDraft(contentIndex: Int, toolName: String) {
+        refreshToolDraft(contentIndex, force = true)
         toolDraftChars.remove(contentIndex)
         toolDraftBuffers.remove(contentIndex)
         toolDraftRefreshAt.remove(contentIndex)
@@ -2645,7 +2652,7 @@ LaunchedEffect(listState) {
                         }
                         Text(if (line.tokensBefore > 0) "已从 ${java.text.NumberFormat.getIntegerInstance().format(line.tokensBefore)} tokens 压缩" else "旧消息已合并为摘要", color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                         if (!line.collapsed) PiMarkdown(fullText, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-                        TextButton(onClick = { onToggleLine(lineIndex) }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) { Text(if (line.collapsed) "展开摘要" else "收起摘要", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+                        TextButton(onClick = { onToggleLine(lineIndex) }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) { Icon(if (line.collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp, contentDescription = if (line.collapsed) "展开" else "收起", tint = Accent, modifier = Modifier.size(22.dp)) }
                     }
                     "tool", "tool-draft" -> {
                         val colors = LocalPiColors.current
@@ -2656,7 +2663,12 @@ LaunchedEffect(listState) {
                         val outputHint = toolHiddenHint(toolOutput)
                         val argsHint = toolArgsHiddenHint(line.toolArgs)
                         val renderedOutput = if (line.collapsed && outputHint.isNotBlank()) toolOutputPreview(toolOutput) else toolOutput
-                        val renderedArgs = if (line.collapsed && argsHint.isNotBlank()) toolArgsPreview(line.toolArgs) else line.toolArgs
+                        val renderedArgs = when {
+                            !line.collapsed || argsHint.isBlank() -> line.toolArgs
+                            // Still being written: keep the first line (path/command) and follow the newest text.
+                            line.role == "tool-draft" && line.streaming -> line.toolArgs.trimEnd().lines().let { all -> (listOf(all.first()) + all.drop(1).takeLast(4)).joinToString("\n") }
+                            else -> toolArgsPreview(line.toolArgs)
+                        }
                         // A command short enough to skip the text preview can still wrap past
                         // maxLines on a phone; without this it was clipped with no way to expand.
                         var argsClipped by remember(line.toolCallId, line.toolArgs) { mutableStateOf(false) }
@@ -2677,9 +2689,12 @@ LaunchedEffect(listState) {
                             toolOutput.isNotBlank() -> "${toolOutput.trimEnd().lines().size} lines"
                             line.toolArgs.isNotBlank() -> "${line.toolArgs.trimEnd().lines().size} lines"
                             else -> ""
+                        }.let { info ->
+                            // Numbers only: "… +19 lines" -> "+19", a plain total is left out.
+                            Regex("\\+(\\d+)").find(info)?.let { "+${it.groupValues[1]}" }.orEmpty()
                         }
                         val toolShape = RoundedCornerShape(16.dp)
-                        val toolIcon = when (name.lowercase()) {
+                        val toolIcon = if (line.toolIsError) Icons.Filled.Warning else when (name.lowercase()) {
                             "bash" -> Icons.Filled.PlayArrow
                             "read" -> Icons.Filled.Info
                             "edit", "write" -> Icons.Filled.Edit
@@ -2693,17 +2708,12 @@ LaunchedEffect(listState) {
                                 }
                                 Spacer(Modifier.width(9.dp))
                                 Text(name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                if (line.toolIsError) Text("失败", color = Danger, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clip(PillShape).background(Danger.copy(alpha = 0.14f)).padding(horizontal = 8.dp, vertical = 2.dp))
-                                else if (line.streaming) Row(verticalAlignment = Alignment.CenterVertically) {
-                                    CircularProgressIndicator(Modifier.size(11.dp), color = Blue, strokeWidth = 1.5.dp)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("运行中", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                                }
+                                if (line.streaming && !line.toolIsError) BreathingDot(Blue)
                                 else if (!expandable && duration.isNotBlank()) Text(duration, color = colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
                             }
                             if (renderedArgs.isNotBlank()) {
                                 val argsText = if (name == "bash") buildAnnotatedString { pushStyle(SpanStyle(color = Accent)); append("$ "); pop(); append(renderedArgs) } else buildAnnotatedString { append(renderedArgs) }
-                                Text(argsText, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 19.sp, maxLines = if (line.collapsed) 3 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) argsClipped = true }, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp))
+                                Text(argsText, color = if (name == "bash") colors.toolTitle else colors.markdownCyan, fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, lineHeight = 19.sp, maxLines = if (!line.collapsed) Int.MAX_VALUE else if (line.role == "tool-draft" && line.streaming) 6 else 3, overflow = TextOverflow.Ellipsis, onTextLayout = { if (it.hasVisualOverflow) argsClipped = true }, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp))
                             }
                             if (line.toolMeta.isNotBlank()) Text(line.toolMeta, color = if (line.toolIsError) Danger else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, lineHeight = 15.sp, modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp))
                             if (renderedOutput.isNotBlank()) {
@@ -2722,8 +2732,7 @@ LaunchedEffect(listState) {
                                             modifier = Modifier.fillMaxWidth(),
                                             contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)
                                         ) {
-                                            Text(if (line.collapsed) "展开全部" else "收起", color = Accent, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
-                                            Icon(if (line.collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
+                                            Icon(if (line.collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp, contentDescription = if (line.collapsed) "展开" else "收起", tint = Accent, modifier = Modifier.size(22.dp))
                                         }
                                     }
                                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
