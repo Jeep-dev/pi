@@ -26,7 +26,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-25.1"
+    private val expectedBridgeVersion = "2026-09-30.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -72,30 +72,46 @@ class PiBridge(
     /** Close this Android Session like a terminal tab: stop its runtime and keep all files/history. */
     suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            request("/shutdown", "{}", 5_000).getOrThrow()
+            request("/shutdown", JSONObject().put("reason", "Android Session closed").toString(), 5_000).getOrThrow()
             delay(750)
             // Deliberately keep bridge files, session directories, JSONL history,
             // endpoint tokens, and runtime preferences. Closing a tab is not deletion.
         }
     }
 
-    suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (!termuxAvailable()) return@withContext Result.failure(IllegalStateException("请先安装 Termux"))
+    suspend fun installAndStartBridge(reason: String = "install"): Result<Unit> = withContext(Dispatchers.IO) {
+        if (!termuxAvailable()) return@withContext Result.failure(TermuxSetupException("请先安装 Termux"))
         runCatching {
-            request("/shutdown", "{}", 2_000)
-            delay(750)
-            val bridge = context.assets.open("pi-android-bridge.mjs").use {
-                Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
-            }
-            val extension = context.assets.open("pi-android-mobile.ts").use {
-                Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
-            }
+            val shutdown = request("/shutdown", JSONObject().put("reason", "app relaunch: $reason").toString(), 2_000)
+            // Nothing listened (a new Session, or a Bridge Android killed): no old
+            // process to wait for. Otherwise give it a moment to exit by itself;
+            // the launcher below still kills whatever is left on this port.
+            if (!shutdown.exceptionOrNull().isConnectRefusedFailure()) delay(750)
+            // Both scripts travel inside one argv string, which Linux caps at 128KB;
+            // uncompressed they were already at 118KB. gzip keeps them far below.
+            val bridge = gzipBase64("pi-android-bridge.mjs")
+            val extension = gzipBase64("pi-android-mobile.ts")
+            val d = "${'$'}"
+            val logReason = reason.replace(Regex("[^A-Za-z0-9 .:_/-]"), " ").take(160)
+            // Stop the process on the way out quickly: poll for its exit instead of sleeping.
+            val waitGone = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 ${d}p 2>/dev/null || break; sleep 0.05; done; kill -9 ${d}p 2>/dev/null"
+            // A Bridge left behind by a closed Session can still hold this port with
+            // another token: it answers 401, ignores our /shutdown, and the new node
+            // would die on EADDRINUSE. Kill any Bridge whose environment names this port.
+            val freePort = "for f in ~/.pi/android/bridge.pid ~/.pi/android/sessions/*/bridge.pid; do " +
+                "[ -f \"${d}f\" ] || continue; p=${d}(cat \"${d}f\" 2>/dev/null); [ -n \"${d}p\" ] || continue; " +
+                "if tr '\\0' '\\n' < /proc/${d}p/environ 2>/dev/null | grep -qx 'PI_ANDROID_PORT=$port'; then " +
+                "echo \"[${d}(date -u +%Y-%m-%dT%H:%M:%SZ)] launcher: stopping Bridge pid=${d}p on port $port (${d}f)\" >> $remoteLogFile; " +
+                "kill ${d}p 2>/dev/null; $waitGone; fi; done"
             val command = """
                 mkdir -p $remoteBridgeDir &&
-                printf '%s' '$bridge' | base64 -d > $remoteBridgeScript &&
-                printf '%s' '$extension' | base64 -d > $remoteExtensionScript &&
+                echo "[${d}(date -u +%Y-%m-%dT%H:%M:%SZ)] launcher start: $logReason" >> $remoteLogFile &&
+                printf '%s' '$bridge' | base64 -d | gzip -dc > $remoteBridgeScript &&
+                printf '%s' '$extension' | base64 -d | gzip -dc > $remoteExtensionScript &&
                 chmod 700 $remoteBridgeScript &&
-                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
+                { if [ -f $remotePidFile ]; then p="${d}(cat $remotePidFile)"; kill "${d}p" 2>/dev/null; $waitGone; fi; true; } &&
+                { $freePort; true; } &&
+                { (command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 &); true; } &&
                 rm -f $remotePidFile &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$runtimeOwnerSessionId' PI_ANDROID_PID_FILE=$remotePidFile &&
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
@@ -104,11 +120,22 @@ class PiBridge(
         }
     }
 
+    private fun gzipBase64(asset: String): String {
+        val raw = context.assets.open(asset).use { it.readBytes() }
+        val packed = java.io.ByteArrayOutputStream().also { out ->
+            java.util.zip.GZIPOutputStream(out).use { it.write(raw) }
+        }.toByteArray()
+        return Base64.encodeToString(packed, Base64.NO_WRAP)
+    }
+
     suspend fun waitForBridge(timeoutMillis: Long = 15_000): Result<Unit> {
-        val attempts = (timeoutMillis / 250).toInt().coerceAtLeast(1)
+        // Bounded by wall-clock time: a port that accepts but never answers used to
+        // stretch "30s" of attempts to almost three minutes.
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis
         var lastSeenVersion = ""
-        repeat(attempts) {
-            request("/health", null, 1200).onSuccess { raw ->
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val remaining = (deadline - android.os.SystemClock.elapsedRealtime()).toInt().coerceIn(250, 1200)
+            request("/health", null, remaining).onSuccess { raw ->
                 val root = runCatching { JSONObject(raw) }.getOrNull()
                 val version = root?.optString("bridgeVersion").orEmpty()
                 val capabilities = root?.optJSONArray("capabilities") ?: JSONArray()
@@ -429,12 +456,18 @@ class PiBridge(
      * Bridge sends a heartbeat every 10s, so a read timeout means a dead link,
      * never a quiet agent. [onOpen] fires once the first frame arrives.
      */
-    suspend fun stream(after: Long, onOpen: () -> Unit, onBatch: suspend (PiEventBatch) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun stream(
+        after: Long,
+        onOpen: () -> Unit,
+        keepOpen: () -> Boolean = { true },
+        onBatch: suspend (PiEventBatch) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = (URL("http://127.0.0.1:$port/stream?after=$after").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 8_000
-                readTimeout = 30_000
+                // Heartbeats come every 10s, so 25s of silence means a stalled Bridge.
+                readTimeout = 25_000
                 useCaches = false
                 setRequestProperty("Authorization", "Bearer $authToken")
                 setRequestProperty("Accept", "text/event-stream")
@@ -451,6 +484,7 @@ class PiBridge(
                 while (true) {
                     job?.ensureActive()
                     val line = reader.readLine() ?: break
+                    if (!keepOpen()) break
                     when {
                         line.isEmpty() -> if (data.isNotEmpty()) {
                             val batch = parseEventBatch(JSONObject(data.toString()), after)
@@ -776,16 +810,46 @@ class PiBridge(
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
-    private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
+    /**
+     * Run a no-op in Termux. Starting Termux's command service thaws a Termux the
+     * system froze in the background, and with it this Bridge and its Pi child,
+     * without restarting either. It also asks Termux to hold its wake lock so the
+     * Bridge keeps running while the screen is off.
+     */
+    suspend fun wakeTermux(force: Boolean = false, minIntervalMs: Long = WAKE_INTERVAL_MS): Result<Unit> {
+        // The delivered intent is what thaws Termux, so run the cheapest command
+        // there is: no login shell, no `am`. One wake per interval for the whole
+        // app; every Session and the keep-alive used to send their own.
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(wakeGate) {
+            if (!force && lastWakeAtMs != 0L && now - lastWakeAtMs < minIntervalMs) return Result.success(Unit)
+            lastWakeAtMs = now
+        }
+        return runTermuxExecutable("/data/data/com.termux/files/usr/bin/true", emptyArray())
+    }
+
+    private suspend fun runTermux(command: String): Result<Unit> =
+        runTermuxExecutable("/data/data/com.termux/files/usr/bin/bash", arrayOf("-lc", command))
+
+    private suspend fun runTermuxExecutable(path: String, arguments: Array<String>): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
-                .putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-                .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+                .putExtra("com.termux.RUN_COMMAND_PATH", path)
+                .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arguments)
                 .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-            context.startService(intent)
+            val started = try {
+                context.startService(intent)
+            } catch (backgroundStart: IllegalStateException) {
+                // Background start limits: Termux's RunCommandService goes foreground itself.
+                if (android.os.Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else throw backgroundStart
+            }
+            if (started == null) {
+                android.util.Log.w("PiBridge", "RUN_COMMAND not delivered path=$path")
+                return@withContext Result.failure(IllegalStateException("Termux 拒绝了启动命令（系统拦截或 Termux 未安装）"))
+            }
             Result.success(Unit)
         } catch (_: SecurityException) {
-            Result.failure(IllegalStateException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
+            Result.failure(TermuxSetupException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -809,13 +873,18 @@ class PiBridge(
                 val code = try {
                     connection.responseCode
                 } catch (timeout: java.net.SocketTimeoutException) {
-                    throw IllegalStateException("Pi ${timeoutMs / 1000} 秒内没有响应（$path）；可能是模型 provider 网络不通或登录刷新卡住", timeout)
+                    val hint = if (path == "/prompt" || path == "/model" || path == "/stats") {
+                        "可能是 Termux 被系统冻结，或模型 provider 网络不通"
+                    } else {
+                        "Termux 可能被系统冻结，正在唤醒"
+                    }
+                    throw IllegalStateException("Pi ${timeoutMs / 1000} 秒内没有响应（$path）；$hint", timeout)
                 }
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 if (code !in 200..299) {
                     val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
-                    throw IllegalStateException(message.ifBlank { "HTTP $code: $text" })
+                    throw BridgeHttpException(code, message.ifBlank { "HTTP $code: $text" })
                 }
                 text
             } finally {
@@ -831,6 +900,9 @@ class PiBridge(
         /** Must stay above the Bridge's SLOW_RPC_TIMEOUT_MS so the Bridge reports which RPC stalled. */
         const val SLOW_RPC_TIMEOUT_MS = 40_000
         const val DEFAULT_ENDPOINT_KEY = "default"
+        private const val WAKE_INTERVAL_MS = 10_000L
+        private val wakeGate = Any()
+        private var lastWakeAtMs = 0L
 
         internal fun endpointToken(context: Context, key: String): String {
             val preferences = context.applicationContext.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
@@ -848,6 +920,45 @@ class PiBridge(
                 .edit().remove(preferenceKey).commit()
         }
     }
+}
+
+/** The Bridge answered with an HTTP error: its process is alive and responsive. */
+class BridgeHttpException(val code: Int, message: String) : IllegalStateException(message)
+
+/** True when [this] or a cause is a 401: another Session's Bridge holds this port. */
+internal fun Throwable?.isForeignBridgeFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is BridgeHttpException && current.code == 401) return true
+        current = current.cause
+    }
+    return false
+}
+
+/** A local setup problem that retrying cannot fix; the user must act first. */
+class TermuxSetupException(message: String) : IllegalStateException(message)
+
+/** True when [this] or a cause is a socket timeout: something holds the port but did not answer. */
+internal fun Throwable?.isSocketTimeoutFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.SocketTimeoutException) return true
+        current = current.cause
+    }
+    return false
+}
+
+/** True when [this] or a cause is a refused connection: nothing listens on the port. */
+internal fun Throwable?.isConnectRefusedFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.ConnectException) return true
+        current = current.cause
+    }
+    return false
 }
 
 data class PiHealth(

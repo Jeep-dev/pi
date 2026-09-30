@@ -39,11 +39,34 @@ assert.ok(bridge.includes("row.toolDurationMs = startedAtMs > 0"), "durable hist
 
 // Reconnect must never kill Pi: the Bridge is replaced only when it is gone or
 // from an older APK, and the event loop rides the push stream.
-const relaunches = runtime.split("installAndStartBridge()").length - 1;
+const relaunches = runtime.split("installAndStartBridge(").length - 1;
 assert.equal(relaunches, 1, "Bridge relaunch must have exactly one guarded call site");
-assert.ok(/if \(!bridgeUsable\) \{[\s\S]*?installAndStartBridge\(\)/.test(runtime), "Bridge relaunch must be guarded by bridgeUsable");
+assert.ok(/if \(!bridgeUsable\) \{[\s\S]*?installAndStartBridge\(/.test(runtime), "Bridge relaunch must be guarded by bridgeUsable");
 assert.ok(runtime.includes("bridge.stream("), "event loop must use the push stream");
 assert.ok(!runtime.includes("bridge.events("), "event loop must not long-poll /events");
 assert.ok(runtime.includes("patientHealth()"), "attach must wait for a thawing Bridge before declaring it dead");
 assert.ok(bridge.includes('url.pathname === "/stream"'), "bridge must serve the push stream");
+// A frozen Termux must be woken, not replaced, and the keep-alive must survive it.
+const keepAlive = await readFile("app/src/main/java/com/piandroid/AgentKeepAliveService.kt", "utf8");
+assert.ok(runtime.includes("wakeTermuxIfDue()"), "runtime must wake a frozen Termux before giving up on it");
+assert.ok(/!lastHealthError\.isConnectRefusedFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRACE_MS[\s\S]*?installAndStartBridge\(/.test(runtime), "only a Bridge that refuses connections may be relaunched without a grace window");
+assert.ok(runtime.includes("isRetryableConnectFailure(error)"), "a failed first connect must retry");
+assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a Termux that stopped answering");
+assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");
+assert.ok(runtime.includes("reconcileDegraded(generation)"), "a reconnecting header must be re-checked against the live Bridge");
+assert.equal(runtime.split("updatesMutable.emit(PiRuntimeUpdate.Reconnecting(").length - 1, 1, "every Reconnecting must go through emitReconnecting so it can be cleared");
+// A new Session must not wait out the patient probe on a port nothing listens on,
+// and a port held by another Session's Bridge (401) is not "frozen".
+const piBridge = await readFile("app/src/main/java/com/piandroid/PiBridge.kt", "utf8");
+assert.ok(/if \(error\.isConnectRefusedFailure\(\)\) \{\s*if \(\+\+refused >= 2\) return null/.test(runtime), "patientHealth must give up quickly on a refused port");
+assert.ok(runtime.includes("!lastHealthError.isForeignBridgeFailure()"), "a 401 from a foreign Bridge must skip the frozen grace");
+assert.ok(runtime.includes("markAlive()"), "any proof of life must reset the frozen-Bridge window");
+assert.ok(piBridge.includes("val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis"), "waitForBridge must be bounded by wall-clock time");
+assert.ok(piBridge.includes("PI_ANDROID_PORT=$port"), "the launcher must clear a stale Bridge holding this port");
+assert.ok(piBridge.includes('"/data/data/com.termux/files/usr/bin/true"'), "waking Termux must not start a login shell");
+assert.ok(main.includes("runtimeManager.onForeground()"), "returning to the foreground must wake Termux and probe at once");
+assert.ok(main.includes("runtime.alreadyRunning(session)"), "the first Ready must not trigger a second full attach");
+assert.ok(!/is PiRuntimeUpdate\.Ready -> applyRuntimeReady[\s\S]{0,40}\n[\s\S]*?suspend fun applyRuntimeReady[\s\S]*?\n        refreshMeta\(\)\n/.test(main), "Ready must not await refreshMeta inside the update collector");
+assert.ok(main.includes("runtimeManager.keepTermuxThawed()"), "while Pi is visible, Termux must be kept thawed");
+assert.ok(keepAlive.includes("wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)"), "keep-alive must thaw Termux before probing");
 console.log("Reconnect-without-restart guards passed");
