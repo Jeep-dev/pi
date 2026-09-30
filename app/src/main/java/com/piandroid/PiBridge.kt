@@ -816,13 +816,13 @@ class PiBridge(
      * without restarting either. It also asks Termux to hold its wake lock so the
      * Bridge keeps running while the screen is off.
      */
-    suspend fun wakeTermux(force: Boolean = false): Result<Unit> {
+    suspend fun wakeTermux(force: Boolean = false, minIntervalMs: Long = WAKE_INTERVAL_MS): Result<Unit> {
         // The delivered intent is what thaws Termux, so run the cheapest command
         // there is: no login shell, no `am`. One wake per interval for the whole
         // app; every Session and the keep-alive used to send their own.
         val now = android.os.SystemClock.elapsedRealtime()
         synchronized(wakeGate) {
-            if (!force && lastWakeAtMs != 0L && now - lastWakeAtMs < WAKE_INTERVAL_MS) return Result.success(Unit)
+            if (!force && lastWakeAtMs != 0L && now - lastWakeAtMs < minIntervalMs) return Result.success(Unit)
             lastWakeAtMs = now
         }
         return runTermuxExecutable("/data/data/com.termux/files/usr/bin/true", emptyArray())

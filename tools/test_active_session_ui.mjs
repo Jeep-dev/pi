@@ -67,4 +67,6 @@ assert.ok(piBridge.includes('"/data/data/com.termux/files/usr/bin/true"'), "waki
 assert.ok(main.includes("runtimeManager.onForeground()"), "returning to the foreground must wake Termux and probe at once");
 assert.ok(main.includes("runtime.alreadyRunning(session)"), "the first Ready must not trigger a second full attach");
 assert.ok(!/is PiRuntimeUpdate\.Ready -> applyRuntimeReady[\s\S]{0,40}\n[\s\S]*?suspend fun applyRuntimeReady[\s\S]*?\n        refreshMeta\(\)\n/.test(main), "Ready must not await refreshMeta inside the update collector");
+assert.ok(main.includes("runtimeManager.keepTermuxThawed()"), "while Pi is visible, Termux must be kept thawed");
+assert.ok(keepAlive.includes("wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)"), "keep-alive must thaw Termux before probing");
 console.log("Reconnect-without-restart guards passed");
