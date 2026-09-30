@@ -138,6 +138,29 @@ function settlePending(id, value) {
   return true;
 }
 
+// Pi 0.99 puts large payloads on events the phone never shows: bash/codemode
+// structuredContent (up to 1 MiB of output) and system messages carrying every prompt
+// section and tool schema. Keep them out of the replay buffer and the phone stream.
+function slimEvent(value) {
+  if (!value || typeof value !== "object") return value;
+  const type = value.type;
+  if (type === "tool_execution_end" && value.result && typeof value.result === "object" && "structuredContent" in value.result) {
+    const { structuredContent, ...result } = value.result;
+    return { ...value, result };
+  }
+  if (type === "tool_execution_update" && value.partialResult && typeof value.partialResult === "object" && "structuredContent" in value.partialResult) {
+    const { structuredContent, ...partialResult } = value.partialResult;
+    return { ...value, partialResult };
+  }
+  if ((type === "message_start" || type === "message_update" || type === "message_end") && value.message?.role === "system") {
+    return { ...value, message: { role: "system" } };
+  }
+  if (type === "agent_end" && Array.isArray(value.messages) && value.messages.some(message => message?.role === "system")) {
+    return { ...value, messages: value.messages.filter(message => message?.role !== "system") };
+  }
+  return value;
+}
+
 function attachJsonl(stream) {
   const decoder = new StringDecoder("utf8");
   // Pieces of the current, unfinished line. A multi-MB RPC reply (get_entries on a
@@ -160,7 +183,7 @@ function attachJsonl(stream) {
       try {
         const value = JSON.parse(line);
         if (value.type === "response" && value.id && settlePending(value.id, value)) continue;
-        addEvent(value);
+        addEvent(slimEvent(value));
       } catch {
         addEvent({ type: "raw", line });
       }
@@ -175,7 +198,7 @@ function attachJsonl(stream) {
       try {
         const value = JSON.parse(rest);
         if (value.type === "response" && value.id && settlePending(value.id, value)) return;
-        addEvent(value);
+        addEvent(slimEvent(value));
       } catch { addEvent({ type: "raw", line: rest }); }
     }
   });
@@ -690,7 +713,9 @@ function recoveryEventsAfterHistory(historySeq, latest, toolResultIds = new Set(
     } else if (type === "tool_execution_end") {
       const key = String(value.toolCallId || "");
       const state = activeTools.get(key);
-      if (key && !toolResultIds.has(key)) {
+      // Nested calls (codemode/MCP, parentToolCallId set) never get their own transcript
+      // entry, so carrying them would replay them as stray cards after every reconnect.
+      if (key && !value.parentToolCallId && !toolResultIds.has(key)) {
         if (state?.start) completedToolCarry.add(state.start.seq);
         if (state?.update) completedToolCarry.add(state.update.seq);
         completedToolCarry.add(item.seq);
@@ -735,7 +760,9 @@ async function summarizeSession(file, currentFile) {
   const handle = await open(file, "r");
   try {
     const chunk = 256 * 1024;
-    const headLen = Math.min(info.size, chunk);
+    // Pi 0.99 opens a session with a system entry holding every prompt section and tool
+    // schema, which can push the first user message past a 256 KiB head.
+    const headLen = Math.min(info.size, 4 * chunk);
     const tailLen = Math.min(info.size, chunk);
     const head = await readSlice(handle, 0, headLen);
     const tailOffset = Math.max(0, info.size - tailLen);

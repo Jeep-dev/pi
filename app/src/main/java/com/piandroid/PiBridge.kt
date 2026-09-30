@@ -199,7 +199,7 @@ class PiBridge(
         message: String,
         streamingBehavior: String? = null,
         attachments: List<PiAttachment> = emptyList()
-    ): Result<Unit> {
+    ): Result<String> {
         val body = JSONObject().put("message", message).apply {
             if (!streamingBehavior.isNullOrBlank()) put("streamingBehavior", streamingBehavior)
             if (attachments.isNotEmpty()) put("attachments", JSONArray().apply {
@@ -214,7 +214,11 @@ class PiBridge(
                 }
             })
         }
-        return request("/prompt", body.toString(), SLOW_RPC_TIMEOUT_MS).map { Unit }
+        // Pi 0.99 answers with data.disposition: "started", "queued" or "handled" (an
+        // extension or input handler consumed it and no run follows). Older Pi omits it.
+        return request("/prompt", body.toString(), SLOW_RPC_TIMEOUT_MS).map { raw ->
+            runCatching { JSONObject(raw).optJSONObject("data")?.optString("disposition").orEmpty() }.getOrDefault("")
+        }
     }
 
     suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
@@ -673,7 +677,8 @@ class PiBridge(
                     text = "",
                     toolCallId = value.optString("toolCallId"),
                     argsText = toolArgsText(toolName, args),
-                    toolName = toolName
+                    toolName = toolName,
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "tool_execution_update" -> {
@@ -697,7 +702,8 @@ class PiBridge(
                     toolCallId = value.optString("toolCallId"),
                     argsText = toolArgsText(toolName, value.optJSONObject("args")),
                     toolName = toolName,
-                    metaText = meta
+                    metaText = meta,
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "queue_update" -> {
@@ -746,7 +752,8 @@ class PiBridge(
                     toolCallId = value.optString("toolCallId"),
                     toolName = name,
                     metaText = subagentMeta(details),
-                    isError = value.optBoolean("isError")
+                    isError = value.optBoolean("isError"),
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "compaction_start", "compaction_end" -> {
@@ -1044,7 +1051,9 @@ data class PiEvent(
     val argsText: String = "",
     val toolName: String = "",
     val metaText: String = "",
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    /** Set on tool calls made from inside another tool (codemode scripts, MCP via codemode). */
+    val parentToolCallId: String = ""
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)

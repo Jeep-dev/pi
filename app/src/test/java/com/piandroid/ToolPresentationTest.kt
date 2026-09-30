@@ -73,6 +73,13 @@ class ToolPresentationTest {
     }
 
     @Test
+    fun mcpToolsAreTitledServerSlashTool() {
+        assertEquals("docs/search", toolDisplayName("mcp__docs__search"))
+        assertEquals("read", toolDisplayName("read"))
+        assertEquals("mcp__broken", toolDisplayName("mcp__broken"))
+    }
+
+    @Test
     fun toolDurationMatchesNativePiTenthsFormat() {
         assertEquals("0.0s", formatToolDuration(0))
         assertEquals("1.2s", formatToolDuration(1_249))

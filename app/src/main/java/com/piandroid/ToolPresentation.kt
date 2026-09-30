@@ -118,8 +118,34 @@ internal fun formatToolArgs(toolName: String, args: JSONObject?): String {
             // Keep the compact first line, but make Show all reveal every delegated task/config field.
             join(summary, args.toString(2))
         }
-        else -> args.toString(2)
+        // Pi 0.99 codemode runs a model-written script; the script is the whole call.
+        "codemode" -> join(args.optString("code"), extra = extras(setOf("code")))
+        "tool_search" -> {
+            val limit = args.optInt("limit", 0)
+            join(args.optString("query") + if (limit > 0) "  ≤$limit" else "", extra = extras(setOf("query", "limit")))
+        }
+        // MCP and other tools without a renderer: one "key: value" line per argument, as Pi's
+        // TUI shows them expanded, instead of a JSON dump.
+        else -> buildList {
+            val keys = args.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = args.opt(key)
+                add(when (value) {
+                    is JSONObject, is JSONArray -> "$key: $value"
+                    JSONObject.NULL -> "$key: null"
+                    else -> "$key: $value"
+                })
+            }
+        }.joinToString("\n")
     }
+}
+
+/** MCP tools arrive as mcp__<server>__<tool>; Pi titles them server/tool. */
+internal fun toolDisplayName(name: String): String {
+    if (!name.startsWith("mcp__")) return name
+    val parts = name.removePrefix("mcp__").split("__", limit = 2)
+    return if (parts.size == 2 && parts.all { it.isNotBlank() }) "${parts[0]}/${parts[1]}" else name
 }
 
 /** Keep the tool result payload lossless; presentation/state belongs to the UI. */

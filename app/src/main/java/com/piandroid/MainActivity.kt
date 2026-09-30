@@ -300,6 +300,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 适配 Pi 0.99：codemode 里调用的工具显示在同一张卡片内（● ✓ ✗），MCP 工具显示为 server/tool 并按行列出参数；被扩展直接处理的消息不再让状态卡在工作中；Bridge 丢弃不显示的大字段，重连更快",
     "• 回复边输出边按 Markdown 渲染，不再等输出完才排版",
     "• 工具图标换成统一的线条风格：read 眼睛、bash 终端、edit 笔、write 新建文件；出错时图标变红，不再用警告三角；工具参数生成完成后按正式格式显示，不再露出 JSON",
     "• 短暂断流自动重连时不再在聊天里写「连接中断，正在重连」，只用顶栏圆点表示；真正连不上才提示",
@@ -459,6 +460,7 @@ private fun toolDraftArgs(toolName: String, raw: String): String {
     return when (toolName) {
         "write" -> listOf(path, partialJsonString(raw, "content").orEmpty()).filter { it.isNotEmpty() }.joinToString("\n")
         "bash", "powershell" -> partialJsonString(raw, "command") ?: raw
+        "codemode" -> partialJsonString(raw, "code") ?: raw
         "edit" -> {
             // Show the edit being written as -/+ lines rather than raw JSON.
             fun latest(key: String): String? = raw.lastIndexOf("\"$key\"").takeIf { it >= 0 }?.let { partialJsonString(raw.substring(it), key) }
@@ -484,6 +486,7 @@ private val ReadToolIcon = lineIcon("Read", "M2 12 C 4.5 7 8 5 12 5 C 16 5 19.5 
 private val BashToolIcon = lineIcon("Bash", "M4 17 L10 11 L4 5", "M12 19 H20")
 private val EditToolIcon = lineIcon("Edit", "M12 3 H5 A 2 2 0 0 0 3 5 V19 A 2 2 0 0 0 5 21 H19 A 2 2 0 0 0 21 19 V12", "M18.4 2.6 A 2.1 2.1 0 0 1 21.4 5.6 L12.4 14.6 L8 16 L9.4 11.6 Z")
 private val WriteToolIcon = lineIcon("Write", "M14 2 H6 A 2 2 0 0 0 4 4 V20 A 2 2 0 0 0 6 22 H18 A 2 2 0 0 0 20 20 V8 Z", "M14 2 V8 H20", "M12 12 V18", "M9 15 H15")
+private val CodeToolIcon = lineIcon("Code", "M16 18 L22 12 L16 6", "M8 6 L2 12 L8 18")
 private val SearchToolIcon = lineIcon("Search", "M3 11 A 8 8 0 1 0 19 11 A 8 8 0 1 0 3 11 Z", "M21 21 L16.7 16.7")
 private val OtherToolIcon = lineIcon("Tool", "M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z", "M4 7.5 L12 12 L20 7.5", "M12 12 V21")
 private val CancelledToolIcon = lineIcon("Cancelled", "M18 6 L6 18", "M6 6 L18 18")
@@ -867,6 +870,9 @@ private fun PiScreen(
     val toolDraftBuffers = remember { mutableMapOf<Int, StringBuilder>() }
     val toolDraftRefreshAt = remember { mutableMapOf<Int, Long>() }
     val toolOutputRefreshAt = remember { mutableMapOf<String, Long>() }
+    // Calls a codemode script (or MCP through it) makes inside one tool: parent id -> child id -> row.
+    val nestedToolRows = remember { mutableMapOf<String, LinkedHashMap<String, String>>() }
+    val nestedToolStarts = remember { mutableMapOf<String, Long>() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -1163,6 +1169,29 @@ private fun PiScreen(
         }
     }
 
+    /** A nested call becomes a row on its parent card (● running, ✓ done, ✗ failed), not a card of its own. */
+    fun applyNestedTool(event: PiEvent): Boolean {
+        val parentId = event.parentToolCallId
+        if (parentId.isBlank()) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        val childId = event.toolCallId
+        if (event.type == "tool_execution_start") nestedToolStarts[childId] = now
+        val name = toolDisplayName(event.toolName).ifBlank { "tool" }
+        val row = when (event.type) {
+            "tool_execution_end" -> {
+                val took = nestedToolStarts.remove(childId)?.let { "  " + formatToolDuration(now - it) }.orEmpty()
+                (if (event.isError) "✗ " else "✓ ") + name + took
+            }
+            else -> "● $name"
+        }
+        val rows = nestedToolRows.getOrPut(parentId) { linkedMapOf() }
+        if (rows[childId] == row) return true
+        rows[childId] = row
+        val index = lines.indexOfLast { it.role == "tool" && it.toolCallId == parentId }
+        if (index >= 0) lines[index] = lines[index].copy(toolMeta = rows.values.joinToString("\n"))
+        return true
+    }
+
     fun startTool(event: PiEvent) {
         val toolCallId = event.toolCallId
         val startedAt = android.os.SystemClock.uptimeMillis()
@@ -1366,9 +1395,9 @@ private fun PiScreen(
                     toolOutputRefreshAt.clear()
                 }
             }
-            "tool_execution_start" -> startTool(event)
-            "tool_execution_update" -> updateTool(event)
-            "tool_execution_end" -> finishTool(event)
+            "tool_execution_start" -> if (!applyNestedTool(event)) startTool(event)
+            "tool_execution_update" -> if (!applyNestedTool(event)) updateTool(event)
+            "tool_execution_end" -> if (!applyNestedTool(event)) finishTool(event)
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
                 settleStreams()
@@ -1621,7 +1650,8 @@ private fun PiScreen(
             runtime.launchTask {
                 val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
                 bridge.prompt(text, behavior, attachments).fold(
-                    onSuccess = { status = "Working" },
+                    // "handled": an extension consumed it and no run follows, so don't sit on Working.
+                    onSuccess = { disposition -> if (disposition != "handled") status = "Working" },
                     onFailure = {
                         if (steering) {
                             steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
@@ -1856,7 +1886,7 @@ private fun PiScreen(
                 runtime.launchTask {
                     val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
                     bridge.prompt(text, behavior).fold(
-                        onSuccess = { status = "Working" },
+                        onSuccess = { disposition -> if (disposition != "handled") status = "Working" },
                         onFailure = {
                             if (steering) {
                                 steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
@@ -2731,7 +2761,8 @@ LaunchedEffect(listState) {
                             "read" -> ReadToolIcon
                             "edit" -> EditToolIcon
                             "write" -> WriteToolIcon
-                            "grep", "find", "ls", "web_search", "search" -> SearchToolIcon
+                            "codemode" -> CodeToolIcon
+                            "grep", "find", "ls", "web_search", "search", "tool_search" -> SearchToolIcon
                             else -> OtherToolIcon
                         }
                         Column(Modifier.fillMaxWidth().clip(toolShape).background(background).border(1.dp, if (line.toolIsError) Danger.copy(alpha = 0.35f) else Border.copy(alpha = if (colors.isLight) 1f else 0.6f), toolShape)) {
@@ -2740,7 +2771,7 @@ LaunchedEffect(listState) {
                                     Icon(toolIcon, contentDescription = null, tint = statusTint, modifier = Modifier.size(15.dp))
                                 }
                                 Spacer(Modifier.width(9.dp))
-                                Text(name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                Text(toolDisplayName(name), color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 // Live clock from the moment the card appears; an expandable card keeps it in the footer.
                                 if (!expandable && duration.isNotBlank()) Text(duration, color = if (line.streaming) Blue else colors.toolMeta, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp)
                                 if (line.streaming && !line.toolIsError) { Spacer(Modifier.width(6.dp)); BreathingDot(Blue) }
