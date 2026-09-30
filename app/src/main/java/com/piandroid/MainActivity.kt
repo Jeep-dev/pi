@@ -25,6 +25,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -118,6 +122,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -291,6 +298,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 工作中改为呼吸圆点（不再像重连的转圈）；底栏去掉 WORKING；输入框 + 和发送键去掉底色，发送改为 ↲",
     "• 顶栏精简：一行显示「模型名 思考级别」，状态只用圆点表示；去掉 Session 名、工作目录、括号来源和 + 号",
     "• 界面重做：新的蓝黑/亮色配色，靠明暗分层代替满屏边框；顶栏状态胶囊、侧栏头像与 ~/ 短路径、工具卡片图标、更醒目的输入框，底栏加上下文用量细条",
     "• Pi 在前台时每 4 秒轻触一次 Termux，后台保活时每轮探测前也先唤醒：防止 ColorOS 冻结 Termux 导致界面一直显示重连中",
@@ -2274,6 +2282,16 @@ private fun chatStatusText(status: String): String {
 /** Termux's home is the only root anyone types here, so show it the way a shell prompt would. */
 private fun termuxPath(cwd: String): String = cwd.trimEnd('/').replace(Regex("^/data/data/com\\.termux/files/home"), "~").ifBlank { "~" }
 
+/** A dot that softly swells and fades while Pi works; a spinner read as "reconnecting". */
+@Composable
+private fun BreathingDot(color: Color) {
+    val breath = rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "breath")
+    Box(Modifier.size(12.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(12.dp).graphicsLayer { alpha = (1f - breath.value) * 0.5f; scaleX = 0.6f + breath.value * 0.4f; scaleY = scaleX }.clip(CircleShape).background(color))
+        Box(Modifier.size(8.dp).graphicsLayer { alpha = 0.55f + breath.value * 0.45f }.clip(CircleShape).background(color))
+    }
+}
+
 /** "Gemini 3.8 Flash (Antigravity)" -> "Gemini 3.8 Flash": the provider tag belongs in the model list, not the top bar. */
 private fun topBarModelName(model: String): String = model.replace(Regex("\\s*[(（][^()（）]*[)）]\\s*$"), "").ifBlank { model }
 
@@ -2291,7 +2309,7 @@ private fun ChatTopBar(model: String, thinkingLevel: String, status: String, onM
                     Modifier.weight(1f, fill = false).clip(PillShape).clickable(onClick = onModel).padding(start = 6.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (working) CircularProgressIndicator(Modifier.size(10.dp), color = statusColor, strokeWidth = 1.8.dp) else StatusDot(statusColor, 8.dp)
+                    if (working) BreathingDot(statusColor) else StatusDot(statusColor, 8.dp)
                     Spacer(Modifier.width(8.dp))
                     Text(topBarModelName(model).ifBlank { "选择模型" } + if (thinkingLevel.isNotBlank()) " " + thinkingLevel.replaceFirstChar { it.uppercase() } else "", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = TextMuted, modifier = Modifier.size(18.dp))
@@ -2781,8 +2799,8 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
             Modifier.fillMaxWidth().shadow(if (colors.isLight) 3.dp else 0.dp, composerShape).clip(composerShape).background(colors.composerBg).border(1.dp, if (value.isNotEmpty()) Accent.copy(alpha = 0.5f) else Border, composerShape).padding(6.dp),
             verticalAlignment = Alignment.Bottom
         ) {
-            Box(Modifier.size(38.dp).clip(CircleShape).background(CardBg).clickable(onClick = onAttach), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Add, contentDescription = "添加附件", tint = TextMain, modifier = Modifier.size(20.dp))
+            Box(Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onAttach), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Add, contentDescription = "添加附件", tint = TextMuted, modifier = Modifier.size(24.dp))
             }
             BasicTextField(
                 value = value,
@@ -2804,7 +2822,7 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
                 Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(when { showStop -> colors.stopButtonBg; canSend -> Accent; else -> colors.disabledAction })
+                    .then(if (showStop) Modifier.background(colors.stopButtonBg) else Modifier)
                     // Native Pi: Enter steers the running agent, Alt+Enter queues a follow-up.
                     // On mobile a long press on send queues the follow-up.
                     .combinedClickable(
@@ -2815,7 +2833,7 @@ private fun Composer(value: String, busy: Boolean, attachments: List<PiAttachmen
                 contentAlignment = Alignment.Center
             ) {
                 if (showStop) Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
-                else Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "发送", tint = if (canSend) colors.onAccent else TextMuted, modifier = Modifier.size(26.dp))
+                else Text("↲", color = if (canSend) Accent else TextMuted.copy(alpha = 0.5f), fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.semantics { contentDescription = "发送" })
             }
         }
     }
@@ -2826,13 +2844,11 @@ private fun compactCount(value: Long): String = when { value >= 1_000_000_000 ->
 @Composable
 private fun Footer(state: PiState?, stats: PiStats?, status: String, onFocusComposer: () -> Unit) {
     val colors = LocalPiColors.current
-    val compactStatus = when { status.startsWith("WORKING") -> "WORKING"; status.startsWith("RECONNECTING") -> "RECONNECTING"; else -> "" }
     val usage = if (stats == null) emptyList() else buildList { if (stats.inputTokens > 0) add("↑${compactCount(stats.inputTokens)}"); if (stats.outputTokens > 0) add("↓${compactCount(stats.outputTokens)}"); if (stats.cacheRead > 0) add("R${compactCount(stats.cacheRead)}"); if (stats.cacheWrite > 0) add("W${compactCount(stats.cacheWrite)}"); if ((stats.cacheRead > 0 || stats.cacheWrite > 0) && stats.latestCacheHitRate >= 0) add("CH${"%.1f".format(java.util.Locale.US, stats.latestCacheHitRate)}%"); val subscription = state?.provider == "openai-codex" || state?.provider == "kimi-coding" || state?.provider?.contains("copilot", ignoreCase = true) == true; if (stats.cost > 0 || subscription) add("\$${"%.3f".format(java.util.Locale.US, stats.cost)}${if (subscription) " (sub)" else ""}") }
     val contextFraction = stats?.takeIf { it.contextPercent >= 0 && it.contextWindow > 0 }?.let { (it.contextPercent / 100.0).toFloat().coerceIn(0f, 1f) }
     val context = (if (stats != null && contextFraction != null) "${"%.1f".format(java.util.Locale.US, stats.contextPercent)}%/${compactCount(stats.contextWindow)}" else "—/—") + if (state?.autoCompactionEnabled == true) " (auto)" else ""
     val contextColor = when { contextFraction == null -> colors.textMuted; contextFraction >= 0.85f -> colors.danger; contextFraction >= 0.6f -> colors.accent; else -> colors.textMuted }
     val text = buildAnnotatedString {
-        if (compactStatus.isNotBlank()) { pushStyle(SpanStyle(color = colors.blue, fontWeight = FontWeight.SemiBold)); append(compactStatus); pop(); append("  ") }
         usage.forEachIndexed { index, part -> if (index > 0) append(" "); append(part) }
         if (usage.isNotEmpty()) append("  ")
         pushStyle(SpanStyle(color = contextColor, fontWeight = FontWeight.Medium)); append(context); pop()
