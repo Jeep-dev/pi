@@ -297,6 +297,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 短暂断流自动重连时不再在聊天里写「连接中断，正在重连」，只用顶栏圆点表示；真正连不上才提示",
     "• 新增粉色主题：白色背景、樱花粉气泡和卡片、玫红强调色，/themes 或 /themes pink 切换",
     "• 工具卡片从出现起就实时计时（超过一分钟显示 1m40s）；消息旁用 ○ ✓ ↓ ⚠ 表示插话状态；思考块、侧栏、页脚、工具参数去掉多余文字；edit 参数改为路径加 -/+ 行",
     "• write 等工具在模型生成参数时就实时显示内容；工具卡片去掉「运行中」「展开全部」「失败」等文字，改用呼吸点、箭头、警告图标，折叠行数只显示 +N",
@@ -1505,9 +1506,9 @@ private fun PiScreen(
                     update.value.events.forEach { applyEvent(it) }
                 }
                 is PiRuntimeUpdate.Reconnecting -> {
-                    // Say why, once per episode: "reconnecting" alone gave no way to tell
-                    // a stalled stream from a dead Bridge or a Pi that exited.
-                    if (!connecting) addSystem("连接中断，正在重连：${update.error.message.orEmpty().take(160)}")
+                    // The header dot already shows the reconnect; a chat line for every brief
+                    // drop read as broken while the session kept working. Keep the reason in logcat.
+                    if (!connecting) Log.w("PiReconnect", "Reconnecting: ${update.error.message.orEmpty().take(160)}")
                     status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
                     connecting = true
                 }
