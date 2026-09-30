@@ -152,6 +152,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -191,10 +192,26 @@ class MainActivity : ComponentActivity() {
         // probe its Bridge at once instead of finishing a backoff or a 25s read.
         if (started) runtimeManager.onForeground()
         started = true
+        thawJob?.cancel()
+        thawJob = uiScope.launch {
+            while (isActive) {
+                runtimeManager.keepTermuxThawed()
+                delay(TERMUX_THAW_INTERVAL_MS)
+            }
+        }
+    }
+
+    override fun onStop() {
+        thawJob?.cancel()
+        thawJob = null
+        super.onStop()
     }
     private var started = false
+    private val uiScope = kotlinx.coroutines.MainScope()
+    private var thawJob: kotlinx.coroutines.Job? = null
 
     override fun onDestroy() {
+        uiScope.cancel()
         runtimeManager.close()
         super.onDestroy()
     }
@@ -276,6 +293,7 @@ private data class ChatLine(
 private val ANDROID_CHANGELOG = listOf(
     "• 顶栏精简：一行显示「模型名 思考级别」，状态只用圆点表示；去掉 Session 名、工作目录、括号来源和 + 号",
     "• 界面重做：新的蓝黑/亮色配色，靠明暗分层代替满屏边框；顶栏状态胶囊、侧栏头像与 ~/ 短路径、工具卡片图标、更醒目的输入框，底栏加上下文用量细条",
+    "• Pi 在前台时每 4 秒轻触一次 Termux，后台保活时每轮探测前也先唤醒：防止 ColorOS 冻结 Termux 导致界面一直显示重连中",
     "• 新建 Session 更快：不再白等 12 秒才启动 Bridge；旧 Session 残留的 Bridge 占着端口时直接清掉，不再卡几分钟",
     "• 回到前台立刻唤醒 Termux 并重新探测；推送流 25 秒无心跳就提示重连，不再像没反应",
     "• 唤醒 Termux 改成轻量命令，全 App 共用节流；Bridge 处理超大历史不再卡住，端口冲突会明确报错",
@@ -1461,6 +1479,9 @@ private fun PiScreen(
                     update.value.events.forEach { applyEvent(it) }
                 }
                 is PiRuntimeUpdate.Reconnecting -> {
+                    // Say why, once per episode: "reconnecting" alone gave no way to tell
+                    // a stalled stream from a dead Bridge or a Pi that exited.
+                    if (!connecting) addSystem("连接中断，正在重连：${update.error.message.orEmpty().take(160)}")
                     status = if (currentState?.streaming == true) "WORKING" else "RECONNECTING"
                     connecting = true
                 }

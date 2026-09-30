@@ -23,6 +23,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 
 private const val PI_SESSION_IDENTITY_TAG = "PiSessionIdentity"
+/** How often Termux is poked while it may be frozen by the system. */
+internal const val TERMUX_THAW_INTERVAL_MS = 4_000L
 
 /** A snapshot delivered to a UI client without making that client own the runtime. */
 internal data class PiRuntimeReady(
@@ -842,11 +844,23 @@ internal class PiSessionRuntime(
             if (error == null || error is StaleGeneration) continue
 
             failures++
+            Log.w(PI_SESSION_IDENTITY_TAG, "STREAM_DROP androidSessionId=$runtimeOwnerSessionId failures=$failures ${error.javaClass.simpleName}: ${error.message}")
             if (error.isSocketTimeoutFailure()) wakeTermuxIfDue()
+            // A dropped stream is not a dead Bridge. When the Bridge still answers with
+            // Pi running, only the link broke (a stalled socket, a long reply blocking a
+            // heartbeat): reopen from the cursor quietly instead of showing
+            // "reconnecting". Events are replayed from the cursor, so nothing is lost.
+            if (failures < 3 && !error.isConnectRefusedFailure() &&
+                bridge.health(timeoutMs = 3_000).getOrNull()?.piRunning == true
+            ) {
+                markAlive()
+                offlineSince = 0L
+                pause(300)
+                continue
+            }
             val now = android.os.SystemClock.elapsedRealtime()
             if (offlineSince == 0L) offlineSince = now
             val offlineFor = now - offlineSince
-            // A timed-out stream already means 25s without a heartbeat: say so now.
             if (!isDegraded() && (offlineFor >= RECONNECT_NOTICE_MS || error.isSocketTimeoutFailure())) {
                 emitReconnecting(error)
             }
@@ -1013,6 +1027,16 @@ internal class PiSessionRuntimeManager(context: Context) {
             CoroutineScope(managerJob + Dispatchers.IO).launch { first.bridge.wakeTermux(force = true) }
         }
         list.forEach { it.onForeground() }
+    }
+
+    /**
+     * While Pi is on screen, Termux is still a background app to the system, and
+     * ColorOS freezes it (Bridge and Pi included) a few seconds after it leaves the
+     * foreground. Each delivered command thaws it again, so keep poking it.
+     */
+    suspend fun keepTermuxThawed() {
+        val first = synchronized(this) { runtimes.values.firstOrNull() } ?: return
+        first.bridge.wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS - 500)
     }
 
     @Synchronized

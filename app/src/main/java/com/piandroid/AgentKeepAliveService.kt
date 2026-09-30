@@ -63,6 +63,14 @@ class AgentKeepAliveService : Service() {
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
+                // Poke Termux before probing: ColorOS freezes it (Bridge and Pi too)
+                // in the background, and only a delivered command thaws it. Without
+                // this Pi only got CPU after a probe had already timed out.
+                records.firstOrNull()?.let { record ->
+                    PiBridge(applicationContext, record.port, record.token, record.androidSessionId)
+                        .wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)
+                    delay(800)
+                }
                 val probes = records.map { record ->
                     async {
                         val endpoint = PiBridge(
@@ -111,7 +119,7 @@ class AgentKeepAliveService : Service() {
                     failures++
                     updateNotification("Pi 已掉线，正在自动重启 · $failures")
                 }
-                delay(15_000)
+                delay(if (working > 0) 5_000 else 10_000)
             }
         }
     }
