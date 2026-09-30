@@ -6,7 +6,8 @@ import androidx.compose.ui.graphics.Color
 enum class PiThemeMode(val storageKey: String, val displayName: String, val description: String) {
     Dark("dark", "暗色", "深夜蓝黑，层次靠明暗而不是边框"),
     Light("light", "亮色", "干净的浅灰白，适合白天"),
-    Gray("gray", "灰色", "冷调石墨灰，低饱和");
+    Gray("gray", "灰色", "冷调石墨灰，低饱和"),
+    Pink("pink", "粉色", "柔和樱花粉，玫红点缀");
 
     companion object {
         fun fromStorage(value: String?): PiThemeMode = entries.firstOrNull { it.storageKey == value } ?: Dark
@@ -195,10 +196,57 @@ val GrayPiColors = PiColors(
     markdownQuoteBg = Color(0xFF242529)
 )
 
+// Blush surfaces with a raspberry accent; text keeps a warm near-black so it stays easy to read.
+val PinkPiColors = PiColors(
+    isLight = true,
+    bg = Color(0xFFFFF5F8),
+    headerBg = Color(0xFFFFF5F8),
+    panelBg = Color(0xFFFFFFFF),
+    cardBg = Color(0xFFFCE9F0),
+    toolBg = Color(0xFFFFFFFF),
+    toolPendingBg = Color(0xFFFFF0F5),
+    toolSuccessBg = Color(0xFFFFFFFF),
+    toolErrorBg = Color(0xFFFDECEC),
+    toolTitle = Color(0xFF2A1520),
+    toolOutput = Color(0xFF594650),
+    toolMeta = Color(0xFF6B5560),
+    toolDiffAdded = Color(0xFF17693A),
+    toolDiffRemoved = Color(0xFFB3261E),
+    userBg = Color(0xFFFFE1EC),
+    border = Color(0xFFF4D7E2),
+    accent = Color(0xFFC2185B),
+    onAccent = Color(0xFFFFFFFF),
+    success = Color(0xFF17693A),
+    blue = Color(0xFF7A3EC0),
+    textMain = Color(0xFF24121B),
+    textMuted = Color(0xFF6B5360),
+    thinkingText = Color(0xFF725966),
+    danger = Color(0xFFB3261E),
+    scrollBg = Color(0xF2FFFFFF),
+    scrollBorder = Color(0xFFF4D7E2),
+    scrollText = Color(0xFF3A2530),
+    scrollDivider = Color(0xFFF4D7E2),
+    headerDivider = Color(0xFFF8E2EA),
+    composerBg = Color(0xFFFFFFFF),
+    disabledAction = Color(0xFFEFD4DF),
+    stopButtonBg = Color(0xFFB3261E),
+    markdownText = Color(0xFF2A1820),
+    markdownMuted = Color(0xFF6B5360),
+    markdownAccent = Color(0xFFAD1457),
+    markdownCyan = Color(0xFF0E6A80),
+    markdownBorder = Color(0xFFF2D6E1),
+    markdownCodeBg = Color(0xFFFBEEF3),
+    markdownStrong = Color(0xFF14080E),
+    markdownInlineCodeBg = Color(0xFFF9E2EB),
+    markdownCodeText = Color(0xFF3A2530),
+    markdownQuoteBg = Color(0xFFFBEEF3)
+)
+
 fun colorsFor(mode: PiThemeMode): PiColors = when (mode) {
     PiThemeMode.Dark -> DarkPiColors
     PiThemeMode.Light -> LightPiColors
     PiThemeMode.Gray -> GrayPiColors
+    PiThemeMode.Pink -> PinkPiColors
 }
 
 val LocalPiColors = staticCompositionLocalOf { DarkPiColors }

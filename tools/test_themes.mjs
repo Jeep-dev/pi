@@ -15,15 +15,17 @@ function palette(name) {
 const dark = palette("Dark");
 const light = palette("Light");
 const gray = palette("Gray");
+const pink = palette("Pink");
 // Every palette must define exactly the same color roles.
 const roles = Object.keys(dark).sort();
 assert.equal(roles.length, 41);
-for (const [name, colors] of [["Light", light], ["Gray", gray]]) {
+for (const [name, colors] of [["Light", light], ["Gray", gray], ["Pink", pink]]) {
   assert.deepEqual(Object.keys(colors).sort(), roles, `${name} palette roles differ from Dark`);
 }
 assert.match(themeSource, /val DarkPiColors = PiColors\(\s*isLight = false/);
 assert.match(themeSource, /val LightPiColors = PiColors\(\s*isLight = true/);
 assert.match(themeSource, /val GrayPiColors = PiColors\(\s*isLight = false/);
+assert.match(themeSource, /val PinkPiColors = PiColors\(\s*isLight = true/);
 
 function luminance(argb) {
   const rgb = argb.slice(-6).match(/../g).map(value => Number.parseInt(value, 16) / 255)
@@ -34,7 +36,7 @@ function contrast(a, b) {
   const first = luminance(a), second = luminance(b);
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
-for (const [name, colors] of [["Dark", dark], ["Light", light], ["Gray", gray]]) {
+for (const [name, colors] of [["Dark", dark], ["Light", light], ["Gray", gray], ["Pink", pink]]) {
   for (const foreground of ["textMain", "textMuted", "blue", "accent", "danger", "success"]) {
     for (const background of ["bg", "cardBg", "panelBg", "userBg"]) {
       assert.ok(contrast(colors[foreground], colors[background]) >= 4.5,

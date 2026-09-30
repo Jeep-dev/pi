@@ -297,6 +297,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 新增粉色主题：樱花粉底色、玫红强调色，/themes 或 /themes pink 切换",
     "• 工具卡片从出现起就实时计时（超过一分钟显示 1m40s）；消息旁用 ○ ✓ ↓ ⚠ 表示插话状态；思考块、侧栏、页脚、工具参数去掉多余文字；edit 参数改为路径加 -/+ 行",
     "• write 等工具在模型生成参数时就实时显示内容；工具卡片去掉「运行中」「展开全部」「失败」等文字，改用呼吸点、箭头、警告图标，折叠行数只显示 +N",
     "• 发送后自动收起键盘；顶栏压矮、模型名改为常规字重；呼吸灯加外圈光晕更醒目",
@@ -978,7 +979,7 @@ private fun PiScreen(
             LocalCommand("hotkeys", "查看移动端手势与操作"),
             LocalCommand("changelog", "查看此 Android 版本更新内容"),
             LocalCommand("quit", "保存并停止当前 Pi 进程"),
-            LocalCommand("themes", "切换暗色、亮色或灰色主题并持久化"),
+            LocalCommand("themes", "切换暗色、亮色、灰色或粉色主题并持久化"),
             LocalCommand("settings", "连接与运行设置"),
             LocalCommand("run", "通过 Pi RPC 执行 bash（也支持 ! / !!）"),
             LocalCommand("files", "浏览及编辑当前项目文件"),
@@ -1809,10 +1810,11 @@ private fun PiScreen(
                     "dark", "暗色" -> PiThemeMode.Dark
                     "light", "亮色" -> PiThemeMode.Light
                     "gray", "grey", "灰色" -> PiThemeMode.Gray
+                    "pink", "粉色" -> PiThemeMode.Pink
                     else -> null
                 }
                 if (args.isBlank()) panel = Panel.Themes
-                else if (requested == null) addSystem("未知主题：$args；可用：dark / light / gray")
+                else if (requested == null) addSystem("未知主题：$args；可用：dark / light / gray / pink")
                 else {
                     onTheme(requested)
                     addSystem("主题已切换为${requested.displayName}")
