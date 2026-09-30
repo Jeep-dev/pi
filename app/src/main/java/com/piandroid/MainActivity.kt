@@ -274,6 +274,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 顶栏精简：只显示模型名（去掉括号里的来源）和思考级别，点模型切换模型、点思考级别切换强度；去掉 Session 名、工作目录和 + 号",
     "• 界面重做：新的蓝黑/亮色配色，靠明暗分层代替满屏边框；顶栏状态胶囊、侧栏头像与 ~/ 短路径、工具卡片图标、更醒目的输入框，底栏加上下文用量细条",
     "• 新建 Session 更快：不再白等 12 秒才启动 Bridge；旧 Session 残留的 Bridge 占着端口时直接清掉，不再卡几分钟",
     "• 回到前台立刻唤醒 Termux 并重新探测；推送流 25 秒无心跳就提示重连，不再像没反应",
@@ -2052,15 +2053,13 @@ LaunchedEffect(chatListState) {
         Column(Modifier.fillMaxSize().imePadding()) {
             if (panel == Panel.Chat) {
                 ChatTopBar(
-                    title = sessionDisplayName(session),
-                    cwd = cwd,
                     model = modelLabel,
+                    thinkingLevel = currentState?.thinkingLevel.orEmpty(),
                     status = chatStatus,
                     connected = connected,
                     onMenu = { settleDrawer(1f) },
                     onModel = { modelInitialSearch = ""; panel = Panel.Models },
-                    onConnect = connect,
-                    onNewSession = onNewSession,
+                    onThinking = { panel = Panel.Thinking },
                     onSettings = { panel = Panel.Settings }
                 )
             }
@@ -2253,44 +2252,45 @@ private fun chatStatusText(status: String): String {
     return if (queued.isBlank()) label else "$label · $queued"
 }
 
-private fun shortCwd(cwd: String): String = "~/" + cwd.trimEnd('/').substringAfterLast('/').ifBlank { "home" }
-
 /** Termux's home is the only root anyone types here, so show it the way a shell prompt would. */
 private fun termuxPath(cwd: String): String = cwd.trimEnd('/').replace(Regex("^/data/data/com\\.termux/files/home"), "~").ifBlank { "~" }
 
+/** "Gemini 3.8 Flash (Antigravity)" -> "Gemini 3.8 Flash": the provider tag belongs in the model list, not the top bar. */
+private fun topBarModelName(model: String): String = model.replace(Regex("\\s*[(（][^()（）]*[)）]\\s*$"), "").ifBlank { model }
+
 @Composable
-private fun ChatTopBar(title: String, cwd: String, model: String, status: String, connected: Boolean, onMenu: () -> Unit, onModel: () -> Unit, onConnect: () -> Unit, onNewSession: () -> Unit, onSettings: () -> Unit) {
+private fun ChatTopBar(model: String, thinkingLevel: String, status: String, connected: Boolean, onMenu: () -> Unit, onModel: () -> Unit, onThinking: () -> Unit, onSettings: () -> Unit) {
     val colors = LocalPiColors.current
     val statusColor = chatStatusColor(status)
+    val statusLabel = chatStatusText(status).let { if (!connected && status != "Disconnected" && !status.endsWith("failed") && it == "就绪") "连接中" else it }
+    // Working is shown by the spinner in place of the dot; only states that need attention get words.
+    val working = status.startsWith("WORKING") || status.substringBefore(" · ") in setOf("Working", "Compacting", "Stopping")
     Column(Modifier.fillMaxWidth().background(HeaderBg)) {
-        Row(Modifier.fillMaxWidth().padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(56.dp).padding(start = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             PiIconButton(Icons.Filled.Menu, "Pi Sessions", onMenu)
-            Column(Modifier.weight(1f).padding(start = 2.dp, end = 6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(title, color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.weight(1f, fill = false).clip(PillShape).clickable(onClick = onModel).padding(start = 6.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (working) CircularProgressIndicator(Modifier.size(10.dp), color = statusColor, strokeWidth = 1.8.dp) else StatusDot(statusColor, 8.dp)
                     Spacer(Modifier.width(8.dp))
-                    Row(
-                        Modifier.clip(PillShape).background(statusColor.copy(alpha = 0.14f)).padding(horizontal = 8.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        StatusDot(statusColor, 6.dp)
-                        Spacer(Modifier.width(5.dp))
-                        Text(if (!connected && status != "Disconnected" && !status.endsWith("failed") && status == "Ready") "连接中" else chatStatusText(status), color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    }
+                    Text(topBarModelName(model).ifBlank { "选择模型" }, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = TextMuted, modifier = Modifier.size(18.dp))
                 }
-                Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Row(
-                        Modifier.weight(1f, fill = false).clip(PillShape).clickable(onClick = onModel),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(model.ifBlank { "选择模型" }, color = colors.accent, fontSize = 12.5.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = colors.accent, modifier = Modifier.size(16.dp))
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text(termuxPath(cwd), color = TextMuted, fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (thinkingLevel.isNotBlank()) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "思考 $thinkingLevel",
+                        color = colors.accent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        modifier = Modifier.clip(PillShape).background(colors.accent.copy(alpha = 0.14f)).clickable(onClick = onThinking).padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
                 }
             }
-            PiIconButton(Icons.Filled.Add, "新建 Session", onNewSession, tonal = true)
+            if (statusLabel != "就绪" && !working) Text(statusLabel, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 6.dp).clip(PillShape).background(statusColor.copy(alpha = 0.14f)).padding(horizontal = 10.dp, vertical = 5.dp))
             PiIconButton(Icons.Filled.MoreVert, "设置", onSettings)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(colors.headerDivider))
