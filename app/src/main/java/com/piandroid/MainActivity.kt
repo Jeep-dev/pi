@@ -297,7 +297,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
-    "• 新增粉色主题：樱花粉底色、玫红强调色，/themes 或 /themes pink 切换",
+    "• 新增粉色主题：白色背景、樱花粉气泡和卡片、玫红强调色，/themes 或 /themes pink 切换",
     "• 工具卡片从出现起就实时计时（超过一分钟显示 1m40s）；消息旁用 ○ ✓ ↓ ⚠ 表示插话状态；思考块、侧栏、页脚、工具参数去掉多余文字；edit 参数改为路径加 -/+ 行",
     "• write 等工具在模型生成参数时就实时显示内容；工具卡片去掉「运行中」「展开全部」「失败」等文字，改用呼吸点、箭头、警告图标，折叠行数只显示 +N",
     "• 发送后自动收起键盘；顶栏压矮、模型名改为常规字重；呼吸灯加外圈光晕更醒目",

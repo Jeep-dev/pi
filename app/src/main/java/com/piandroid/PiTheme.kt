@@ -7,7 +7,7 @@ enum class PiThemeMode(val storageKey: String, val displayName: String, val desc
     Dark("dark", "暗色", "深夜蓝黑，层次靠明暗而不是边框"),
     Light("light", "亮色", "干净的浅灰白，适合白天"),
     Gray("gray", "灰色", "冷调石墨灰，低饱和"),
-    Pink("pink", "粉色", "柔和樱花粉，玫红点缀");
+    Pink("pink", "粉色", "白底配樱花粉，玫红点缀");
 
     companion object {
         fun fromStorage(value: String?): PiThemeMode = entries.firstOrNull { it.storageKey == value } ?: Dark
@@ -196,16 +196,16 @@ val GrayPiColors = PiColors(
     markdownQuoteBg = Color(0xFF242529)
 )
 
-// Blush surfaces with a raspberry accent; text keeps a warm near-black so it stays easy to read.
+// White surfaces with blush cards and a raspberry accent; text keeps a warm near-black so it stays easy to read.
 val PinkPiColors = PiColors(
     isLight = true,
-    bg = Color(0xFFFFF5F8),
-    headerBg = Color(0xFFFFF5F8),
+    bg = Color(0xFFFFFFFF),
+    headerBg = Color(0xFFFFFFFF),
     panelBg = Color(0xFFFFFFFF),
     cardBg = Color(0xFFFCE9F0),
-    toolBg = Color(0xFFFFFFFF),
+    toolBg = Color(0xFFFFFBFC),
     toolPendingBg = Color(0xFFFFF0F5),
-    toolSuccessBg = Color(0xFFFFFFFF),
+    toolSuccessBg = Color(0xFFFFFBFC),
     toolErrorBg = Color(0xFFFDECEC),
     toolTitle = Color(0xFF2A1520),
     toolOutput = Color(0xFF594650),
