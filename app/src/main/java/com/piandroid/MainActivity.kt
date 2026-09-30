@@ -298,6 +298,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 发送后自动收起键盘；顶栏压矮、模型名改为常规字重；呼吸灯加外圈光晕更醒目",
     "• 工作中改为呼吸圆点（不再像重连的转圈）；底栏去掉 WORKING；输入框 + 和发送键去掉底色，发送改为 ↲",
     "• 顶栏精简：一行显示「模型名 思考级别」，状态只用圆点表示；去掉 Session 名、工作目录、括号来源和 + 号",
     "• 界面重做：新的蓝黑/亮色配色，靠明暗分层代替满屏边框；顶栏状态胶囊、侧栏头像与 ~/ 短路径、工具卡片图标、更醒目的输入框，底栏加上下文用量细条",
@@ -2217,10 +2218,11 @@ LaunchedEffect(chatListState) {
                     onRemoveAttachment = { attachment -> pendingAttachments.remove(attachment) },
                     onStop = { executeInput("/abort") },
                     onFollowUp = {
+                        keyboardController?.hide(); focusManager.clearFocus()
                         val value = input; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments, followUp = true)
                     },
                     onPrimary = {
-                        val value = input; if (value.trimStart().startsWith("/")) { keyboardController?.hide(); focusManager.clearFocus() }; val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments)
+                        val value = input; keyboardController?.hide(); focusManager.clearFocus(); val attachments = pendingAttachments.toList(); input = ""; pendingAttachments.clear(); attachmentNotice = ""; executeInput(value, attachments)
                     }
                 )
             }
@@ -2285,10 +2287,11 @@ private fun termuxPath(cwd: String): String = cwd.trimEnd('/').replace(Regex("^/
 /** A dot that softly swells and fades while Pi works; a spinner read as "reconnecting". */
 @Composable
 private fun BreathingDot(color: Color) {
-    val breath = rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "breath")
-    Box(Modifier.size(12.dp), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(12.dp).graphicsLayer { alpha = (1f - breath.value) * 0.5f; scaleX = 0.6f + breath.value * 0.4f; scaleY = scaleX }.clip(CircleShape).background(color))
-        Box(Modifier.size(8.dp).graphicsLayer { alpha = 0.55f + breath.value * 0.45f }.clip(CircleShape).background(color))
+    val breath = rememberInfiniteTransition(label = "working").animateFloat(0f, 1f, infiniteRepeatable(tween(1000), RepeatMode.Reverse), label = "breath")
+    Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+        // Halo swells out and fades; the core stays solid so the dot is visible at a glance.
+        Box(Modifier.size(16.dp).graphicsLayer { alpha = 0.55f * (1f - breath.value) + 0.15f; scaleX = 0.55f + breath.value * 0.45f; scaleY = scaleX }.clip(CircleShape).background(color))
+        Box(Modifier.size(9.dp).graphicsLayer { scaleX = 0.9f + breath.value * 0.2f; scaleY = scaleX }.clip(CircleShape).background(color))
     }
 }
 
@@ -2302,16 +2305,16 @@ private fun ChatTopBar(model: String, thinkingLevel: String, status: String, onM
     // State is carried by the dot alone: its color, or a spinner while Pi works.
     val working = status.startsWith("WORKING") || status.substringBefore(" · ") in setOf("Working", "Compacting", "Stopping")
     Column(Modifier.fillMaxWidth().background(HeaderBg)) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(start = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(46.dp).padding(start = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             PiIconButton(Icons.Filled.Menu, "Pi Sessions", onMenu)
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 Row(
-                    Modifier.weight(1f, fill = false).clip(PillShape).clickable(onClick = onModel).padding(start = 6.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    Modifier.weight(1f, fill = false).clip(PillShape).clickable(onClick = onModel).padding(start = 6.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (working) BreathingDot(statusColor) else StatusDot(statusColor, 8.dp)
                     Spacer(Modifier.width(8.dp))
-                    Text(topBarModelName(model).ifBlank { "选择模型" } + if (thinkingLevel.isNotBlank()) " " + thinkingLevel.replaceFirstChar { it.uppercase() } else "", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text(topBarModelName(model).ifBlank { "选择模型" } + if (thinkingLevel.isNotBlank()) " " + thinkingLevel.replaceFirstChar { it.uppercase() } else "", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = TextMuted, modifier = Modifier.size(18.dp))
                 }
             }
@@ -2601,7 +2604,7 @@ LaunchedEffect(listState) {
         .distinctUntilChanged()
         .collect { atBottom -> if (atBottom) onFollowChange(true) }
 }
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().nestedScroll(userScrollLock), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().nestedScroll(userScrollLock), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (resourceSections.isNotEmpty()) item(key = "session-meta") { ResourcesCard(resourceSections) }
         if (lines.isEmpty()) item(key = "welcome") { WelcomeState(cwd, model, connected, onQuickCommand) }
         itemsIndexed(lines) { lineIndex, line ->
