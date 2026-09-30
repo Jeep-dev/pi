@@ -300,6 +300,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 回复边输出边按 Markdown 渲染，不再等输出完才排版",
     "• 工具图标换成统一的线条风格：read 眼睛、bash 终端、edit 笔、write 新建文件；出错时图标变红，不再用警告三角；工具参数生成完成后按正式格式显示，不再露出 JSON",
     "• 短暂断流自动重连时不再在聊天里写「连接中断，正在重连」，只用顶栏圆点表示；真正连不上才提示",
     "• 新增粉色主题：白色背景、樱花粉气泡和卡片、玫红强调色，/themes 或 /themes pink 切换",
@@ -2660,7 +2661,9 @@ LaunchedEffect(listState) {
                             Text(visibleText, color = TextMain, fontSize = 15.sp, lineHeight = 22.sp)
                         }
                     }
-                    "assistant" -> if (line.streaming) Text(visibleText, color = LocalPiColors.current.markdownText, fontSize = 15.sp, lineHeight = 23.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp)) else PiMarkdown(visibleText, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp))
+                    // Render Markdown while it streams too; plain text until the end made headings,
+                    // lists and code jump into place only after the reply finished.
+                    "assistant" -> PiMarkdown(visibleText, modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp))
                     // The accent rule and italics already say "thinking"; no label on top.
                     "thinking" -> if (hideThinking) Row(Modifier.height(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.width(2.dp).fillMaxHeight().clip(PillShape).background(Accent.copy(alpha = 0.45f)))
