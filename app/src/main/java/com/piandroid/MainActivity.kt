@@ -141,6 +141,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -297,6 +300,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 工具图标换成统一的线条风格：read 眼睛、bash 终端、edit 笔、write 新建文件；出错时图标变红，不再用警告三角；工具参数生成完成后按正式格式显示，不再露出 JSON",
     "• 短暂断流自动重连时不再在聊天里写「连接中断，正在重连」，只用顶栏圆点表示；真正连不上才提示",
     "• 新增粉色主题：白色背景、樱花粉气泡和卡片、玫红强调色，/themes 或 /themes pink 切换",
     "• 工具卡片从出现起就实时计时（超过一分钟显示 1m40s）；消息旁用 ○ ✓ ↓ ⚠ 表示插话状态；思考块、侧栏、页脚、工具参数去掉多余文字；edit 参数改为路径加 -/+ 行",
@@ -449,6 +453,8 @@ private fun partialJsonString(raw: String, key: String): String? {
 /** Live arguments for a tool call the model is still writing, laid out like the finished card. */
 private fun toolDraftArgs(toolName: String, raw: String): String {
     val path = partialJsonString(raw, "path").orEmpty()
+    // Once the arguments are complete JSON, show them the way the finished card will.
+    if (toolName != "edit") runCatching { org.json.JSONObject(raw) }.getOrNull()?.let { return formatToolArgs(toolName, it) }
     return when (toolName) {
         "write" -> listOf(path, partialJsonString(raw, "content").orEmpty()).filter { it.isNotEmpty() }.joinToString("\n")
         "bash", "powershell" -> partialJsonString(raw, "command") ?: raw
@@ -459,9 +465,27 @@ private fun toolDraftArgs(toolName: String, raw: String): String {
             val new = latest("newText")?.lines()?.joinToString("\n") { "+ $it" }.orEmpty()
             listOf(path, old, new).filter { it.isNotEmpty() }.joinToString("\n")
         }
-        else -> raw
+        "grep", "find" -> listOf(partialJsonString(raw, "pattern") ?: partialJsonString(raw, "query").orEmpty(), path).filter { it.isNotEmpty() }.joinToString("  ")
+        else -> path.ifEmpty { raw }
     }
 }
+
+// Tool badges use one line-icon family (24-unit grid, round 2-unit strokes, Lucide
+// shapes) so read/bash/edit/write look like a set; the core Material icons don't.
+private fun lineIcon(name: String, vararg paths: String): ImageVector =
+    ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f).apply {
+        paths.forEach { data ->
+            addPath(addPathNodes(data), fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 2f, strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round)
+        }
+    }.build()
+
+private val ReadToolIcon = lineIcon("Read", "M2 12 C 4.5 7 8 5 12 5 C 16 5 19.5 7 22 12 C 19.5 17 16 19 12 19 C 8 19 4.5 17 2 12 Z", "M9 12 A 3 3 0 1 0 15 12 A 3 3 0 1 0 9 12 Z")
+private val BashToolIcon = lineIcon("Bash", "M4 17 L10 11 L4 5", "M12 19 H20")
+private val EditToolIcon = lineIcon("Edit", "M12 3 H5 A 2 2 0 0 0 3 5 V19 A 2 2 0 0 0 5 21 H19 A 2 2 0 0 0 21 19 V12", "M18.4 2.6 A 2.1 2.1 0 0 1 21.4 5.6 L12.4 14.6 L8 16 L9.4 11.6 Z")
+private val WriteToolIcon = lineIcon("Write", "M14 2 H6 A 2 2 0 0 0 4 4 V20 A 2 2 0 0 0 6 22 H18 A 2 2 0 0 0 20 20 V8 Z", "M14 2 V8 H20", "M12 12 V18", "M9 15 H15")
+private val SearchToolIcon = lineIcon("Search", "M3 11 A 8 8 0 1 0 19 11 A 8 8 0 1 0 3 11 Z", "M21 21 L16.7 16.7")
+private val OtherToolIcon = lineIcon("Tool", "M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z", "M4 7.5 L12 12 L20 7.5", "M12 12 V21")
+private val CancelledToolIcon = lineIcon("Cancelled", "M18 6 L6 18", "M6 6 L18 18")
 
 private fun markdownText(source: String, codeColor: Color) = buildAnnotatedString {
     val text = source
@@ -2698,17 +2722,19 @@ LaunchedEffect(listState) {
                             Regex("\\+(\\d+) (arg )?lines").find(info)?.let { "+${it.groupValues[1]}" }.orEmpty()
                         }
                         val toolShape = RoundedCornerShape(16.dp)
-                        val toolIcon = if (line.toolIsError) Icons.Filled.Warning else if (cancelled) Icons.Filled.Close else when (name.lowercase()) {
-                            "bash" -> Icons.Filled.PlayArrow
-                            "read" -> Icons.Filled.Info
-                            "edit", "write" -> Icons.Filled.Edit
-                            "grep", "find", "ls", "web_search", "search" -> Icons.Filled.Search
-                            else -> Icons.Filled.Build
+                        // An error keeps the tool's own icon; the red tint and card already say it failed.
+                        val toolIcon = if (cancelled) CancelledToolIcon else when (name.lowercase()) {
+                            "bash", "powershell" -> BashToolIcon
+                            "read" -> ReadToolIcon
+                            "edit" -> EditToolIcon
+                            "write" -> WriteToolIcon
+                            "grep", "find", "ls", "web_search", "search" -> SearchToolIcon
+                            else -> OtherToolIcon
                         }
                         Column(Modifier.fillMaxWidth().clip(toolShape).background(background).border(1.dp, if (line.toolIsError) Danger.copy(alpha = 0.35f) else Border.copy(alpha = if (colors.isLight) 1f else 0.6f), toolShape)) {
                             Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp, top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(statusTint.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
-                                    Icon(toolIcon, contentDescription = null, tint = statusTint, modifier = Modifier.size(14.dp))
+                                    Icon(toolIcon, contentDescription = null, tint = statusTint, modifier = Modifier.size(15.dp))
                                 }
                                 Spacer(Modifier.width(9.dp))
                                 Text(name, color = colors.toolTitle, fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
