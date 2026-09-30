@@ -274,7 +274,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
-    "• 顶栏精简：只显示模型名（去掉括号里的来源）和思考级别，点模型切换模型、点思考级别切换强度；去掉 Session 名、工作目录和 + 号",
+    "• 顶栏精简：一行显示「模型名 思考级别」，状态只用圆点表示；去掉 Session 名、工作目录、括号来源和 + 号",
     "• 界面重做：新的蓝黑/亮色配色，靠明暗分层代替满屏边框；顶栏状态胶囊、侧栏头像与 ~/ 短路径、工具卡片图标、更醒目的输入框，底栏加上下文用量细条",
     "• 新建 Session 更快：不再白等 12 秒才启动 Bridge；旧 Session 残留的 Bridge 占着端口时直接清掉，不再卡几分钟",
     "• 回到前台立刻唤醒 Termux 并重新探测；推送流 25 秒无心跳就提示重连，不再像没反应",
@@ -2056,10 +2056,8 @@ LaunchedEffect(chatListState) {
                     model = modelLabel,
                     thinkingLevel = currentState?.thinkingLevel.orEmpty(),
                     status = chatStatus,
-                    connected = connected,
                     onMenu = { settleDrawer(1f) },
                     onModel = { modelInitialSearch = ""; panel = Panel.Models },
-                    onThinking = { panel = Panel.Thinking },
                     onSettings = { panel = Panel.Settings }
                 )
             }
@@ -2259,11 +2257,10 @@ private fun termuxPath(cwd: String): String = cwd.trimEnd('/').replace(Regex("^/
 private fun topBarModelName(model: String): String = model.replace(Regex("\\s*[(（][^()（）]*[)）]\\s*$"), "").ifBlank { model }
 
 @Composable
-private fun ChatTopBar(model: String, thinkingLevel: String, status: String, connected: Boolean, onMenu: () -> Unit, onModel: () -> Unit, onThinking: () -> Unit, onSettings: () -> Unit) {
+private fun ChatTopBar(model: String, thinkingLevel: String, status: String, onMenu: () -> Unit, onModel: () -> Unit, onSettings: () -> Unit) {
     val colors = LocalPiColors.current
     val statusColor = chatStatusColor(status)
-    val statusLabel = chatStatusText(status).let { if (!connected && status != "Disconnected" && !status.endsWith("failed") && it == "就绪") "连接中" else it }
-    // Working is shown by the spinner in place of the dot; only states that need attention get words.
+    // State is carried by the dot alone: its color, or a spinner while Pi works.
     val working = status.startsWith("WORKING") || status.substringBefore(" · ") in setOf("Working", "Compacting", "Stopping")
     Column(Modifier.fillMaxWidth().background(HeaderBg)) {
         Row(Modifier.fillMaxWidth().height(56.dp).padding(start = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2275,22 +2272,10 @@ private fun ChatTopBar(model: String, thinkingLevel: String, status: String, con
                 ) {
                     if (working) CircularProgressIndicator(Modifier.size(10.dp), color = statusColor, strokeWidth = 1.8.dp) else StatusDot(statusColor, 8.dp)
                     Spacer(Modifier.width(8.dp))
-                    Text(topBarModelName(model).ifBlank { "选择模型" }, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text(topBarModelName(model).ifBlank { "选择模型" } + if (thinkingLevel.isNotBlank()) " " + thinkingLevel.replaceFirstChar { it.uppercase() } else "", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "切换模型", tint = TextMuted, modifier = Modifier.size(18.dp))
                 }
-                if (thinkingLevel.isNotBlank()) {
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        "思考 $thinkingLevel",
-                        color = colors.accent,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        modifier = Modifier.clip(PillShape).background(colors.accent.copy(alpha = 0.14f)).clickable(onClick = onThinking).padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
-                }
             }
-            if (statusLabel != "就绪" && !working) Text(statusLabel, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 6.dp).clip(PillShape).background(statusColor.copy(alpha = 0.14f)).padding(horizontal = 10.dp, vertical = 5.dp))
             PiIconButton(Icons.Filled.MoreVert, "设置", onSettings)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(colors.headerDivider))
