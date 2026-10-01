@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -24,7 +26,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-14.3"
+    private val expectedBridgeVersion = "2026-10-01.10"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -36,6 +38,8 @@ class PiBridge(
         "hard-stop-v1",
         "conversation-owner-v1",
         "tool-history-metadata-v1",
+        "native-settings-v1",
+        "sse-stream-v1",
         "tool-args-lossless-v1",
         "cwd-shared-resume-v1",
         "closed-session-resume-v1"
@@ -68,30 +72,46 @@ class PiBridge(
     /** Close this Android Session like a terminal tab: stop its runtime and keep all files/history. */
     suspend fun shutdownRuntime(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            request("/shutdown", "{}", 5_000).getOrThrow()
+            request("/shutdown", JSONObject().put("reason", "Android Session closed").toString(), 5_000).getOrThrow()
             delay(750)
             // Deliberately keep bridge files, session directories, JSONL history,
             // endpoint tokens, and runtime preferences. Closing a tab is not deletion.
         }
     }
 
-    suspend fun installAndStartBridge(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun installAndStartBridge(reason: String = "install"): Result<Unit> = withContext(Dispatchers.IO) {
         if (!termuxAvailable()) return@withContext Result.failure(TermuxSetupException("请先安装 Termux"))
         runCatching {
-            request("/shutdown", "{}", 2_000)
-            delay(750)
-            val bridge = context.assets.open("pi-android-bridge.mjs").use {
-                Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
-            }
-            val extension = context.assets.open("pi-android-mobile.ts").use {
-                Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)
-            }
+            val shutdown = request("/shutdown", JSONObject().put("reason", "app relaunch: $reason").toString(), 2_000)
+            // Nothing listened (a new Session, or a Bridge Android killed): no old
+            // process to wait for. Otherwise give it a moment to exit by itself;
+            // the launcher below still kills whatever is left on this port.
+            if (!shutdown.exceptionOrNull().isConnectRefusedFailure()) delay(750)
+            // Both scripts travel inside one argv string, which Linux caps at 128KB;
+            // uncompressed they were already at 118KB. gzip keeps them far below.
+            val bridge = gzipBase64("pi-android-bridge.mjs")
+            val extension = gzipBase64("pi-android-mobile.ts")
+            val d = "${'$'}"
+            val logReason = reason.replace(Regex("[^A-Za-z0-9 .:_/-]"), " ").take(160)
+            // Stop the process on the way out quickly: poll for its exit instead of sleeping.
+            val waitGone = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 ${d}p 2>/dev/null || break; sleep 0.05; done; kill -9 ${d}p 2>/dev/null"
+            // A Bridge left behind by a closed Session can still hold this port with
+            // another token: it answers 401, ignores our /shutdown, and the new node
+            // would die on EADDRINUSE. Kill any Bridge whose environment names this port.
+            val freePort = "for f in ~/.pi/android/bridge.pid ~/.pi/android/sessions/*/bridge.pid; do " +
+                "[ -f \"${d}f\" ] || continue; p=${d}(cat \"${d}f\" 2>/dev/null); [ -n \"${d}p\" ] || continue; " +
+                "if tr '\\0' '\\n' < /proc/${d}p/environ 2>/dev/null | grep -qx 'PI_ANDROID_PORT=$port'; then " +
+                "echo \"[${d}(date -u +%Y-%m-%dT%H:%M:%SZ)] launcher: stopping Bridge pid=${d}p on port $port (${d}f)\" >> $remoteLogFile; " +
+                "kill ${d}p 2>/dev/null; $waitGone; fi; done"
             val command = """
                 mkdir -p $remoteBridgeDir &&
-                printf '%s' '$bridge' | base64 -d > $remoteBridgeScript &&
-                printf '%s' '$extension' | base64 -d > $remoteExtensionScript &&
+                echo "[${d}(date -u +%Y-%m-%dT%H:%M:%SZ)] launcher start: $logReason" >> $remoteLogFile &&
+                printf '%s' '$bridge' | base64 -d | gzip -dc > $remoteBridgeScript &&
+                printf '%s' '$extension' | base64 -d | gzip -dc > $remoteExtensionScript &&
                 chmod 700 $remoteBridgeScript &&
-                if [ -f $remotePidFile ]; then old_pid="${'$'}(cat $remotePidFile)"; kill "${'$'}old_pid" 2>/dev/null || true; sleep 0.7; kill -9 "${'$'}old_pid" 2>/dev/null || true; fi &&
+                { if [ -f $remotePidFile ]; then p="${d}(cat $remotePidFile)"; kill "${d}p" 2>/dev/null; $waitGone; fi; true; } &&
+                { $freePort; true; } &&
+                { (command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 &); true; } &&
                 rm -f $remotePidFile &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$runtimeOwnerSessionId' PI_ANDROID_PID_FILE=$remotePidFile &&
                 exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
@@ -100,11 +120,22 @@ class PiBridge(
         }
     }
 
+    private fun gzipBase64(asset: String): String {
+        val raw = context.assets.open(asset).use { it.readBytes() }
+        val packed = java.io.ByteArrayOutputStream().also { out ->
+            java.util.zip.GZIPOutputStream(out).use { it.write(raw) }
+        }.toByteArray()
+        return Base64.encodeToString(packed, Base64.NO_WRAP)
+    }
+
     suspend fun waitForBridge(timeoutMillis: Long = 15_000): Result<Unit> {
-        val attempts = (timeoutMillis / 250).toInt().coerceAtLeast(1)
+        // Bounded by wall-clock time: a port that accepts but never answers used to
+        // stretch "30s" of attempts to almost three minutes.
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis
         var lastSeenVersion = ""
-        repeat(attempts) {
-            request("/health", null, 1200).onSuccess { raw ->
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val remaining = (deadline - android.os.SystemClock.elapsedRealtime()).toInt().coerceIn(250, 1200)
+            request("/health", null, remaining).onSuccess { raw ->
                 val root = runCatching { JSONObject(raw) }.getOrNull()
                 val version = root?.optString("bridgeVersion").orEmpty()
                 val capabilities = root?.optJSONArray("capabilities") ?: JSONArray()
@@ -124,13 +155,6 @@ class PiBridge(
             "检测到旧 bridge：$lastSeenVersion，期望：$expectedBridgeVersion"
         }
         return Result.failure(IllegalStateException("Bridge 启动超时：$detail。打开 Termux 检查 $remoteLogFile"))
-    }
-
-    suspend fun attachToRunningBridge(): Result<PiState> = runCatching {
-        waitForBridge(1_500).getOrThrow()
-        val health = health().getOrThrow()
-        check(health.piRunning) { "Pi is not running" }
-        state(3_000).getOrThrow()
     }
 
     suspend fun start(cwd: String, launchCommand: String): Result<PiState> {
@@ -158,7 +182,11 @@ class PiBridge(
             piPid = root.optLong("piPid"),
             port = root.optInt("port"),
             runtimeOwnerSessionId = root.optString("endpointKey"),
-            stopInProgress = root.optBoolean("stopInProgress")
+            stopInProgress = root.optBoolean("stopInProgress"),
+            compatible = root.optString("bridgeVersion") == expectedBridgeVersion &&
+                (root.optJSONArray("capabilities") ?: JSONArray()).let { array ->
+                    requiredBridgeCapabilities.all { required -> (0 until array.length()).any { array.optString(it) == required } }
+                }
         )
     }
 
@@ -171,7 +199,7 @@ class PiBridge(
         message: String,
         streamingBehavior: String? = null,
         attachments: List<PiAttachment> = emptyList()
-    ): Result<Unit> {
+    ): Result<String> {
         val body = JSONObject().put("message", message).apply {
             if (!streamingBehavior.isNullOrBlank()) put("streamingBehavior", streamingBehavior)
             if (attachments.isNotEmpty()) put("attachments", JSONArray().apply {
@@ -186,9 +214,11 @@ class PiBridge(
                 }
             })
         }
-        // Longer than the Bridge's own 15 s RPC timeout, so the app normally gets
-        // the Bridge's definitive answer instead of an ambiguous local timeout.
-        return request("/prompt", body.toString(), 30_000).map { Unit }
+        // Pi 0.99 answers with data.disposition: "started", "queued" or "handled" (an
+        // extension or input handler consumed it and no run follows). Older Pi omits it.
+        return request("/prompt", body.toString(), SLOW_RPC_TIMEOUT_MS).map { raw ->
+            runCatching { JSONObject(raw).optJSONObject("data")?.optString("disposition").orEmpty() }.getOrDefault("")
+        }
     }
 
     suspend fun referenceAttachment(path: String, name: String, mimeType: String, byteCount: Long): Result<PiAttachment> {
@@ -233,10 +263,15 @@ class PiBridge(
         }
 
     /** Stop the active agent, clear Pi's queues, and fence new work in the bridge. */
-    suspend fun stop(): Result<Unit> = request("/stop", "{}", 70_000).map { Unit }
+    /** Stops the run and returns the queued messages Pi dropped, so they can be handed back. */
+    suspend fun stop(): Result<PiQueue> = request("/stop", "{}", 70_000).mapCatching { raw ->
+        val restored = runCatching { JSONObject(raw).optJSONObject("restored") }.getOrNull() ?: JSONObject()
+        fun strings(key: String) = restored.optJSONArray(key)?.let { array -> List(array.length()) { index -> array.optString(index) } }.orEmpty()
+        PiQueue(steering = strings("steering"), followUp = strings("followUp"))
+    }
 
     // Kept as a source-compatible alias for older callers.
-    suspend fun abort(): Result<Unit> = stop()
+    suspend fun abort(): Result<Unit> = stop().map { Unit }
 
     suspend fun clearQueue(): Result<PiQueue> = request("/clear-queue", "{}", 8_000).mapCatching { raw ->
         val data = JSONObject(raw).optJSONObject("data") ?: JSONObject()
@@ -295,7 +330,7 @@ class PiBridge(
 
     suspend fun setModel(model: PiModel): Result<Unit> {
         val body = JSONObject().put("provider", model.provider).put("modelId", model.id).toString()
-        return request("/model", body).map { Unit }
+        return request("/model", body, SLOW_RPC_TIMEOUT_MS).map { Unit }
     }
 
     private fun runtimePreferences() = context.getSharedPreferences("pi_runtime", Context.MODE_PRIVATE)
@@ -338,7 +373,27 @@ class PiBridge(
     }
 
     suspend fun setThinking(level: String): Result<Unit> {
-        return request("/thinking", JSONObject().put("level", level).toString()).map { Unit }
+        return request("/thinking", JSONObject().put("level", level).toString(), SLOW_RPC_TIMEOUT_MS).map { Unit }
+    }
+
+    suspend fun setSteeringMode(mode: String): Result<Unit> =
+        request("/steering-mode", JSONObject().put("mode", mode).toString()).map { Unit }
+
+    suspend fun setFollowUpMode(mode: String): Result<Unit> =
+        request("/follow-up-mode", JSONObject().put("mode", mode).toString()).map { Unit }
+
+    suspend fun setAutoRetry(enabled: Boolean): Result<Unit> =
+        request("/auto-retry", JSONObject().put("enabled", enabled).toString()).map { Unit }
+
+    /** Thinking levels the current model actually supports (native /thinking only offers these). */
+    suspend fun thinkingLevels(): Result<List<String>> = rpcData("/thinking-levels").mapCatching { data ->
+        val array = data.optJSONArray("levels") ?: JSONArray()
+        List(array.length()) { array.optString(it) }.filter { it.isNotBlank() }
+    }
+
+    suspend fun changelog(limit: Int = 3): Result<Pair<String, String>> = request("/changelog?limit=$limit", null).mapCatching { raw ->
+        val json = JSONObject(raw)
+        json.optString("version") to json.optString("text")
     }
 
     suspend fun setAutoCompaction(enabled: Boolean): Result<Unit> {
@@ -404,14 +459,79 @@ class PiBridge(
         return request("/extension-ui", body.toString()).map { Unit }
     }
 
-    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 26_000).mapCatching { raw ->
+    /**
+     * Hold one text/event-stream open and deliver every batch in order. Returns
+     * normally when the server ends the stream; throws on socket failure. The
+     * Bridge sends a heartbeat every 10s, so a read timeout means a dead link,
+     * never a quiet agent. [onOpen] fires once the first frame arrives.
+     */
+    suspend fun stream(
+        after: Long,
+        onOpen: () -> Unit,
+        keepOpen: () -> Boolean = { true },
+        onBatch: suspend (PiEventBatch) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val connection = (URL("http://127.0.0.1:$port/stream?after=$after").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8_000
+                // Heartbeats come every 10s, so 25s of silence means a stalled Bridge.
+                readTimeout = 25_000
+                useCaches = false
+                setRequestProperty("Authorization", "Bearer $authToken")
+                setRequestProperty("Accept", "text/event-stream")
+            }
+            val job = coroutineContext[Job]
+            // Blocking reads ignore cancellation; closing the socket unblocks them.
+            val cancelHandle = job?.invokeOnCompletion { connection.disconnect() }
+            try {
+                val code = connection.responseCode
+                check(code == 200) { "stream HTTP $code" }
+                val reader = connection.inputStream.bufferedReader(Charsets.UTF_8)
+                val data = StringBuilder()
+                var opened = false
+                while (true) {
+                    job?.ensureActive()
+                    val line = reader.readLine() ?: break
+                    if (!keepOpen()) break
+                    when {
+                        line.isEmpty() -> if (data.isNotEmpty()) {
+                            val batch = parseEventBatch(JSONObject(data.toString()), after)
+                            data.setLength(0)
+                            if (!opened) { opened = true; onOpen() }
+                            onBatch(batch)
+                        }
+                        line.startsWith("data:") -> data.append(line.removePrefix("data:").trimStart())
+                        else -> Unit // ": ping" heartbeat or unknown field
+                    }
+                }
+            } finally {
+                cancelHandle?.dispose()
+                connection.disconnect()
+            }
+        }
+    }
+
+    private fun parseEventBatch(root: JSONObject, after: Long): PiEventBatch {
+        val array = root.optJSONArray("events") ?: JSONArray()
+        val parsed = buildList {
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val value = item.optJSONObject("value") ?: JSONObject().put("type", "raw").put("line", item.optString("value"))
+                add(parseEvent(item.optLong("seq"), value).copy(receivedAt = item.optLong("receivedAt")))
+            }
+        }
+        return PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
+    }
+
+    suspend fun events(after: Long): Result<PiEventBatch> = request("/events?after=$after&wait=20000", null, 35_000).mapCatching { raw ->
         val root = JSONObject(raw)
         val array = root.optJSONArray("events") ?: JSONArray()
         val parsed = buildList {
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
                 val value = item.optJSONObject("value") ?: JSONObject().put("type", "raw").put("line", item.optString("value"))
-                add(parseEvent(item.optLong("seq"), value))
+                add(parseEvent(item.optLong("seq"), value).copy(receivedAt = item.optLong("receivedAt")))
             }
         }
         PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
@@ -461,7 +581,9 @@ class PiBridge(
             piConversationId = data.optString("sessionId"),
             sessionName = data.optString("sessionName"),
             messageCount = data.optInt("messageCount"),
-            autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true)
+            autoCompactionEnabled = data.optBoolean("autoCompactionEnabled", true),
+            steeringMode = data.optString("steeringMode").ifBlank { "one-at-a-time" },
+            followUpMode = data.optString("followUpMode").ifBlank { "one-at-a-time" }
         )
         if (state.sessionFile.isNotBlank()) {
             val preferences = runtimePreferences()
@@ -560,7 +682,8 @@ class PiBridge(
                     text = "",
                     toolCallId = value.optString("toolCallId"),
                     argsText = toolArgsText(toolName, args),
-                    toolName = toolName
+                    toolName = toolName,
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "tool_execution_update" -> {
@@ -584,7 +707,8 @@ class PiBridge(
                     toolCallId = value.optString("toolCallId"),
                     argsText = toolArgsText(toolName, value.optJSONObject("args")),
                     toolName = toolName,
-                    metaText = meta
+                    metaText = meta,
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "queue_update" -> {
@@ -633,7 +757,8 @@ class PiBridge(
                     toolCallId = value.optString("toolCallId"),
                     toolName = name,
                     metaText = subagentMeta(details),
-                    isError = value.optBoolean("isError")
+                    isError = value.optBoolean("isError"),
+                    parentToolCallId = value.optString("parentToolCallId")
                 )
             }
             "compaction_start", "compaction_end" -> {
@@ -653,9 +778,12 @@ class PiBridge(
                     stopReason = outcome
                 )
             }
+            "agent_end" -> PiEvent(seq, type, "", "", stopReason = if (value.optBoolean("willRetry")) "retry" else "")
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
+            "extension_ui_dismiss" -> PiEvent(seq, type, "", value.optString("id"))
+            "prompt_failed" -> PiEvent(seq, type, "", value.optString("error"), metaText = value.optString("message"))
             "extension_ui_request" -> {
                 val method = value.optString("method")
                 val optionsArray = if (method == "setWidget") {
@@ -698,19 +826,42 @@ class PiBridge(
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
     /**
-     * Run a no-op in Termux. Starting Termux's command service thaws a Termux
-     * process the system froze in the background, and with it this Bridge and
-     * its Pi child, without restarting either.
+     * Run a no-op in Termux. Starting Termux's command service thaws a Termux the
+     * system froze in the background, and with it this Bridge and its Pi child,
+     * without restarting either. It also asks Termux to hold its wake lock so the
+     * Bridge keeps running while the screen is off.
      */
-    suspend fun wakeTermux(): Result<Unit> = runTermux(":")
+    suspend fun wakeTermux(force: Boolean = false, minIntervalMs: Long = WAKE_INTERVAL_MS): Result<Unit> {
+        // The delivered intent is what thaws Termux, so run the cheapest command
+        // there is: no login shell, no `am`. One wake per interval for the whole
+        // app; every Session and the keep-alive used to send their own.
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(wakeGate) {
+            if (!force && lastWakeAtMs != 0L && now - lastWakeAtMs < minIntervalMs) return Result.success(Unit)
+            lastWakeAtMs = now
+        }
+        return runTermuxExecutable("/data/data/com.termux/files/usr/bin/true", emptyArray())
+    }
 
-    private suspend fun runTermux(command: String): Result<Unit> = withContext(Dispatchers.IO) {
+    private suspend fun runTermux(command: String): Result<Unit> =
+        runTermuxExecutable("/data/data/com.termux/files/usr/bin/bash", arrayOf("-lc", command))
+
+    private suspend fun runTermuxExecutable(path: String, arguments: Array<String>): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
-                .putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-                .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+                .putExtra("com.termux.RUN_COMMAND_PATH", path)
+                .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arguments)
                 .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-            context.startService(intent)
+            val started = try {
+                context.startService(intent)
+            } catch (backgroundStart: IllegalStateException) {
+                // Background start limits: Termux's RunCommandService goes foreground itself.
+                if (android.os.Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else throw backgroundStart
+            }
+            if (started == null) {
+                android.util.Log.w("PiBridge", "RUN_COMMAND not delivered path=$path")
+                return@withContext Result.failure(IllegalStateException("Termux 拒绝了启动命令（系统拦截或 Termux 未安装）"))
+            }
             Result.success(Unit)
         } catch (_: SecurityException) {
             Result.failure(TermuxSetupException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
@@ -734,12 +885,21 @@ class PiBridge(
                 }
             }
             try {
-                val code = connection.responseCode
+                val code = try {
+                    connection.responseCode
+                } catch (timeout: java.net.SocketTimeoutException) {
+                    val hint = if (path == "/prompt" || path == "/model" || path == "/stats") {
+                        "可能是 Termux 被系统冻结，或模型 provider 网络不通"
+                    } else {
+                        "Termux 可能被系统冻结，正在唤醒"
+                    }
+                    throw IllegalStateException("Pi ${timeoutMs / 1000} 秒内没有响应（$path）；$hint", timeout)
+                }
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 if (code !in 200..299) {
                     val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
-                    throw IllegalStateException(message.ifBlank { "HTTP $code: $text" })
+                    throw BridgeHttpException(code, message.ifBlank { "HTTP $code: $text" })
                 }
                 text
             } finally {
@@ -752,7 +912,12 @@ class PiBridge(
 
     companion object {
         const val DEFAULT_PORT = 17649
+        /** Must stay above the Bridge's SLOW_RPC_TIMEOUT_MS so the Bridge reports which RPC stalled. */
+        const val SLOW_RPC_TIMEOUT_MS = 40_000
         const val DEFAULT_ENDPOINT_KEY = "default"
+        private const val WAKE_INTERVAL_MS = 10_000L
+        private val wakeGate = Any()
+        private var lastWakeAtMs = 0L
 
         internal fun endpointToken(context: Context, key: String): String {
             val preferences = context.applicationContext.getSharedPreferences("bridge_security", Context.MODE_PRIVATE)
@@ -772,8 +937,44 @@ class PiBridge(
     }
 }
 
+/** The Bridge answered with an HTTP error: its process is alive and responsive. */
+class BridgeHttpException(val code: Int, message: String) : IllegalStateException(message)
+
+/** True when [this] or a cause is a 401: another Session's Bridge holds this port. */
+internal fun Throwable?.isForeignBridgeFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is BridgeHttpException && current.code == 401) return true
+        current = current.cause
+    }
+    return false
+}
+
 /** A local setup problem that retrying cannot fix; the user must act first. */
 class TermuxSetupException(message: String) : IllegalStateException(message)
+
+/** True when [this] or a cause is a socket timeout: something holds the port but did not answer. */
+internal fun Throwable?.isSocketTimeoutFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.SocketTimeoutException) return true
+        current = current.cause
+    }
+    return false
+}
+
+/** True when [this] or a cause is a refused connection: nothing listens on the port. */
+internal fun Throwable?.isConnectRefusedFailure(): Boolean {
+    var current = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        if (current is java.net.ConnectException) return true
+        current = current.cause
+    }
+    return false
+}
 
 data class PiHealth(
     val piRunning: Boolean,
@@ -787,7 +988,9 @@ data class PiHealth(
     val piPid: Long = 0L,
     val port: Int = 0,
     val runtimeOwnerSessionId: String = "",
-    val stopInProgress: Boolean = false
+    val stopInProgress: Boolean = false,
+    /** Bridge build matches this APK; an incompatible bridge must be replaced (only while Pi is idle). */
+    val compatible: Boolean = true
 )
 
 data class PiQueue(
@@ -805,7 +1008,10 @@ data class PiState(
     val piConversationId: String,
     val sessionName: String,
     val messageCount: Int,
-    val autoCompactionEnabled: Boolean
+    val autoCompactionEnabled: Boolean,
+    /** Pi queue delivery: "one-at-a-time" or "all" (native /settings). */
+    val steeringMode: String = "one-at-a-time",
+    val followUpMode: String = "one-at-a-time"
 )
 data class PiStats(
     val sessionFile: String,
@@ -853,7 +1059,11 @@ data class PiEvent(
     val argsText: String = "",
     val toolName: String = "",
     val metaText: String = "",
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    /** Set on tool calls made from inside another tool (codemode scripts, MCP via codemode). */
+    val parentToolCallId: String = "",
+    /** Wall-clock ms when the Bridge received the event (same device clock as the app). */
+    val receivedAt: Long = 0L
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)

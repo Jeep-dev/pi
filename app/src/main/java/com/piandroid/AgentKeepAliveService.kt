@@ -27,6 +27,8 @@ class AgentKeepAliveService : Service() {
         private const val NOTIFICATION_ID = 17649
         private const val ACTION_STOP = "com.piandroid.STOP_LONG_TASK_KEEPALIVE"
         private const val MAX_WAKE_TIME_MS = 8L * 60 * 60 * 1000
+        /** Polls in a row with every Session confirmed offline before the service stops (~2 min). */
+        private const val OFFLINE_POLLS_TO_STOP = 8
 
         fun start(bridgeContext: Context) {
             val intent = Intent(bridgeContext, AgentKeepAliveService::class.java)
@@ -34,8 +36,7 @@ class AgentKeepAliveService : Service() {
                 bridgeContext.startForegroundService(intent)
             } catch (error: IllegalStateException) {
                 // Android 12+ refuses new foreground services from the background
-                // (ForegroundServiceStartNotAllowedException). Reconnect loops call this
-                // repeatedly, so a refusal must not crash the app.
+                // (ForegroundServiceStartNotAllowedException); a refusal must not crash the app.
                 Log.w("AgentKeepAlive", "Keep-alive service start refused", error)
             }
         }
@@ -57,10 +58,19 @@ class AgentKeepAliveService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
             .apply { acquire(MAX_WAKE_TIME_MS) }
         monitorJob = scope.launch {
-            val policy = KeepAlivePolicy()
+            var failures = 0
+            var idlePolls = 0
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
+                // Poke Termux before probing: ColorOS freezes it (Bridge and Pi too)
+                // in the background, and only a delivered command thaws it. Without
+                // this Pi only got CPU after a probe had already timed out.
+                records.firstOrNull()?.let { record ->
+                    PiBridge(applicationContext, record.port, record.token, record.androidSessionId)
+                        .wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)
+                    delay(800)
+                }
                 val probes = records.map { record ->
                     async {
                         val endpoint = PiBridge(
@@ -69,33 +79,47 @@ class AgentKeepAliveService : Service() {
                             record.token,
                             record.androidSessionId
                         )
-                        val health = endpoint.health(timeoutMs = 2_500)
-                        val piRunning = health.getOrNull()?.piRunning == true
-                        val state = if (piRunning) endpoint.state(timeoutMs = 2_500) else null
-                        val busy = state?.getOrNull()?.let { it.streaming || it.compacting } == true
-                        classifyKeepAliveProbe(health.exceptionOrNull(), piRunning, state?.exceptionOrNull(), busy) to piRunning
+                        val healthResult = endpoint.health(timeoutMs = 2_500)
+                        val health = healthResult.getOrNull()
+                        // A timeout means something holds the port but did not answer:
+                        // usually Termux frozen in the background, not a dead Session.
+                        val unanswered = health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure()
+                        if (unanswered) endpoint.wakeTermux()
+                        val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
+                        Triple(record, health to state, unanswered)
                     }
                 }.awaitAll()
-                val working = probes.count { (probe, _) -> probe == KeepAliveProbe.WORKING }
-                val running = probes.count { (_, piRunning) -> piRunning }
-                val recovering = PiRecoveryTracker.anyRecovering()
-                val uncertain = recovering || probes.any { (probe, _) -> probe == KeepAliveProbe.UNKNOWN }
-                // An unreachable or reconnecting Session is not idle: stopping here
-                // would release the wake lock exactly when recovery needs it.
-                if (policy.shouldStop(probes.map { it.first }, recovering)) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                    return@launch
+                val working = probes.count { (_, result, _) ->
+                    val state = result.second
+                    state?.streaming == true || state?.compacting == true
                 }
-                updateNotification(
-                    when {
-                        working > 0 -> "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
-                        uncertain -> "正在重连 Pi · 共 $running 个在线"
-                        running > 0 -> "$running 个 Pi Session 在线，当前空闲 · 即将停止保活"
-                        else -> "没有在线 Pi · 即将停止保活"
+                val running = probes.count { (_, result, _) -> result.first?.piRunning == true }
+                val unanswered = probes.count { (_, _, timedOut) -> timedOut }
+                // An online Session keeps the service even while idle. A Session that
+                // did not answer is not offline: stopping then released the wake lock
+                // and dropped the notification exactly while recovery needed them, and
+                // Android does not let the app restart the service from the background.
+                if (unanswered > 0 && working == 0 && running == 0) {
+                    idlePolls = 0
+                    updateNotification("Pi 暂时没有响应，正在唤醒 Termux · 保活中")
+                } else if (working > 0 || running > 0) {
+                    failures = 0
+                    idlePolls = 0
+                    updateNotification(
+                        if (working > 0) "$working 个 Pi Agent 正在工作 · 共 $running 个在线"
+                        else "$running 个 Pi Session 在线，当前空闲 · 保活中"
+                    )
+                } else {
+                    idlePolls++
+                    if (idlePolls >= OFFLINE_POLLS_TO_STOP) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                        return@launch
                     }
-                )
-                delay(15_000)
+                    failures++
+                    updateNotification("Pi 已掉线，正在自动重启 · $failures")
+                }
+                delay(if (working > 0) 5_000 else 10_000)
             }
         }
     }

@@ -10,17 +10,22 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.27 build 127: allow same-cwd /resume from histories left by closed Session windows.
+// v5.19.38 build 138: wake frozen Termux instead of restarting the Bridge, retry the first connect, keep the keep-alive while Pi does not answer.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
 
     defaultConfig {
+        // CI builds carry their run number and commit, e.g. 5.19.27+ci371.aacaf7e,
+        // so installs of same-version builds can be told apart in App info.
+        val ciRun = System.getenv("GITHUB_RUN_NUMBER")
+        val ciSha = System.getenv("GITHUB_SHA")?.take(7)
+        if (!ciRun.isNullOrBlank() && !ciSha.isNullOrBlank()) versionNameSuffix = "+ci$ciRun.$ciSha"
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 127
-        versionName = "5.19.27"
+        versionCode = 140
+        versionName = "5.19.40"
     }
 
     signingConfigs {
@@ -60,6 +65,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
     testImplementation("junit:junit:4.13.2")

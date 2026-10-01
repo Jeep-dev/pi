@@ -10,7 +10,15 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-14.3";
+const bridgeVersion = "2026-10-01.10";
+
+// Lifecycle lines go to stderr, which the launcher appends to bridge.log. They are
+// the evidence for why a Session dropped: which process ended, with what code or
+// signal, and when. A SIGKILL here with nothing logged before it means Android
+// killed the process from outside.
+function lifecycleLog(message) {
+  try { process.stderr.write(`[${new Date().toISOString()}] pid=${process.pid} ${message}\n`); } catch {}
+}
 const bridgeCapabilities = [
   "file-reference-v1",
   "stream-upload-v1",
@@ -24,6 +32,8 @@ const bridgeCapabilities = [
   "hard-stop-v1",
   "conversation-owner-v1",
   "tool-history-metadata-v1",
+  "native-settings-v1",
+  "sse-stream-v1",
   "tool-args-lossless-v1",
   "cwd-shared-resume-v1",
   "closed-session-resume-v1",
@@ -56,13 +66,23 @@ let eventBytes = 0;
 const responseEventSequence = Symbol("responseEventSequence");
 const pending = new Map();
 const eventWaiters = new Set();
+// Open /stream subscribers. Each is a flush function that pushes unsent events.
+const streamClients = new Set();
+let streamFlushScheduled = false;
 const pendingUiRequests = new Map();
 const persistentUiEvents = new Map();
 let latestQueueEvent = null;
 let stopFence = false;
 let stopInProgress = null;
+// Bumped by every Stop so prompts the bridge is still holding never run afterwards.
+let stopGeneration = 0;
+// Prompts held in the bridge until a running compaction finishes.
+const heldPrompts = new Set();
+let compactionActive = false;
+const compactionWaiters = new Set();
 
 function addEvent(value) {
+  trackCompaction(value);
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
   const byteSize = Buffer.byteLength(JSON.stringify(value));
   Object.defineProperty(event, "byteSize", { value: byteSize });
@@ -74,7 +94,17 @@ function addEvent(value) {
   if (value?.type === "queue_update") latestQueueEvent = event;
   if (value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") latestQueueEvent = null;
   if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
-    pendingUiRequests.set(String(value.id), value);
+    const id = String(value.id);
+    pendingUiRequests.set(id, value);
+    // Pi resolves a timed-out dialog by itself without telling the client; drop it here
+    // too so it doesn't linger or come back on every reconnect.
+    const timeout = Number(value.timeout);
+    if (timeout > 0) {
+      setTimeout(() => {
+        if (pendingUiRequests.get(id) !== value) return;
+        dismissUiRequest(id);
+      }, timeout).unref?.();
+    }
   }
   if (value?.type === "extension_ui_request" && value.method === "setWidget" && value.widgetKey) {
     const key = String(value.widgetKey);
@@ -83,6 +113,19 @@ function addEvent(value) {
   }
   for (const wake of eventWaiters) wake();
   eventWaiters.clear();
+  // Coalesce bursts (streaming deltas) into one frame per tick for every subscriber.
+  if (streamClients.size && !streamFlushScheduled) {
+    streamFlushScheduled = true;
+    setImmediate(() => {
+      streamFlushScheduled = false;
+      for (const flush of streamClients) flush();
+    });
+  }
+}
+
+function dismissUiRequest(id) {
+  if (!pendingUiRequests.delete(id)) return;
+  addEvent({ type: "extension_ui_dismiss", id });
 }
 
 function waitForEvent(after, timeoutMs) {
@@ -117,36 +160,67 @@ function settlePending(id, value) {
   return true;
 }
 
+// Pi 0.99 puts large payloads on events the phone never shows: bash/codemode
+// structuredContent (up to 1 MiB of output) and system messages carrying every prompt
+// section and tool schema. Keep them out of the replay buffer and the phone stream.
+function slimEvent(value) {
+  if (!value || typeof value !== "object") return value;
+  const type = value.type;
+  if (type === "tool_execution_end" && value.result && typeof value.result === "object" && "structuredContent" in value.result) {
+    const { structuredContent, ...result } = value.result;
+    return { ...value, result };
+  }
+  if (type === "tool_execution_update" && value.partialResult && typeof value.partialResult === "object" && "structuredContent" in value.partialResult) {
+    const { structuredContent, ...partialResult } = value.partialResult;
+    return { ...value, partialResult };
+  }
+  if ((type === "message_start" || type === "message_update" || type === "message_end") && value.message?.role === "system") {
+    return { ...value, message: { role: "system" } };
+  }
+  if (type === "agent_end" && Array.isArray(value.messages) && value.messages.some(message => message?.role === "system")) {
+    return { ...value, messages: value.messages.filter(message => message?.role !== "system") };
+  }
+  return value;
+}
+
 function attachJsonl(stream) {
   const decoder = new StringDecoder("utf8");
-  let buffer = "";
+  // Pieces of the current, unfinished line. A multi-MB RPC reply (get_entries on a
+  // long Session) arrives in 64KB chunks; re-scanning one growing string from the
+  // start for every chunk was quadratic and blocked /health for seconds.
+  let parts = [];
   stream.on("data", chunk => {
-    buffer += decoder.write(chunk);
+    const text = decoder.write(chunk);
+    let start = 0;
     while (true) {
-      const index = buffer.indexOf("\n");
+      const index = text.indexOf("\n", start);
       if (index < 0) break;
-      let line = buffer.slice(0, index);
-      buffer = buffer.slice(index + 1);
+      parts.push(text.slice(start, index));
+      start = index + 1;
+      let line = parts.length === 1 ? parts[0] : parts.join("");
+      parts = [];
       if (line.endsWith("\r")) line = line.slice(0, -1);
       if (!line.trim()) continue;
-      lastStdoutTail = (lastStdoutTail + line + "\n").slice(-8000);
+      lastStdoutTail = (lastStdoutTail + line.slice(-8000) + "\n").slice(-8000);
       try {
         const value = JSON.parse(line);
         if (value.type === "response" && value.id && settlePending(value.id, value)) continue;
-        addEvent(value);
+        addEvent(slimEvent(value));
       } catch {
         addEvent({ type: "raw", line });
       }
     }
+    if (start < text.length) parts.push(text.slice(start));
   });
   stream.on("end", () => {
-    const rest = buffer + decoder.end();
+    const rest = parts.join("") + decoder.end();
+    parts = [];
     if (rest.trim()) {
       lastStdoutTail = (lastStdoutTail + rest + "\n").slice(-8000);
       try {
         const value = JSON.parse(rest);
         if (value.type === "response" && value.id && settlePending(value.id, value)) return;
-        addEvent(value);
+        addEvent(slimEvent(value));
       } catch { addEvent({ type: "raw", line: rest }); }
     }
   });
@@ -262,11 +336,44 @@ function spawnPi(nextLaunchCommand, nextCwd) {
   });
 }
 
+/**
+ * Pi 0.99 writes a session file only once the session has a message, and opening a
+ * missing --session file starts a session with a new random id. Restarting Pi on a
+ * conversation with no messages yet (after /new, or an app update relaunching the
+ * Bridge) then looked like a different conversation and the app restarted it forever.
+ * Write just the header, with the id from Pi's file name, so Pi reopens the same one.
+ */
+async function ensureResumableSessionFile(command, workingDirectory) {
+  let sessionArgument = "";
+  try {
+    const argumentsList = splitCommand(command);
+    for (let index = 0; index < argumentsList.length; index++) {
+      const argument = argumentsList[index];
+      if (argument === "--session") sessionArgument = argumentsList[++index] || "";
+      else if (argument.startsWith("--session=")) sessionArgument = argument.slice("--session=".length);
+    }
+  } catch {
+    return;
+  }
+  if (!sessionArgument) return;
+  const file = path.resolve(workingDirectory, expandHome(sessionArgument));
+  if (existsSync(file)) return;
+  const match = /^[^_]+_([\w-]+)\.jsonl$/.exec(path.basename(file));
+  if (!match) return;
+  const header = { type: "session", version: 3, id: match[1], timestamp: new Date().toISOString(), cwd: workingDirectory };
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(header) + "\n", { flag: "wx", mode: 0o600 });
+    lifecycleLog(`session header written for empty conversation ${match[1]}`);
+  } catch {}
+}
+
 async function startPi(nextCwd, nextLaunchCommand) {
   stopPi();
   cwd = expandHome((nextCwd || cwd).trim()) || termuxHome;
   launchCommand = (nextLaunchCommand || launchCommand).trim();
   if (!launchCommand) throw new Error("Pi launch command is empty");
+  await ensureResumableSessionFile(launchCommand, cwd);
   lastStderr = "";
   lastStdoutTail = "";
   lastExit = null;
@@ -292,7 +399,9 @@ async function startPi(nextCwd, nextLaunchCommand) {
     lastStderr = (lastStderr + `\n${error.message}`).slice(-8000);
     addEvent({ type: "stderr", text: error.message });
   });
+  lifecycleLog(`pi started pid=${startedChild.pid} cwd=${cwd}`);
   startedChild.on("exit", (code, signal) => {
+    lifecycleLog(`pi exited pid=${startedChild.pid} code=${code} signal=${signal} current=${child === startedChild} stderr=${JSON.stringify(lastStderr.slice(-400))}`);
     if (child !== startedChild) return;
     lastExit = { code, signal };
     addEvent({ type: "process_exit", code, signal, stderr: lastStderr, stdout: lastStdoutTail });
@@ -316,13 +425,16 @@ function sendRaw(value) {
   child.stdin.write(JSON.stringify(value) + "\n");
 }
 
+// Model switches and prompt preflight can refresh provider OAuth over the network.
+const SLOW_RPC_TIMEOUT_MS = 30000;
+
 function rpc(command, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     if (!child || child.exitCode != null || !child.stdin.writable) return reject(new Error("Pi is not running"));
     const id = command.id || randomUUID();
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`RPC timeout: ${command.type}`));
+      reject(new Error(`RPC timeout after ${Math.round(timeoutMs / 1000)}s: ${command.type}`));
     }, timeoutMs);
     pending.set(id, { resolve, reject, timer, command: command.type });
     try {
@@ -333,6 +445,24 @@ function rpc(command, timeoutMs = 15000) {
       reject(error);
     }
   });
+}
+
+/** Native /changelog: the newest entries of the installed Pi package's CHANGELOG.md. */
+async function piChangelog(limit) {
+  let directory = path.dirname(await realpath(termuxPi).catch(() => termuxPi));
+  for (let depth = 0; depth < 6; depth++) {
+    const candidate = path.join(directory, "CHANGELOG.md");
+    if (existsSync(candidate) && existsSync(path.join(directory, "package.json"))) {
+      const text = await readFile(candidate, "utf8");
+      const sections = text.split(/\n(?=## \[)/).filter(section => section.startsWith("## ["));
+      const version = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")).version || "";
+      return { version, text: sections.slice(0, limit).join("\n\n").trim() };
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error(`Pi CHANGELOG.md not found near ${termuxPi}`);
 }
 
 function sessionDirForCwd(baseCwd) {
@@ -461,6 +591,11 @@ function historyFromEntries(data) {
     id = entry.parentId == null ? null : String(entry.parentId);
   }
   branch.reverse();
+  // Failed attempts Pi retried (or recovered by compaction) are omitted from the model
+  // context with a context_edit; their error is not the outcome, so don't show it.
+  const recovered = new Set(branch
+    .filter(entry => entry?.type === "context_edit" && entry.replacement === null)
+    .map(entry => String(entry.targetId || "")));
 
   // get_entries intentionally returns the append-only session, including
   // messages that a compaction has replaced in the model context. Project the
@@ -526,10 +661,12 @@ function historyFromEntries(data) {
             if (callId) toolLines.set(callId, history.length - 1);
           }
         }
-        if (message.stopReason === "aborted" && !content.some(part => part?.type === "text" && String(part.text || "").trim())) {
-          add("system", "本轮任务已中止");
-        } else if (message.stopReason === "error" && message.errorMessage) {
-          add("system", `模型错误：${String(message.errorMessage)}`);
+        // A stopped turn needs no notice (the user pressed Stop); some providers report
+        // that abort as an error whose message is the AbortError's.
+        const errorMessage = String(message.errorMessage || "");
+        const abortLike = /^\s*(this operation was aborted|the operation was aborted|request (was )?aborted|aborted)\.?\s*$/i.test(errorMessage);
+        if (message.stopReason === "error" && errorMessage && !abortLike && !recovered.has(String(entry.id || ""))) {
+          add("system", `模型错误：${errorMessage}`);
         }
       } else if (role === "toolResult") {
         const callId = String(message.toolCallId || "");
@@ -638,7 +775,9 @@ function recoveryEventsAfterHistory(historySeq, latest, toolResultIds = new Set(
     } else if (type === "tool_execution_end") {
       const key = String(value.toolCallId || "");
       const state = activeTools.get(key);
-      if (key && !toolResultIds.has(key)) {
+      // Nested calls (codemode/MCP, parentToolCallId set) never get their own transcript
+      // entry, so carrying them would replay them as stray cards after every reconnect.
+      if (key && !value.parentToolCallId && !toolResultIds.has(key)) {
         if (state?.start) completedToolCarry.add(state.start.seq);
         if (state?.update) completedToolCarry.add(state.update.seq);
         completedToolCarry.add(item.seq);
@@ -683,7 +822,9 @@ async function summarizeSession(file, currentFile) {
   const handle = await open(file, "r");
   try {
     const chunk = 256 * 1024;
-    const headLen = Math.min(info.size, chunk);
+    // Pi 0.99 opens a session with a system entry holding every prompt section and tool
+    // schema, which can push the first user message past a 256 KiB head.
+    const headLen = Math.min(info.size, 4 * chunk);
     const tailLen = Math.min(info.size, chunk);
     const head = await readSlice(handle, 0, headLen);
     const tailOffset = Math.max(0, info.size - tailLen);
@@ -901,6 +1042,107 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+// Pi answers `prompt` only after preflight, which can include compacting a nearly
+// full context or running an extension command; both can take minutes.
+const PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+// How long /prompt holds the HTTP request before reporting the prompt as pending.
+const PROMPT_ACK_WAIT_MS = Number(process.env.PI_ANDROID_PROMPT_ACK_MS) > 0 ? Number(process.env.PI_ANDROID_PROMPT_ACK_MS) : 12_000;
+function trackCompaction(value) {
+  if (value?.type === "compaction_start") compactionActive = true;
+  if (value?.type === "compaction_end" || value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") {
+    compactionActive = false;
+    for (const wake of compactionWaiters) wake();
+    compactionWaiters.clear();
+  }
+}
+
+function waitForCompactionEnd(timeoutMs) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); compactionWaiters.delete(done); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    compactionWaiters.add(done);
+  });
+}
+
+// Prompts go to Pi one at a time. While Pi compacts before running a prompt it is not
+// yet "streaming", so a second prompt sent then would start a parallel run instead of
+// being queued. Once Pi answers the first, its run is active and the next one queues.
+let promptChain = Promise.resolve();
+
+async function submitPrompt(command) {
+  const generation = stopGeneration;
+  const previous = promptChain;
+  let release;
+  promptChain = new Promise(resolve => { release = resolve; });
+  const waiting = { message: command.message };
+  heldPrompts.add(waiting);
+  try {
+    await previous;
+  } finally {
+    heldPrompts.delete(waiting);
+  }
+  try {
+    if (generation !== stopGeneration) throw Object.assign(new Error("Stopped"), { stopped: true });
+    const response = await sendPrompt(command, generation);
+    // Pi swallows an abort that lands while it compacts before the prompt and then runs
+    // the prompt anyway. Stop means stop: abort the run that just started.
+    if (generation !== stopGeneration && response?.data?.disposition === "started") {
+      await rpc({ type: "abort" }, 60_000).catch(() => {});
+      throw Object.assign(new Error("Stopped"), { stopped: true });
+    }
+    return response;
+  } finally {
+    release();
+  }
+}
+
+async function sendPrompt(command, generation) {
+  const deadline = Date.now() + PROMPT_TIMEOUT_MS;
+  for (;;) {
+    try {
+      return await rpc(command, Math.max(1000, deadline - Date.now()));
+    } catch (error) {
+      const message = String(error?.message || error);
+      // RPC mode rejects prompts during compaction; native Pi queues them. Do the same.
+      if (/compaction is in progress/i.test(message) && Date.now() < deadline) {
+        const held = { message: command.message };
+        heldPrompts.add(held);
+        try {
+          await waitForCompactionEnd(Math.min(5_000, Math.max(0, deadline - Date.now())));
+        } finally {
+          heldPrompts.delete(held);
+        }
+        // Stop hands held prompts back to the app (see stopCurrentAgent); never send them.
+        if (generation !== stopGeneration) throw Object.assign(new Error("Stopped"), { stopped: true });
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function promptResponse(res, command) {
+  const submitted = submitPrompt(command);
+  let settled = false;
+  submitted.then(() => { settled = true; }, () => { settled = true; });
+  const early = await Promise.race([
+    submitted.then(response => ({ response }), error => ({ error })),
+    new Promise(resolve => setTimeout(() => resolve(null), PROMPT_ACK_WAIT_MS)),
+  ]);
+  if (early?.response) return send(res, 200, early.response);
+  if (early?.error?.stopped) return send(res, 200, { type: "response", command: "prompt", success: true, data: { disposition: "stopped" } });
+  if (early?.error) return send(res, 500, { ok: false, error: String(early.error?.message || early.error) });
+  // Still in preflight (compaction or a long extension command): the prompt is accepted
+  // and will run. Report it as pending and surface a later failure as an event.
+  send(res, 200, { type: "response", command: "prompt", success: true, data: { disposition: "pending" } });
+  if (!settled) {
+    submitted.catch(error => {
+      if (error?.stopped) return;
+      addEvent({ type: "prompt_failed", message: command.message, error: String(error?.message || error) });
+    });
+  }
+}
+
 function dispatchLongCommand(message) {
   if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
@@ -922,14 +1164,29 @@ async function stopCurrentAgent() {
   }
 
   stopFence = true;
+  stopGeneration++;
+  // Stop cancels any open extension dialog, both in Pi and on screen.
+  for (const id of [...pendingUiRequests.keys()]) {
+    try { sendRaw({ type: "extension_ui_response", id, cancelled: true }); } catch {}
+    dismissUiRequest(id);
+  }
+  const held = [...heldPrompts].map(item => String(item.message));
+  for (const wake of compactionWaiters) wake();
+  compactionWaiters.clear();
   const operation = (async () => {
     let cleared = false;
+    let restored = { steering: [], followUp: [] };
     try {
-      await rpc({ type: "clear_queue" }, 8_000);
+      const queue = await rpc({ type: "clear_queue" }, 8_000);
       cleared = true;
+      restored = {
+        steering: Array.isArray(queue?.data?.steering) ? queue.data.steering.map(String) : [],
+        followUp: Array.isArray(queue?.data?.followUp) ? queue.data.followUp.map(String) : [],
+      };
     } catch (error) {
       addEvent({ type: "extension_error", error: `Stop queue clear failed: ${String(error?.message || error)}` });
     }
+    restored.steering = [...held, ...restored.steering];
 
     const [bashResult, abortResult] = await Promise.allSettled([
       rpc({ type: "abort_bash" }, 8_000),
@@ -946,6 +1203,7 @@ async function stopCurrentAgent() {
     }
     return {
       cleared,
+      restored,
       aborted: true,
       bashAborted: bashResult.status === "fulfilled",
     };
@@ -975,7 +1233,8 @@ async function sessionStats() {
 
 let shuttingDown = false;
 
-function shutdownBridge() {
+function shutdownBridge(reason = "shutdown") {
+  lifecycleLog(`bridge stopping: ${reason}`);
   if (shuttingDown) return;
   shuttingDown = true;
   try { stopPi(); } catch {}
@@ -988,8 +1247,15 @@ function shutdownBridge() {
   }
 }
 
-process.on("SIGTERM", shutdownBridge);
-process.on("SIGINT", shutdownBridge);
+process.on("SIGTERM", () => shutdownBridge("SIGTERM"));
+process.on("SIGINT", () => shutdownBridge("SIGINT"));
+// A hang-up from the Termux task that launched us is not a reason to drop Pi.
+process.on("SIGHUP", () => lifecycleLog("SIGHUP ignored"));
+// An unexpected error in one request handler must not take the whole Bridge (and
+// every running Pi task) down; log it and keep serving.
+process.on("uncaughtException", error => lifecycleLog(`uncaughtException ${error?.stack || error}`));
+process.on("unhandledRejection", error => lifecycleLog(`unhandledRejection ${error?.stack || error}`));
+process.on("exit", code => lifecycleLog(`bridge exit code=${code}`));
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -1041,8 +1307,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/shutdown") {
+      let reason = "shutdown request";
+      try { reason = String(JSON.parse(await readBody(req) || "{}").reason || reason).slice(0, 300); } catch {}
       send(res, 200, { ok: true });
-      setImmediate(shutdownBridge);
+      setImmediate(() => shutdownBridge(`/shutdown: ${reason}`));
       return;
     }
 
@@ -1087,7 +1355,7 @@ const server = http.createServer(async (req, res) => {
         }).join("\n");
         message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
-      return rpcResponse(res, {
+      return promptResponse(res, {
         type: "prompt",
         message,
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
@@ -1201,16 +1469,34 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/model") {
       if (stopFence) throw new Error("Stop in progress; model change rejected");
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") });
+      return rpcResponse(res, { type: "set_model", provider: String(input.provider || ""), modelId: String(input.modelId || "") }, SLOW_RPC_TIMEOUT_MS);
     }
     if (req.method === "POST" && url.pathname === "/cycle-model") return rpcResponse(res, { type: "cycle_model" });
 
     if (req.method === "POST" && url.pathname === "/thinking") {
       if (stopFence) throw new Error("Stop in progress; thinking change rejected");
       const input = JSON.parse(await readBody(req));
-      return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") });
+      return rpcResponse(res, { type: "set_thinking_level", level: String(input.level || "off") }, SLOW_RPC_TIMEOUT_MS);
     }
     if (req.method === "POST" && url.pathname === "/cycle-thinking") return rpcResponse(res, { type: "cycle_thinking_level" });
+
+    // Native Pi /settings queue behaviour, auto-retry, and per-model thinking levels.
+    if (req.method === "POST" && (url.pathname === "/steering-mode" || url.pathname === "/follow-up-mode")) {
+      if (stopFence) throw new Error("Stop in progress; queue mode change rejected");
+      const input = JSON.parse(await readBody(req));
+      const mode = input.mode === "all" ? "all" : "one-at-a-time";
+      const type = url.pathname === "/steering-mode" ? "set_steering_mode" : "set_follow_up_mode";
+      return rpcResponse(res, { type, mode });
+    }
+    if (req.method === "POST" && url.pathname === "/auto-retry") {
+      const input = JSON.parse(await readBody(req));
+      return rpcResponse(res, { type: "set_auto_retry", enabled: Boolean(input.enabled) });
+    }
+    if (req.method === "GET" && url.pathname === "/thinking-levels") return rpcResponse(res, { type: "get_available_thinking_levels" });
+    if (req.method === "GET" && url.pathname === "/changelog") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 3, 1), 20);
+      return send(res, 200, { ok: true, ...(await piChangelog(limit)) });
+    }
 
     if (req.method === "POST" && url.pathname === "/auto-compaction") {
       if (stopFence) throw new Error("Stop in progress; compaction setting rejected");
@@ -1247,6 +1533,60 @@ const server = http.createServer(async (req, res) => {
       pendingUiRequests.delete(String(input.id || ""));
       sendRaw({ type: "extension_ui_response", ...input });
       return send(res, 200, { ok: true });
+    }
+
+    // Push transport: one long-lived text/event-stream per client. Each frame
+    // carries the same batch shape as /events. Comment heartbeats every 10s let
+    // the client tell a dead socket from a quiet agent without restarting Pi.
+    if (req.method === "GET" && url.pathname === "/stream") {
+      let cursor = Math.max(0, Number(url.searchParams.get("after") || 0));
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        connection: "keep-alive",
+      });
+      req.socket.setTimeout(0);
+      req.socket.setNoDelay(true);
+      req.socket.setKeepAlive(true, 10_000);
+      // A reader that stopped reading (the app frozen in the background) must not
+      // make this process buffer every event in memory: wait for 'drain', and drop
+      // a client that stays that far behind. It reconnects with its cursor.
+      let stalledSince = 0;
+      const stalled = () => {
+        if (!res.writableNeedDrain) { stalledSince = 0; return false; }
+        if (!stalledSince) stalledSince = Date.now();
+        if (res.writableLength > 4 * 1024 * 1024 || Date.now() - stalledSince > 60_000) {
+          lifecycleLog(`stream client dropped: ${res.writableLength} bytes unread`);
+          res.destroy();
+        }
+        return true;
+      };
+      const flush = (force = false) => {
+        if (res.writableEnded || res.destroyed) return;
+        if (stalled()) return;
+        const earliest = events[0]?.seq ?? sequence;
+        const gap = cursor > sequence || (cursor > 0 && cursor < earliest - 1);
+        const batch = gap ? [] : events.filter(item => item.seq > cursor);
+        if (!force && !gap && batch.length === 0) return;
+        res.write(`data: ${JSON.stringify({ events: batch, latest: sequence, earliest, gap })}\n\n`);
+        cursor = sequence;
+      };
+      const heartbeat = setInterval(() => {
+        if (res.writableEnded || res.destroyed || stalled()) return;
+        res.write(`: ping ${sequence}\n\n`);
+      }, 10_000);
+      const close = () => {
+        clearInterval(heartbeat);
+        streamClients.delete(flush);
+      };
+      req.on("close", close);
+      res.on("close", close);
+      res.on("error", close);
+      res.on("drain", () => flush());
+      streamClients.add(flush);
+      // First frame always goes out so the client knows the stream is live.
+      flush(true);
+      return;
     }
 
     if (req.method === "GET" && url.pathname === "/events") {
@@ -1328,7 +1668,19 @@ function removeOwnPidFile() {
 process.on("exit", removeOwnPidFile);
 server.requestTimeout = 0;
 server.timeout = 0;
+// Without this, EADDRINUSE went to the uncaughtException logger and node exited 0
+// silently while the app waited 30s for a Bridge that would never come.
+let listenRetries = 0;
+server.on("error", error => {
+  lifecycleLog(`listen failed: ${error.code || error.message}`);
+  if (error.code === "EADDRINUSE" && listenRetries++ < 10) {
+    setTimeout(() => server.listen(port, "127.0.0.1"), 500);
+    return;
+  }
+  process.exit(98);
+});
 server.listen(port, "127.0.0.1", () => {
   writeFileSync(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
   console.log(`Pi Android bridge ${bridgeVersion} listening on 127.0.0.1:${port}`);
+  lifecycleLog(`bridge listening version=${bridgeVersion} port=${port}`);
 });

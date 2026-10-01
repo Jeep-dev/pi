@@ -170,7 +170,10 @@ try {
   assert.ok(authorized, `bridge did not start: ${diagnostics}`);
   assert.equal(authorized.status, 200);
   const health = await authorized.json();
-  assert.equal(health.bridgeVersion, "2026-09-14.3");
+  // The APK only accepts the bridge build it ships with; keep both in lockstep.
+  const expectedVersion = (await import("node:fs")).readFileSync("app/src/main/java/com/piandroid/PiBridge.kt", "utf8")
+    .match(/expectedBridgeVersion = "([^"]+)"/)[1];
+  assert.equal(health.bridgeVersion, expectedVersion);
   assert.ok(health.capabilities.includes("file-reference-v1"));
   assert.ok(health.capabilities.includes("durable-history-v1"));
   assert.ok(health.capabilities.includes("recovery-snapshot-v1"));

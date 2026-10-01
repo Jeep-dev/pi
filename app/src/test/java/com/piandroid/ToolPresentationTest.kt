@@ -73,10 +73,19 @@ class ToolPresentationTest {
     }
 
     @Test
+    fun mcpToolsAreTitledServerSlashTool() {
+        assertEquals("docs/search", toolDisplayName("mcp__docs__search"))
+        assertEquals("read", toolDisplayName("read"))
+        assertEquals("mcp__broken", toolDisplayName("mcp__broken"))
+    }
+
+    @Test
     fun toolDurationMatchesNativePiTenthsFormat() {
         assertEquals("0.0s", formatToolDuration(0))
         assertEquals("1.2s", formatToolDuration(1_249))
         assertEquals("12.3s", formatToolDuration(12_345))
+        assertEquals("1m40s", formatToolDuration(100_100))
+        assertEquals("1h05m", formatToolDuration(3_930_000))
     }
 
     @Test
@@ -87,5 +96,9 @@ class ToolPresentationTest {
         )
         assertEquals("本轮任务已中止", assistantCompletionNotice("aborted", "", ""))
         assertEquals(null, assistantCompletionNotice("aborted", "partial answer", ""))
+        assertEquals(null, assistantCompletionNotice("aborted", "", "", userStopped = true))
+        assertEquals(null, assistantCompletionNotice("error", "", "This operation was aborted", userStopped = true))
+        assertEquals("模型错误：This operation was aborted", assistantCompletionNotice("error", "", "This operation was aborted"))
+        assertEquals("模型错误：rate limited", assistantCompletionNotice("error", "", "rate limited", userStopped = true))
     }
 }

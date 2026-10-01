@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +23,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 
 private const val PI_SESSION_IDENTITY_TAG = "PiSessionIdentity"
+/** How often Termux is poked while it may be frozen by the system. */
+internal const val TERMUX_THAW_INTERVAL_MS = 4_000L
 
 /** A snapshot delivered to a UI client without making that client own the runtime. */
 internal data class PiRuntimeReady(
@@ -72,9 +76,8 @@ internal sealed class PiRuntimeUpdate {
     data class Snapshot(val value: PiRecoverySnapshot) : PiRuntimeUpdate()
     data class Events(val value: PiEventBatch) : PiRuntimeUpdate()
     data class Reconnecting(val error: Throwable) : PiRuntimeUpdate()
-
-    /** The endpoint answers again after [Reconnecting]; carries fresh state when available. */
-    data class Recovered(val state: PiState?) : PiRuntimeUpdate()
+    /** Event polling works again after a transient failure; clears the UI's reconnecting state. */
+    object Recovered : PiRuntimeUpdate()
     data class Failed(val error: Throwable) : PiRuntimeUpdate()
     object Unavailable : PiRuntimeUpdate()
     object Disconnected : PiRuntimeUpdate()
@@ -169,6 +172,8 @@ internal class PiSessionRuntime(
     val updates: SharedFlow<PiRuntimeUpdate> = updatesMutable.asSharedFlow()
 
     private val stateLock = Any()
+    // Signalled when the app returns to the foreground: cuts short any backoff.
+    private val foregroundKick = Channel<Unit>(Channel.CONFLATED)
     private var record = initialRecord
     private var closed = false
     private var connected = false
@@ -176,23 +181,28 @@ internal class PiSessionRuntime(
     private var recoveryEnabled = true
     private var connectionJob: Job? = null
     private var eventJob: Job? = null
-    private var stopJob: Deferred<Result<Unit>>? = null
+    private var stopJob: Deferred<Result<PiQueue>>? = null
     private var eventCursor = 0L
     private var conversationGeneration = 0L
     private var lastState: PiState? = null
     private var lastSnapshot: PiRecoverySnapshot? = null
-
-    // Reconnecting was published and no Ready/Recovered has cleared it yet.
-    private var degraded = false
-
-    // Events cannot be trusted until a full attach/restart publishes Ready again.
-    private var recoveryPending = false
-
-    // Only touched under connectMutex.
-    private val unresponsiveGrace = UnresponsiveBridgeGrace()
+    private var liveCwd = ""
 
     // Guarded by stateLock; throttles Termux wake-ups.
-    private var lastTermuxWakeAtMs: Long? = null
+    private var lastTermuxWakeAtMs = 0L
+
+    // Guarded by stateLock. True from the moment "reconnecting" reaches the UI
+    // until a verified Ready or Recovered clears it. The event loop owns clearing
+    // it, so no path can leave the header on "reconnecting" while Pi is healthy.
+    private var degraded = false
+
+    // When the Bridge first held its port without answering, and when a probe last
+    // failed. Any proof of life (Ready, Recovered, an opened stream) clears it, so an
+    // old window can never make a later short freeze look like a 3 minute one.
+    @Volatile private var unresponsiveSinceMs = 0L
+    @Volatile private var lastUnansweredProbeAtMs = 0L
+    // Only touched under connectMutex: why the last patient probe failed.
+    private var lastHealthError: Throwable? = null
 
     fun update(next: PiSessionRecord) {
         check(next.androidSessionId == runtimeOwnerSessionId) {
@@ -227,6 +237,22 @@ internal class PiSessionRuntime(
     }
 
     fun isConnected(): Boolean = synchronized(stateLock) { connected }
+
+    fun onForeground() {
+        foregroundKick.trySend(Unit)
+    }
+
+    /** delay() that the app returning to the foreground ends early. */
+    private suspend fun pause(millis: Long) {
+        withTimeoutOrNull(millis) { foregroundKick.receive() }
+    }
+
+    /** True when [next] only reflects what this connected runtime already runs. */
+    fun alreadyRunning(next: PiSessionRecord): Boolean = synchronized(stateLock) {
+        val state = lastState ?: return@synchronized false
+        !closed && connected && !degraded && runtimeConversationMatches(next, state) &&
+            (liveCwd.isBlank() || next.cwd.trim() == liveCwd.trim())
+    }
 
     fun canSubmitTask(): Boolean = taskGate.isAccepting()
 
@@ -264,10 +290,7 @@ internal class PiSessionRuntime(
                         } else {
                             val error = refreshed.exceptionOrNull()
                             if (error != null && isConversationGeneration(generation)) {
-                                // This screen still needs a full Ready. Let the event
-                                // loop's bounded recovery deliver it.
-                                publishReconnecting(error, needsRecovery = true)
-                                startEventLoop()
+                                emitReconnecting(error)
                             }
                         }
                     }
@@ -321,7 +344,7 @@ internal class PiSessionRuntime(
         }
     }
 
-    fun stopCurrentAgent(): Deferred<Result<Unit>> {
+    fun stopCurrentAgent(): Deferred<Result<PiQueue>> {
         synchronized(stateLock) {
             stopJob?.takeIf { it.isActive }?.let { return it }
             val job = scope.async {
@@ -408,9 +431,6 @@ internal class PiSessionRuntime(
         connected = false
         recoveryEnabled = false
         autoStartRequested = false
-        degraded = false
-        recoveryPending = false
-        PiRecoveryTracker.mark(runtimeOwnerSessionId, false)
         connectionJob?.cancel()
         eventJob?.cancel()
         taskGate.close()
@@ -433,35 +453,38 @@ internal class PiSessionRuntime(
                     result = runCatching { connectInternal(currentRecord(), true) }
                 }
             }
-            // A cold Termux or a briefly frozen Bridge often fails the first
-            // active start. Retry a few times before asking the user to Connect.
-            val backoff = ReconnectBackoff(baseDelayMs = 2_000L, maxAttempts = 4)
+            // A first connect that fails (Termux frozen or still starting after the
+            // process was killed in the background) used to stop at "connection
+            // failed" until the user tapped Connect. Keep retrying with backoff
+            // while this Session is meant to run.
+            var retryDelayMs = FIRST_CONNECT_RETRY_MIN_MS
             while (result.isFailure && allowStart) {
                 val error = result.exceptionOrNull() ?: break
-                if (!isRetryableConnectFailure(error) || !canRecover()) break
-                val wait = backoff.nextDelayMs() ?: break
-                publishReconnecting(error)
-                delay(wait)
+                if (!isRetryableConnectFailure(error) || !shouldKeepConnecting()) break
+                emitReconnecting(error)
+                pause(retryDelayMs)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(FIRST_CONNECT_RETRY_MAX_MS)
+                if (!shouldKeepConnecting()) break
                 result = runCatching { connectInternal(currentRecord(), true) }
             }
             if (result.isSuccess) {
                 if (publishReady(result.getOrThrow())) {
                     startEventLoop()
                 } else {
-                    publishFailed(IllegalStateException("Pi conversation is already owned by another Android Session"))
+                    updatesMutable.emit(
+                        PiRuntimeUpdate.Failed(
+                            IllegalStateException("Pi conversation is already owned by another Android Session")
+                        )
+                    )
                 }
             } else {
                 val error = result.exceptionOrNull() ?: IllegalStateException("Pi connection failed")
-                if (error is RuntimeUnavailable) {
-                    synchronized(stateLock) { clearRecoveryFlagsLocked() }
-                    updatesMutable.emit(PiRuntimeUpdate.Unavailable)
-                } else {
-                    publishFailed(error)
-                }
+                if (error is RuntimeUnavailable) updatesMutable.emit(PiRuntimeUpdate.Unavailable)
+                else updatesMutable.emit(PiRuntimeUpdate.Failed(error))
             }
             val retryAsActive = synchronized(stateLock) {
                 connectionJob = null
-                !closed && !connected && autoStartRequested && !allowStart
+                !closed && !connected && autoStartRequested && !startIfMissing
             }
             if (retryAsActive) {
                 synchronized(stateLock) {
@@ -486,71 +509,144 @@ internal class PiSessionRuntime(
         connectInternalLocked(currentRecord(), allowStart)
     }
 
+    /**
+     * Ask the Bridge for health with patience. A Termux process thawed from Doze
+     * can take several seconds to answer its first request; that is not a crash.
+     */
+    private suspend fun patientHealth(totalMillis: Long = 12_000): PiHealth? {
+        val deadline = android.os.SystemClock.elapsedRealtime() + totalMillis
+        var refused = 0
+        while (true) {
+            val result = bridge.health(timeoutMs = 4_000)
+            result.getOrNull()?.let {
+                lastHealthError = null
+                markAlive()
+                return it
+            }
+            val error = result.exceptionOrNull()
+            lastHealthError = error
+            // Nothing listens on the port (a new Session, or a killed Bridge), or
+            // another Session's Bridge holds it (401): waiting cannot change that.
+            // This used to cost every new Session 12s before its Bridge was started.
+            if (error.isForeignBridgeFailure()) return null
+            if (error.isConnectRefusedFailure()) {
+                if (++refused >= 2) return null
+                delay(300)
+                continue
+            }
+            refused = 0
+            // Waiting alone does not thaw a Termux the system froze; poke it.
+            if (error.isSocketTimeoutFailure()) wakeTermuxIfDue()
+            if (android.os.SystemClock.elapsedRealtime() >= deadline) return null
+            delay(1_000)
+        }
+    }
+
+    /** Thaw a Termux that stopped answering; at most once per [TERMUX_WAKE_INTERVAL_MS]. */
+    private suspend fun wakeTermuxIfDue() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val due = synchronized(stateLock) {
+            if (closed || (lastTermuxWakeAtMs != 0L && now - lastTermuxWakeAtMs < TERMUX_WAKE_INTERVAL_MS)) false
+            else {
+                lastTermuxWakeAtMs = now
+                true
+            }
+        }
+        if (!due) return
+        bridge.wakeTermux().onFailure {
+            Log.w(PI_SESSION_IDENTITY_TAG, "WAKE_TERMUX failed androidSessionId=$runtimeOwnerSessionId", it)
+        }
+    }
+
+    /**
+     * Attach first, start second, replace the Bridge last. The Bridge (and the Pi
+     * child it owns) is only relaunched when it is genuinely gone or belongs to an
+     * older APK and Pi is idle. A slow or briefly unreachable Bridge is never
+     * killed: that used to abort running agents and caused reconnect storms.
+     */
     private suspend fun connectInternalLocked(
         configuredRecord: PiSessionRecord,
         allowStart: Boolean
     ): PiRuntimeReady {
-        var healthBeforeResult = bridge.health(timeoutMs = 2_500)
-        if (healthBeforeResult.isFailure && wakeTermuxIfFrozen(healthBeforeResult.exceptionOrNull())) {
-            // Give the thawed Bridge a moment, then judge it on a fresh probe.
-            delay(1_500L)
-            healthBeforeResult = bridge.health(timeoutMs = 2_500)
+        var health = patientHealth()
+        val bridgeUsable = health != null && health.compatible && health.runtimeOwnerSessionId == runtimeOwnerSessionId
+        if (!bridgeUsable) {
+            if (!allowStart) throw RuntimeUnavailable()
+            val current = health
+            if (current == null && !lastHealthError.isConnectRefusedFailure() && !lastHealthError.isForeignBridgeFailure()) {
+                // Relaunching kills Pi and any running task, so only a Bridge that is
+                // provably gone (connection refused: nothing listens on the port) or
+                // one that belongs to another Session (401) is replaced at once.
+                // Anything else (a timeout from a frozen Termux, a reset) means our
+                // own process still holds the port; wake Termux and only replace a
+                // Bridge that stays like that while we keep probing.
+                val now = android.os.SystemClock.elapsedRealtime()
+                // A long gap between failed probes means the phone or this app slept;
+                // that time says nothing about the Bridge, so start the window again.
+                if (unresponsiveSinceMs == 0L || now - lastUnansweredProbeAtMs > PROBE_GAP_RESET_MS) {
+                    unresponsiveSinceMs = now
+                }
+                lastUnansweredProbeAtMs = now
+                if (now - unresponsiveSinceMs < FROZEN_BRIDGE_GRACE_MS) {
+                    wakeTermuxIfDue()
+                    throw BridgeUnresponsive(lastHealthError)
+                }
+            }
+            markAlive()
+            if (current != null && current.piRunning) {
+                val busy = bridge.state(timeoutMs = 8_000).getOrNull()
+                check(busy?.streaming != true && busy?.compacting != true) {
+                    "Pi 正在工作，当前 bridge 版本需要升级；等本轮任务结束后再点连接"
+                }
+                bridge.commands().getOrDefault(emptyList())
+                    .firstOrNull { it.name == "__android_checkpoint" }
+                    ?.let { bridge.prompt("/__android_checkpoint") }
+            }
+            Log.w(
+                PI_SESSION_IDENTITY_TAG,
+                "BRIDGE_RELAUNCH androidSessionId=${configuredRecord.androidSessionId} reachable=${current != null} " +
+                    "compatible=${current?.compatible} owner=${current?.runtimeOwnerSessionId.orEmpty()}"
+            )
+            val reason = when {
+                current == null && lastHealthError.isForeignBridgeFailure() -> "port ${configuredRecord.port} held by another Session's Bridge"
+                current == null -> "unreachable: ${lastHealthError?.javaClass?.simpleName}: ${lastHealthError?.message.orEmpty().take(120)}"
+                !current.compatible -> "incompatible bridge version"
+                else -> "owner mismatch ${current.runtimeOwnerSessionId}"
+            }
+            Log.w(PI_SESSION_IDENTITY_TAG, "BRIDGE_RELAUNCH_REASON androidSessionId=${configuredRecord.androidSessionId} $reason")
+            bridge.installAndStartBridge(reason).getOrThrow()
+            bridge.waitForBridge(30_000).getOrThrow()
+            health = bridge.health(timeoutMs = 8_000).getOrThrow()
         }
-        val attachResult = bridge.attachToRunningBridge()
-        val attached = attachResult.getOrNull()
-        val runningHealthResult = if (healthBeforeResult.isSuccess) healthBeforeResult else bridge.health(timeoutMs = 2_500)
-        val runningHealth = runningHealthResult.getOrNull()
-        if (attached != null) {
-            unresponsiveGrace.reset()
-            val runningCwd = runningHealth?.cwd.orEmpty()
-            val ownerMatches = runningHealth?.runtimeOwnerSessionId == runtimeOwnerSessionId
-            val conversationMatches = runtimeConversationMatches(configuredRecord, attached)
-            if (ownerMatches && sameCwd(configuredRecord.cwd, runningCwd) && conversationMatches) {
-                val snapshot = bridge.recoverySnapshot().getOrThrow()
+        val liveHealth = requireNotNull(health)
+
+        if (liveHealth.piRunning) {
+            val attached = bridge.state(timeoutMs = 10_000).getOrThrow()
+            if (sameCwd(configuredRecord.cwd, liveHealth.cwd) && runtimeConversationMatches(configuredRecord, attached)) {
                 return PiRuntimeReady(
                     state = attached,
-                    snapshot = snapshot,
-                    runtimeCwd = runningCwd
+                    snapshot = bridge.recoverySnapshot().getOrThrow(),
+                    runtimeCwd = liveHealth.cwd
                 )
             }
             Log.w(
                 PI_SESSION_IDENTITY_TAG,
                 "REJECT_ATTACH androidSessionId=${configuredRecord.androidSessionId} " +
-                    "runtimeOwnerSessionId=$runtimeOwnerSessionId endpointOwner=${runningHealth?.runtimeOwnerSessionId.orEmpty()} " +
                     "expectedPiConversationId=${configuredRecord.piConversationId} actualPiConversationId=${attached.piConversationId} " +
                     "expectedSessionFile=${configuredRecord.sessionFile} actualSessionFile=${attached.sessionFile}"
             )
             if (!allowStart) throw RuntimeUnavailable()
         } else if (!allowStart) {
             throw RuntimeUnavailable()
-        } else {
-            // Restarting kills this endpoint's Pi child. A Bridge or Pi that holds
-            // the endpoint but does not answer is usually frozen or busy, so give it
-            // a grace window instead of destroying a task that may still be running.
-            val failure = when {
-                runningHealth == null -> classifyBridgeFailure(runningHealthResult.exceptionOrNull())
-                runningHealth.piRunning && runningHealth.runtimeOwnerSessionId == runtimeOwnerSessionId ->
-                    classifyBridgeFailure(attachResult.exceptionOrNull())
-                else -> BridgeFailureKind.OTHER
-            }
-            if (!unresponsiveGrace.allowRestart(failure, System.nanoTime() / 1_000_000L)) {
-                throw BridgeUnresponsive(runningHealthResult.exceptionOrNull() ?: attachResult.exceptionOrNull())
-            }
         }
-        unresponsiveGrace.reset()
+        return startPiOnBridge(configuredRecord)
+    }
 
-        val previous = attached ?: bridge.state(timeoutMs = 1_500).getOrNull()
+    /** Start (or restart) only the Pi child on an already-running Bridge. */
+    private suspend fun startPiOnBridge(configuredRecord: PiSessionRecord): PiRuntimeReady {
         val previousFile = synchronized(stateLock) { lastState?.sessionFile?.takeIf { it.isNotBlank() } }
             ?: configuredRecord.sessionFile.takeIf { it.isNotBlank() }
         val preserveSession = previousFile != null
-
-        if (previous != null && !previous.streaming && !previous.compacting) {
-            bridge.commands().getOrDefault(emptyList())
-                .firstOrNull { it.name == "__android_checkpoint" }
-                ?.let { bridge.prompt("/__android_checkpoint") }
-        }
-        bridge.installAndStartBridge().getOrThrow()
-        bridge.waitForBridge(30_000).getOrThrow()
 
         val configuredLaunch = appendPiStartupArguments(
             configuredRecord.launchCommand.trim(),
@@ -571,10 +667,18 @@ internal class PiSessionRuntime(
         val started = bridge.start(configuredRecord.cwd.trim(), launch).getOrThrow()
         // The app-level default model is global for every newly created Android
         // Session. Recovery keeps the model already stored in that Pi conversation.
+        // The default model is a preference: a model that is gone or a provider that
+        // is slow to refresh must not fail the whole start and restart Pi again.
         val startedState = if (!preserveSession && bridge.defaultModelKey().isNotBlank()) {
-            val availableModels = bridge.models().getOrThrow()
-            bridge.applyDefaultModel(availableModels).getOrThrow()
-            bridge.state(timeoutMs = 8_000).getOrThrow()
+            runCatching {
+                val availableModels = bridge.models().getOrThrow()
+                bridge.applyDefaultModel(availableModels).getOrThrow()
+                bridge.state(timeoutMs = 8_000).getOrThrow()
+            }.getOrElse {
+                if (it is CancellationException) throw it
+                Log.w(PI_SESSION_IDENTITY_TAG, "DEFAULT_MODEL failed androidSessionId=$runtimeOwnerSessionId", it)
+                started
+            }
         } else {
             started
         }
@@ -607,14 +711,54 @@ internal class PiSessionRuntime(
         lastState = ready.state
         lastSnapshot = ready.snapshot
         eventCursor = ready.snapshot.latest
+        degraded = false
+        if (ready.runtimeCwd.isNotBlank()) liveCwd = ready.runtimeCwd
+        markAlive()
         record = bindPiConversation(record, ready.state, fallbackSessionFile)
-        // A Ready comes only from a verified attach/start, so it also ends any
-        // reconnect the UI is showing.
-        clearRecoveryFlagsLocked()
         // tryEmit while holding the generation lock gives Ready/Snapshot/Events
         // one total order. An old result can never be queued after a newer resume.
         updatesMutable.tryEmit(PiRuntimeUpdate.Ready(ready))
         }
+    }
+
+    private suspend fun emitReconnecting(error: Throwable) {
+        synchronized(stateLock) {
+            if (closed) return
+            degraded = true
+        }
+        updatesMutable.emit(PiRuntimeUpdate.Reconnecting(error))
+    }
+
+    private fun isDegraded(): Boolean = synchronized(stateLock) { degraded }
+
+    private fun markAlive() {
+        unresponsiveSinceMs = 0L
+        lastUnansweredProbeAtMs = 0L
+    }
+
+    /**
+     * The UI shows "reconnecting": find out whether that is still true. A healthy
+     * Bridge with Pi running ends it (Recovered); a live Bridge whose Pi exited gets
+     * Pi restarted. Returns false while Pi still needs recovery, so the caller backs
+     * off instead of opening a stream that would never report anything again.
+     */
+    private suspend fun reconcileDegraded(generation: Long): Boolean {
+        val health = bridge.health(timeoutMs = 4_000).getOrNull() ?: return true
+        markAlive()
+        if (health.piRunning) {
+            val cleared = synchronized(stateLock) {
+                if (closed || conversationGeneration != generation || !degraded) false
+                else {
+                    degraded = false
+                    true
+                }
+            }
+            if (cleared) updatesMutable.emit(PiRuntimeUpdate.Recovered)
+            return true
+        }
+        if (!canRecover()) return true
+        Log.w(PI_SESSION_IDENTITY_TAG, "PI_NOT_RUNNING androidSessionId=$runtimeOwnerSessionId lastExit=${health.lastExit}")
+        return recoverFromEventFailure(generation)
     }
 
     private fun publishReady(ready: PiRuntimeReady, expectedGeneration: Long? = null): Boolean =
@@ -627,226 +771,142 @@ internal class PiSessionRuntime(
         }
     }
 
+    /**
+     * One push stream per runtime. Link loss only reconnects the stream with the
+     * last cursor, so no event is lost and Pi is never touched. Brief hiccups stay
+     * invisible; "reconnecting" is shown only after [RECONNECT_NOTICE_MS]. Only a
+     * Bridge that stays unreachable for [BRIDGE_DEAD_MS], or a Pi child that
+     * exited, goes through [recoverFromEventFailure].
+     */
     private suspend fun eventLoop() {
-        var pollFailures = 0
-        val recoveryBackoff = ReconnectBackoff()
+        var failures = 0
+        var offlineSince = 0L
         while (currentCoroutineContext().isActive && !isClosed() && isConnected()) {
-            if (isRecoveryPending()) {
-                if (!canRecover()) {
-                    synchronized(stateLock) {
-                        connected = false
-                        clearRecoveryFlagsLocked()
-                    }
-                    updatesMutable.emit(PiRuntimeUpdate.Disconnected)
-                    break
-                }
-                when (val outcome = recoverRuntime(currentGeneration())) {
-                    RecoveryOutcome.Recovered -> {
-                        pollFailures = 0
-                        recoveryBackoff.reset()
-                    }
-                    // A newer attach/resume owns the conversation now; re-check
-                    // whether it already cleared the pending recovery.
-                    RecoveryOutcome.Superseded -> delay(250L)
-                    is RecoveryOutcome.Failed -> {
-                        val wait = recoveryBackoff.nextDelayMs()
-                        if (wait == null) {
-                            giveUpRecovery(outcome.error, recoveryBackoff.failedAttempts)
-                            break
-                        }
-                        delay(wait)
-                    }
-                }
-                continue
-            }
             val (cursor, generation) = synchronized(stateLock) { eventCursor to conversationGeneration }
-            val result = bridge.events(cursor)
-            if (!isConversationGeneration(generation)) continue
-            if (result.isFailure) {
-                val error = result.exceptionOrNull() ?: IllegalStateException("Bridge event polling failed")
-                pollFailures++
-                publishReconnecting(error, needsRecovery = pollFailures >= 3)
-                // A timeout usually means the system froze Termux in the
-                // background; thaw it now instead of waiting for a restart.
-                wakeTermuxIfFrozen(error)
-                if (pollFailures < 3) delay(500L * (1L shl (pollFailures - 1)))
+            // "Reconnecting" used to be cleared only when this loop itself had announced
+            // it. Every other path (a Pi that exited and failed to restart, a failed
+            // refresh on screen activation) left the header stuck while the stream
+            // stayed quietly open with no Pi behind it. Check the truth instead.
+            if (isDegraded() && !reconcileDegraded(generation)) {
+                failures++
+                pause((1_000L shl (failures - 1).coerceAtMost(4)).coerceAtMost(15_000L))
                 continue
             }
-            val batch = result.getOrThrow()
-            if (batch.gap) {
-                val snapshot = bridge.recoverySnapshot()
-                if (!isConversationGeneration(generation)) continue
-                if (snapshot.isFailure) {
-                    pollFailures++
-                    publishReconnecting(snapshot.exceptionOrNull()!!, needsRecovery = pollFailures >= 3)
-                    if (pollFailures < 3) delay(500L)
-                    continue
-                }
-                val value = snapshot.getOrThrow()
-                val committed = synchronized(stateLock) {
-                    if (closed || conversationGeneration != generation) false
-                    else {
+            var piExited = false
+            val result = bridge.stream(
+                after = cursor,
+                onOpen = {
+                    failures = 0
+                    offlineSince = 0L
+                    markAlive()
+                },
+                // Heartbeats arrive every 10s: drop the stream when something else
+                // marked the Session degraded, so the check above runs promptly.
+                keepOpen = { isConversationGeneration(generation) && !isDegraded() }
+            ) { batch ->
+                if (!isConversationGeneration(generation)) throw StaleGeneration()
+                if (batch.gap) {
+                    val value = bridge.recoverySnapshot().getOrThrow()
+                    synchronized(stateLock) {
+                        if (closed || conversationGeneration != generation) throw StaleGeneration()
                         eventCursor = value.latest
                         lastSnapshot = value
                         updatesMutable.tryEmit(PiRuntimeUpdate.Snapshot(value))
                     }
+                    // The server cursor advanced past the gap; restart from the snapshot.
+                    throw StaleGeneration()
                 }
-                if (!committed) continue
-            } else {
-                val committed = synchronized(stateLock) {
-                    if (closed || conversationGeneration != generation) false
-                    else {
-                        eventCursor = batch.latest
-                        updatesMutable.tryEmit(PiRuntimeUpdate.Events(batch))
-                    }
+                synchronized(stateLock) {
+                    if (closed || conversationGeneration != generation) throw StaleGeneration()
+                    eventCursor = batch.latest
+                    if (batch.events.isNotEmpty()) updatesMutable.tryEmit(PiRuntimeUpdate.Events(batch))
                 }
-                if (!committed) continue
-                if (batch.events.any {
-                        it.uiRequest?.method == "notify" && it.uiRequest.message == "ANDROID_PI_QUIT"
-                    }) {
+                if (batch.events.any { it.uiRequest?.method == "notify" && it.uiRequest.message == "ANDROID_PI_QUIT" }) {
                     disableRecovery()
                 }
                 if (batch.events.any { it.type == "process_exit" }) {
-                    if (!canRecover()) {
-                        synchronized(stateLock) {
-                            connected = false
-                            clearRecoveryFlagsLocked()
-                        }
-                        updatesMutable.emit(PiRuntimeUpdate.Disconnected)
-                        break
-                    }
-                    // The Bridge keeps answering /events after Pi exits, so this
-                    // must stay pending until a restart succeeds or gives up.
-                    publishReconnecting(IllegalStateException("Pi process exited"), needsRecovery = true)
+                    piExited = true
+                    throw StaleGeneration()
+                }
+            }
+            if (!currentCoroutineContext().isActive || isClosed()) break
+            val error = result.exceptionOrNull()
+            if (piExited) {
+                if (!canRecover()) {
+                    synchronized(stateLock) { connected = false }
+                    updatesMutable.emit(PiRuntimeUpdate.Disconnected)
+                    break
+                }
+                // Pi died but the Bridge is alive: restart only Pi, resuming its session.
+                recoverFromEventFailure(generation)
+                continue
+            }
+            if (error == null || error is StaleGeneration) continue
+
+            failures++
+            Log.w(PI_SESSION_IDENTITY_TAG, "STREAM_DROP androidSessionId=$runtimeOwnerSessionId failures=$failures ${error.javaClass.simpleName}: ${error.message}")
+            if (error.isSocketTimeoutFailure()) wakeTermuxIfDue()
+            // A dropped stream is not a dead Bridge. When the Bridge still answers with
+            // Pi running, only the link broke (a stalled socket, a long reply blocking a
+            // heartbeat): reopen from the cursor quietly instead of showing
+            // "reconnecting". Events are replayed from the cursor, so nothing is lost.
+            if (failures < 3 && !error.isConnectRefusedFailure() &&
+                bridge.health(timeoutMs = 3_000).getOrNull()?.piRunning == true
+            ) {
+                markAlive()
+                offlineSince = 0L
+                pause(300)
+                continue
+            }
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (offlineSince == 0L) offlineSince = now
+            val offlineFor = now - offlineSince
+            if (!isDegraded() && (offlineFor >= RECONNECT_NOTICE_MS || error.isSocketTimeoutFailure())) {
+                emitReconnecting(error)
+            }
+            // Connection refused means nothing listens on the port: the Bridge process
+            // is gone (Android killed it), so there is nothing to wait for. Relaunch
+            // after two refusals in a row instead of sitting in "reconnecting" for 45s.
+            val bridgeGone = failures >= 2 && error.isConnectRefusedFailure()
+            if ((bridgeGone || offlineFor >= BRIDGE_DEAD_MS) && isConversationGeneration(generation)) {
+                if (recoverFromEventFailure(generation)) {
+                    failures = 0
+                    offlineSince = 0L
                     continue
                 }
             }
-            pollFailures = 0
-            publishRecoveredIfDegraded(generation)
+            pause((500L shl (failures - 1).coerceAtMost(3)).coerceAtMost(4_000L))
         }
         synchronized(stateLock) { eventJob = null }
     }
 
-    private sealed class RecoveryOutcome {
-        object Recovered : RecoveryOutcome()
-        object Superseded : RecoveryOutcome()
-        data class Failed(val error: Throwable) : RecoveryOutcome()
-    }
-
-    private suspend fun recoverRuntime(expectedGeneration: Long): RecoveryOutcome {
-        if (!isConversationGeneration(expectedGeneration)) return RecoveryOutcome.Superseded
+    private suspend fun recoverFromEventFailure(expectedGeneration: Long? = null): Boolean {
+        if (!canRecover() || (expectedGeneration != null && !isConversationGeneration(expectedGeneration))) return false
+        emitReconnecting(IllegalStateException("Pi runtime reconnecting"))
         val result = runCatching { connectCurrent(true, expectedGeneration) }
         val ready = result.getOrNull()
         if (ready != null) {
-            return if (publishReady(ready.copy(reconnecting = true), expectedGeneration)) {
-                RecoveryOutcome.Recovered
-            } else if (isConversationGeneration(expectedGeneration)) {
-                RecoveryOutcome.Failed(IllegalStateException("Pi conversation is already owned by another Android Session"))
-            } else {
-                RecoveryOutcome.Superseded
-            }
+            return publishReady(ready.copy(reconnecting = true), expectedGeneration)
         }
-        val error = result.exceptionOrNull() ?: return RecoveryOutcome.Superseded
-        if (error is CancellationException) throw error
-        if (!isConversationGeneration(expectedGeneration)) return RecoveryOutcome.Superseded
-        // Keep the runtime marked alive while this loop retries; a transient
-        // reconnect must not make the UI submit a second start for the same endpoint.
-        publishReconnecting(error, needsRecovery = true)
-        return RecoveryOutcome.Failed(error)
-    }
-
-    private fun giveUpRecovery(error: Throwable, attempts: Int) {
-        synchronized(stateLock) {
-            if (closed) return
-            connected = false
-            clearRecoveryFlagsLocked()
-            updatesMutable.tryEmit(
-                PiRuntimeUpdate.Failed(
-                    IllegalStateException("自动重连 $attempts 次后停止：${error.message.orEmpty()}。点 Connect 重试", error)
-                )
-            )
+        // Keep the runtime marked alive while its Activity-owned loop retries;
+        // a transient reconnect must not make the UI submit a second start for
+        // the same endpoint.
+        if (result.exceptionOrNull() != null && (expectedGeneration == null || isConversationGeneration(expectedGeneration))) {
+            emitReconnecting(result.exceptionOrNull()!!)
         }
+        return false
     }
-
-    /** Publish Reconnecting in the same total order as Ready/Events. */
-    private fun publishReconnecting(error: Throwable, needsRecovery: Boolean = false) {
-        synchronized(stateLock) {
-            if (closed) return
-            Log.w(PI_SESSION_IDENTITY_TAG, "RECONNECTING androidSessionId=$runtimeOwnerSessionId recovery=$needsRecovery", error)
-            degraded = true
-            if (needsRecovery) {
-                recoveryPending = true
-                // Only a real recovery needs the keep-alive service; a single
-                // polling blip should not pop a foreground notification.
-                PiRecoveryTracker.mark(runtimeOwnerSessionId, true)
-            }
-            updatesMutable.tryEmit(PiRuntimeUpdate.Reconnecting(error))
-        }
-    }
-
-    private fun publishFailed(error: Throwable) {
-        synchronized(stateLock) {
-            clearRecoveryFlagsLocked()
-            updatesMutable.tryEmit(PiRuntimeUpdate.Failed(error))
-        }
-    }
-
-    /** A poll succeeded after Reconnecting: tell the UI the endpoint is back. */
-    private suspend fun publishRecoveredIfDegraded(generation: Long) {
-        if (!synchronized(stateLock) { degraded && !recoveryPending }) return
-        val state = bridge.state(timeoutMs = 4_000).getOrNull()
-        synchronized(stateLock) {
-            if (closed || conversationGeneration != generation || !degraded || recoveryPending) return
-            val previous = lastState
-            val usable = state?.takeIf {
-                previous == null || (
-                    previous.piConversationId == it.piConversationId &&
-                        conversationFileKey(previous.sessionFile) == conversationFileKey(it.sessionFile)
-                    )
-            }
-            if (usable != null) {
-                lastState = usable
-                record = bindPiConversation(record, usable, usable.sessionFile)
-            }
-            clearRecoveryFlagsLocked()
-            updatesMutable.tryEmit(PiRuntimeUpdate.Recovered(usable))
-        }
-    }
-
-    /** Thaw a Termux that stopped answering; at most once per 5 s. Returns true when a wake was sent. */
-    private suspend fun wakeTermuxIfFrozen(error: Throwable?): Boolean {
-        if (classifyBridgeFailure(error) != BridgeFailureKind.UNRESPONSIVE) return false
-        val now = System.nanoTime() / 1_000_000L
-        val due = synchronized(stateLock) {
-            val last = lastTermuxWakeAtMs
-            if (closed || (last != null && now - last < 5_000L)) false
-            else {
-                lastTermuxWakeAtMs = now
-                true
-            }
-        }
-        if (!due) return false
-        return bridge.wakeTermux()
-            .onFailure { Log.w(PI_SESSION_IDENTITY_TAG, "WAKE_TERMUX failed androidSessionId=$runtimeOwnerSessionId", it) }
-            .isSuccess
-    }
-
-    private fun clearRecoveryFlagsLocked() {
-        degraded = false
-        recoveryPending = false
-        PiRecoveryTracker.mark(runtimeOwnerSessionId, false)
-    }
-
-    private fun isRetryableConnectFailure(error: Throwable): Boolean =
-        error !is RuntimeUnavailable && error !is TermuxSetupException && error !is CancellationException
 
     private fun currentRecord(): PiSessionRecord = synchronized(stateLock) { record }
     private fun isConversationGeneration(expected: Long): Boolean = synchronized(stateLock) {
         !closed && conversationGeneration == expected
     }
-    private fun currentGeneration(): Long = synchronized(stateLock) { conversationGeneration }
-    private fun isRecoveryPending(): Boolean = synchronized(stateLock) { recoveryPending }
     private fun canRecover(): Boolean = synchronized(stateLock) { !closed && recoveryEnabled }
+    private fun shouldKeepConnecting(): Boolean = synchronized(stateLock) {
+        !closed && !connected && recoveryEnabled && autoStartRequested
+    }
+    private fun isRetryableConnectFailure(error: Throwable): Boolean =
+        error !is RuntimeUnavailable && error !is TermuxSetupException && error !is CancellationException
     private fun isClosed(): Boolean = synchronized(stateLock) { closed }
 
     private fun sameCwd(configured: String, running: String): Boolean =
@@ -855,7 +915,23 @@ internal class PiSessionRuntime(
     private class RuntimeUnavailable : IllegalStateException("Pi runtime is not running")
 
     private class BridgeUnresponsive(cause: Throwable?) :
-        IllegalStateException("Pi Bridge 没有响应，暂不重启以免中断正在运行的任务", cause)
+        IllegalStateException("Termux 没有响应，正在唤醒；暂不重启 Bridge 以免中断任务", cause)
+    /** Ends the current stream so the loop reopens it from a fresh cursor/generation. */
+    private class StaleGeneration : IllegalStateException("stale stream generation")
+
+    private companion object {
+        /** Silent reconnect window: shorter link drops never reach the UI. */
+        const val RECONNECT_NOTICE_MS = 8_000L
+        /** Only this long without any Bridge answer counts as a dead Bridge. */
+        const val BRIDGE_DEAD_MS = 45_000L
+        /** A Bridge that holds its port but never answers is replaced only after this long. */
+        const val FROZEN_BRIDGE_GRACE_MS = 3 * 60_000L
+        const val TERMUX_WAKE_INTERVAL_MS = 10_000L
+        /** Failed probes further apart than this mean the phone or app slept in between. */
+        const val PROBE_GAP_RESET_MS = 120_000L
+        const val FIRST_CONNECT_RETRY_MIN_MS = 2_000L
+        const val FIRST_CONNECT_RETRY_MAX_MS = 30_000L
+    }
 }
 
 /** Activity-owned registry; Compose only receives stable per-session runtimes. */
@@ -941,6 +1017,26 @@ internal class PiSessionRuntimeManager(context: Context) {
         if (activeAndroidSessionId == record.androidSessionId) activeAndroidSessionId = null
         conversationOwners.entries.removeAll { it.value == record.androidSessionId }
         return runtime.closeRuntime()
+    }
+
+    /** The app is visible again: one forced Termux wake, then every runtime probes now. */
+    @Synchronized
+    fun onForeground() {
+        val list = runtimes.values.toList()
+        list.firstOrNull()?.let { first ->
+            CoroutineScope(managerJob + Dispatchers.IO).launch { first.bridge.wakeTermux(force = true) }
+        }
+        list.forEach { it.onForeground() }
+    }
+
+    /**
+     * While Pi is on screen, Termux is still a background app to the system, and
+     * ColorOS freezes it (Bridge and Pi included) a few seconds after it leaves the
+     * foreground. Each delivered command thaws it again, so keep poking it.
+     */
+    suspend fun keepTermuxThawed() {
+        val first = synchronized(this) { runtimes.values.firstOrNull() } ?: return
+        first.bridge.wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS - 500)
     }
 
     @Synchronized
