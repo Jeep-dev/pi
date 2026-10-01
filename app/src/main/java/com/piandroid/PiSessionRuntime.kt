@@ -709,7 +709,7 @@ internal class PiSessionRuntime(
     private fun isDegraded(): Boolean = synchronized(stateLock) { degraded }
 
     private fun markAlive() {
-        lastProofOfLifeMs = android.os.SystemClock.elapsedRealtime()
+        lastProofOfLifeMs = System.nanoTime() / 1_000_000L
     }
 
     /**
