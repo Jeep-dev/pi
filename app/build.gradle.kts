@@ -24,8 +24,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 138
-        versionName = "5.19.38"
+        versionCode = 140
+        versionName = "5.19.40"
     }
 
     signingConfigs {

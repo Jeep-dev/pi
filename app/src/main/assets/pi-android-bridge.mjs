@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-30.1";
+const bridgeVersion = "2026-10-01.10";
 
 // Lifecycle lines go to stderr, which the launcher appends to bridge.log. They are
 // the evidence for why a Session dropped: which process ended, with what code or
