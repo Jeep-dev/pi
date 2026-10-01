@@ -778,9 +778,11 @@ class PiBridge(
                     stopReason = outcome
                 )
             }
+            "agent_end" -> PiEvent(seq, type, "", "", stopReason = if (value.optBoolean("willRetry")) "retry" else "")
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
+            "extension_ui_dismiss" -> PiEvent(seq, type, "", value.optString("id"))
             "prompt_failed" -> PiEvent(seq, type, "", value.optString("error"), metaText = value.optString("message"))
             "extension_ui_request" -> {
                 val method = value.optString("method")

@@ -50,8 +50,8 @@ process.stdin.on("data", chunk => {
       if (command.message === "compact-briefly") { startCompaction(300); ok(command, { disposition: "started" }); continue; }
       if (command.message === "compact-forever") { startCompaction(0); ok(command, { disposition: "started" }); continue; }
       if (compacting) { fail(command, "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."); continue; }
-      appendFileSync(received, command.message + "\\n");
-      if (command.message === "slow-ok") setTimeout(() => ok(command, { disposition: "started" }), 400);
+      appendFileSync(received, command.message + "@" + Date.now() + "\\n");
+      if (command.message.startsWith("slow-ok")) setTimeout(() => ok(command, { disposition: "started" }), 400);
       else if (command.message === "slow-fail") setTimeout(() => fail(command, "provider exploded"), 400);
       else ok(command, { disposition: command.streamingBehavior ? "queued" : "started" });
     } else if (command.type === "clear_queue") {
@@ -88,7 +88,8 @@ const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const request = (pathname, init = {}) => fetch(`http://127.0.0.1:${port}${pathname}`, { ...init, headers: { ...headers, ...(init.headers || {}) } });
 const prompt = message => request("/prompt", { method: "POST", body: JSON.stringify({ message, streamingBehavior: "steer" }) });
-const received = async () => (await readFile(path.join(cwd, "received.txt"), "utf8").catch(() => "")).split("\n").filter(Boolean);
+const receivedAt = async () => (await readFile(path.join(cwd, "received.txt"), "utf8").catch(() => "")).split("\n").filter(Boolean).map(line => line.split("@"));
+const received = async () => (await receivedAt()).map(([message]) => message);
 
 try {
   let health;
@@ -104,6 +105,16 @@ try {
   let response = await prompt("slow-ok");
   assert.equal(response.status, 200);
   assert.equal((await response.json()).data.disposition, "pending");
+
+  // Prompts reach Pi one at a time: the second waits until Pi answered the first.
+  await wait(500);
+  const slowFirst = prompt("slow-ok-2");
+  await wait(20);
+  const second = prompt("right-behind");
+  await Promise.all([slowFirst, second].map(p => p.then(r => r.text())));
+  await wait(500);
+  const times = Object.fromEntries(await receivedAt());
+  assert.ok(Number(times["right-behind"]) - Number(times["slow-ok-2"]) >= 350, JSON.stringify(times));
 
   // A late failure arrives as an event naming the message.
   response = await prompt("slow-fail");
@@ -137,6 +148,17 @@ try {
   assert.ok(!(await received()).includes("held-during-compaction"), "a held prompt must not run after Stop");
   const after = await request("/events?after=0&wait=0").then(r => r.json());
   assert.ok(!after.events.some(item => item.value?.type === "prompt_failed" && item.value.message === "held-during-compaction"));
+  // Restarting Pi on a conversation that has no messages yet (no file on disk in Pi 0.99)
+  // must keep its id: the Bridge writes the header Pi then reopens.
+  const emptyConversation = path.join(cwd, "sessions", "2026-10-01T00-00-00-000Z_empty-conversation-id.jsonl");
+  const restarted = await request("/start", {
+    method: "POST",
+    body: JSON.stringify({ cwd, launchCommand: `pi --mode rpc --session ${emptyConversation}` }),
+  });
+  assert.equal(restarted.status, 200, await restarted.text());
+  const header = JSON.parse((await readFile(emptyConversation, "utf8")).trim());
+  assert.equal(header.type, "session");
+  assert.equal(header.id, "empty-conversation-id");
   console.log("Prompt preflight tests passed");
 } finally {
   child.kill("SIGTERM");

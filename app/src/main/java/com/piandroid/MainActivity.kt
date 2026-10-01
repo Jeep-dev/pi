@@ -301,7 +301,11 @@ private data class ChatLine(
 )
 private val ANDROID_CHANGELOG = listOf(
     "• 发送更稳：工作中发消息不再报 already processing；上下文快满、Pi 先压缩时不再误报 30 秒超时；压缩进行中发的消息等压缩完自动发出",
-    "• 停止不再弹「模型错误：This operation was aborted」和「已停止…」；还没发出的排队消息退回输入框，不再错标 ✓",
+    "• 停止不再弹「模型错误：This operation was aborted」和「已停止…」；还没发出的排队消息退回输入框，不再错标 ✓；停止会关掉扩展弹出的对话框",
+    "• Pi 自动重试或压缩后成功时，不再留下红色「模型错误」；压缩真失败才提示",
+    "• 压缩后刚发的消息不再消失；↓ 排队消息送达后变 ✓；扩展的状态文字不再顶掉停止按钮；/reload 后新命令立即可用",
+    "• 连发两条消息时不会再并行跑两个任务；切回正在工作的会话不再丢正在输出的内容和排队消息",
+    "• 修复新建会话还没发消息时，Pi 或 Bridge 重启后一直「重连中」（Pi 0.99 不再为空会话建文件）",
     "• 工作中输入 / 命令不再当成插话发给模型：扩展命令立即执行、不显示排队 ○；不存在的命令直接提示，不发出去",
     "• 适配 Pi 0.99：codemode 里调用的工具显示在同一张卡片内（● ✓ ✗），MCP 工具显示为 server/tool 并按行列出参数；被扩展直接处理的消息不再让状态卡在工作中；Bridge 丢弃不显示的大字段，重连更快",
     "• 回复边输出边按 Markdown 渲染，不再等输出完才排版",
@@ -901,6 +905,9 @@ private fun PiScreen(
     var agentRunning by remember { mutableStateOf(false) }
     // When the user last pressed Stop; the abort that follows is not an error to report.
     var stopRequestedAt by remember { mutableStateOf(0L) }
+    // A model error is shown only once the run settles: Pi may still retry it or recover
+    // by compacting, and then the error was never the outcome.
+    var heldErrorNotice by remember { mutableStateOf<String?>(null) }
     var followUpQueueSize by remember { mutableStateOf(0) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
@@ -1030,9 +1037,23 @@ private fun PiScreen(
 
     fun restoreHistory(history: List<PiHistoryMessage>, preservePending: Boolean = false) {
         val pending = if (preservePending) {
-            // queued/failed entries are not durable Pi history yet; sent entries
-            // are expected to be present once Pi acknowledged them.
-            lines.filter { it.role == "user" && it.delivery in setOf("steering_queued", "steering_failed") }
+            // Queued, failed and follow-up entries are not durable Pi history yet. Neither is
+            // a just-sent message while Pi compacts before running it: keep user rows after
+            // the newest one the durable history already has.
+            val lastDurableUser = history.lastOrNull { it.role == "user" }?.text
+            val anchor = lastDurableUser?.let { text -> lines.indexOfLast { it.role == "user" && it.text == text } }
+                ?.takeIf { it >= 0 }
+                ?: lines.indexOfLast { it.role != "user" && it.role != "system" }
+            // Durable text can be longer than the bubble (attachment references, expanded
+            // templates), so a bubble that starts a recent durable message is already there.
+            val recentDurable = history.filter { it.role == "user" }.takeLast(8).map { it.text }
+            lines.filterIndexed { index, line ->
+                line.role == "user" && (
+                    line.delivery in setOf("steering_queued", "steering_failed", "follow_up") ||
+                        (index > anchor && line.delivery in setOf("normal", "steering_sent") &&
+                            recentDurable.none { it.startsWith(line.text.substringBefore("\n[附件:")) })
+                    )
+            }
         } else {
             emptyList()
         }
@@ -1304,7 +1325,8 @@ private fun PiScreen(
             }
         }
         val userStopped = stopRequestedAt > 0L && android.os.SystemClock.uptimeMillis() - stopRequestedAt < 120_000L
-        assistantCompletionNotice(stopReason, text, errorMessage, userStopped)?.let(::addSystem)
+        val notice = assistantCompletionNotice(stopReason, text, errorMessage, userStopped)
+        if (stopReason == "error") heldErrorNotice = notice else notice?.let(::addSystem)
     }
 
     fun toggleLine(index: Int) {
@@ -1341,10 +1363,14 @@ private fun PiScreen(
         }
     }
 
-    fun restoreQueuedPrompts(prompts: List<String>) {
+    fun restoreQueuedPrompts(prompts: List<String>, followUps: List<String> = emptyList()) {
         val existing = lines.count { it.delivery == "steering" || it.delivery == "steering_queued" }
         prompts.drop(existing).forEach { prompt ->
             lines.add(ChatLine("user", prompt, delivery = "steering_queued"))
+        }
+        val existingFollowUps = lines.count { it.delivery == "follow_up" }
+        followUps.drop(existingFollowUps).forEach { prompt ->
+            lines.add(ChatLine("user", prompt, delivery = "follow_up"))
         }
     }
 
@@ -1362,15 +1388,18 @@ private fun PiScreen(
                 updateSessionRecord { it.copy(status = PiSessionStatus.WORKING, lastActivity = System.currentTimeMillis(), lastError = "") }
                 AgentKeepAliveService.start(bridge.applicationContext())
             }
-            "agent_end" -> Unit
+            "agent_end" -> if (event.stopReason == "retry") heldErrorNotice = null
+            "auto_retry_start" -> heldErrorNotice = null
             "queue_update" -> {
-                if (recovering) restoreQueuedPrompts(event.steeringQueue)
+                if (recovering) restoreQueuedPrompts(event.steeringQueue, event.followUpQueue)
                 steeringQueueSize = event.steeringCount
                 followUpQueueSize = event.followUpCount
                 reconcileSteeringQueue(event.steeringCount)
             }
             "agent_settled" -> {
                 agentRunning = false
+                heldErrorNotice?.let(::addSystem)
+                heldErrorNotice = null
                 settleStreams()
                 steeringQueueSize = 0
                 followUpQueueSize = 0
@@ -1388,7 +1417,13 @@ private fun PiScreen(
                 "toolcall_end" -> finishToolDraft(event.contentIndex, event.text)
                 else -> Unit
             }
-            "message_end" -> if (event.subtype == "assistant") {
+            "message_end" -> if (event.subtype == "user") {
+                // Pi persisted this user message: a queued steer or follow-up got delivered.
+                val index = lines.indexOfLast { it.role == "user" && it.text == event.text }
+                if (index >= 0 && lines[index].delivery in setOf("steering", "steering_queued", "follow_up")) {
+                    lines[index] = lines[index].copy(delivery = "steering_sent")
+                }
+            } else if (event.subtype == "assistant") {
                 finalizeAssistant(event.text, event.stopReason, event.errorMessage)
                 if (event.stopReason == "aborted" || event.stopReason == "error") {
                     for (i in lines.indices) {
@@ -1412,6 +1447,7 @@ private fun PiScreen(
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
                 agentRunning = false
+                heldErrorNotice = null
                 settleStreams()
                 currentState = currentState?.copy(streaming = false, compacting = false)
                 addSystem(event.text)
@@ -1427,6 +1463,7 @@ private fun PiScreen(
                 }
             }
             "compaction_start" -> {
+                if (event.subtype == "overflow") heldErrorNotice = null
                 status = "Compacting"
                 AgentKeepAliveService.start(bridge.applicationContext())
             }
@@ -1436,8 +1473,14 @@ private fun PiScreen(
                 if (event.stopReason == "success" && event.subtype != "manual") {
                     loadHistory(preservePending = true)
                 }
+                // Manual /compact reports its failure through the command's own reply.
+                if (event.stopReason == "error" && event.subtype != "manual" && event.text.isNotBlank() && event.text != "上下文压缩完成") {
+                    addSystem("压缩失败：${event.text}")
+                }
                 status = if (agentRunning || currentState?.streaming == true) "Working" else "Ready"
             }
+            // Pi resolved the dialog itself (timeout or Stop).
+            "extension_ui_dismiss" -> if (pendingUi?.id == event.text) pendingUi = null
             "prompt_failed" -> {
                 // A message accepted as pending (Pi was compacting) failed afterwards.
                 val index = lines.indexOfLast { it.role == "user" && it.text == event.metaText }
@@ -1462,11 +1505,15 @@ private fun PiScreen(
                             // session_start precedes resources_discover in Pi;
                             // query after the reload settles to include contributed resources.
                             requestLoadedResources(delayMillis = 250)
+                            // New prompt templates, skills or commands must be known to / at once.
+                            refreshMetaSoon()
                         } else {
                             addSystem(req.message)
                         }
                     }
-                    "setStatus" -> if (req.statusText.isNotBlank()) status = req.statusText
+                    // Pi's setStatus is a keyed footer entry from an extension, not the agent's
+                    // state; writing it into status hid the stop button mid-run.
+                    "setStatus" -> Unit
                     "setWidget" -> when (req.title) {
                         ANDROID_RESOURCES_WIDGET -> {
                             categorizedResourcesReceived = true
@@ -1513,12 +1560,16 @@ private fun PiScreen(
 
     suspend fun applyRuntimeReady(ready: PiRuntimeReady) {
         val state = ready.state
-        // A restarted Bridge begins a new sequence epoch from zero.
-        if (ready.snapshot.latest < lastAppliedEventSeq) lastAppliedEventSeq = 0L
         applyRuntimeState(state, ready.runtimeCwd)
         status = "Restoring session"
         restoreHistory(ready.snapshot.history, preservePending = ready.reconnecting)
+        // The chat was just rebuilt from durable history, so replay every snapshot event:
+        // its carried events (agent_start, open deltas, queue state) have older sequence
+        // numbers than a stale live batch this screen may already have seen. A restarted
+        // Bridge also begins a new sequence epoch from zero.
+        lastAppliedEventSeq = 0L
         ready.snapshot.events.forEach { applyEvent(it, recovering = true) }
+        lastAppliedEventSeq = maxOf(lastAppliedEventSeq, ready.snapshot.latest)
         pendingUi = ready.snapshot.pendingUi.lastOrNull()
         ready.snapshot.pendingUi.lastOrNull()?.let { request ->
             dialogInput = request.prefill.ifBlank { "" }
@@ -1568,9 +1619,10 @@ private fun PiScreen(
                 is PiRuntimeUpdate.Ready -> applyRuntimeReady(update.value)
                 is PiRuntimeUpdate.State -> applyRuntimeState(update.value)
                 is PiRuntimeUpdate.Snapshot -> {
-                    if (update.value.latest < lastAppliedEventSeq) lastAppliedEventSeq = 0L
                     restoreHistory(update.value.history, preservePending = true)
+                    lastAppliedEventSeq = 0L
                     update.value.events.forEach { applyEvent(it, recovering = true) }
+                    lastAppliedEventSeq = maxOf(lastAppliedEventSeq, update.value.latest)
                     pendingUi = update.value.pendingUi.lastOrNull()
                     update.value.editorText?.let { input = it }
                     connected = true
@@ -1646,17 +1698,28 @@ private fun PiScreen(
      * Stop clears Pi's queue. Like native Pi, the messages that never ran go back into the
      * input box instead of staying in the chat with a delivered mark.
      */
-    fun restoreClearedQueue(restored: PiQueue) {
-        val texts = restored.steering + restored.followUp
-        if (texts.isEmpty()) return
-        texts.forEach { text ->
+    fun restoreClearedQueue(restored: PiQueue, queuedAtStop: List<String>) {
+        val cleared = restored.steering + restored.followUp
+        if (cleared.isEmpty()) return
+        // Pi's queue holds expanded text (templates, attachment references), so pair each
+        // cleared message with a bubble queued when Stop was pressed, exact text first.
+        val unmatched = queuedAtStop.toMutableList()
+        val exact = cleared.map { text -> text.takeIf { unmatched.remove(it) } }
+        val bubbles = cleared.mapIndexed { index, text ->
+            exact[index]
+                ?: text.takeIf { lines.any { it.role == "user" && it.text == text } }
+                ?: unmatched.removeFirstOrNull()
+                ?: text
+        }
+        bubbles.forEach { text ->
             val index = lines.indexOfLast {
                 it.role == "user" && it.text == text &&
                     it.delivery in setOf("steering", "steering_queued", "steering_sent", "follow_up", "normal")
             }
             if (index >= 0) lines.removeAt(index)
         }
-        input = (texts + input).filter { it.isNotBlank() }.joinToString("\n")
+        val back = bubbles.map { it.substringBefore("\n[附件:").let { text -> if (text.startsWith("[附件:")) "" else text } }
+        input = (back + input).filter { it.isNotBlank() }.joinToString("\n")
         steeringQueueSize = 0
         followUpQueueSize = 0
     }
@@ -1910,10 +1973,11 @@ private fun PiScreen(
             "/abort" -> {
                 status = "Stopping"
                 stopRequestedAt = android.os.SystemClock.uptimeMillis()
+                val queuedAtStop = lines.filter { it.role == "user" && it.delivery in setOf("steering", "steering_queued", "follow_up") }.map { it.text }
                 val stop = runtime.stopCurrentAgent()
                 scope.launch {
                     stop.await().fold(
-                        onSuccess = { restored -> restoreClearedQueue(restored) },
+                        onSuccess = { restored -> restoreClearedQueue(restored, queuedAtStop) },
                         onFailure = { addSystem("停止失败：${it.message}") }
                     )
                 }
@@ -2130,7 +2194,7 @@ LaunchedEffect(chatListState) {
     }
 
     val busy = connected && (
-        status == "Working" || status == "Compacting" || status == "Stopping" ||
+        agentRunning || status == "Working" || status == "Compacting" || status == "Stopping" ||
             currentState?.streaming == true || currentState?.compacting == true
         )
     val chatStatus = when {

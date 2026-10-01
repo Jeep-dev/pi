@@ -94,7 +94,17 @@ function addEvent(value) {
   if (value?.type === "queue_update") latestQueueEvent = event;
   if (value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") latestQueueEvent = null;
   if (value?.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(value.method) && value.id) {
-    pendingUiRequests.set(String(value.id), value);
+    const id = String(value.id);
+    pendingUiRequests.set(id, value);
+    // Pi resolves a timed-out dialog by itself without telling the client; drop it here
+    // too so it doesn't linger or come back on every reconnect.
+    const timeout = Number(value.timeout);
+    if (timeout > 0) {
+      setTimeout(() => {
+        if (pendingUiRequests.get(id) !== value) return;
+        dismissUiRequest(id);
+      }, timeout).unref?.();
+    }
   }
   if (value?.type === "extension_ui_request" && value.method === "setWidget" && value.widgetKey) {
     const key = String(value.widgetKey);
@@ -111,6 +121,11 @@ function addEvent(value) {
       for (const flush of streamClients) flush();
     });
   }
+}
+
+function dismissUiRequest(id) {
+  if (!pendingUiRequests.delete(id)) return;
+  addEvent({ type: "extension_ui_dismiss", id });
 }
 
 function waitForEvent(after, timeoutMs) {
@@ -321,11 +336,44 @@ function spawnPi(nextLaunchCommand, nextCwd) {
   });
 }
 
+/**
+ * Pi 0.99 writes a session file only once the session has a message, and opening a
+ * missing --session file starts a session with a new random id. Restarting Pi on a
+ * conversation with no messages yet (after /new, or an app update relaunching the
+ * Bridge) then looked like a different conversation and the app restarted it forever.
+ * Write just the header, with the id from Pi's file name, so Pi reopens the same one.
+ */
+async function ensureResumableSessionFile(command, workingDirectory) {
+  let sessionArgument = "";
+  try {
+    const argumentsList = splitCommand(command);
+    for (let index = 0; index < argumentsList.length; index++) {
+      const argument = argumentsList[index];
+      if (argument === "--session") sessionArgument = argumentsList[++index] || "";
+      else if (argument.startsWith("--session=")) sessionArgument = argument.slice("--session=".length);
+    }
+  } catch {
+    return;
+  }
+  if (!sessionArgument) return;
+  const file = path.resolve(workingDirectory, expandHome(sessionArgument));
+  if (existsSync(file)) return;
+  const match = /^[^_]+_([\w-]+)\.jsonl$/.exec(path.basename(file));
+  if (!match) return;
+  const header = { type: "session", version: 3, id: match[1], timestamp: new Date().toISOString(), cwd: workingDirectory };
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(header) + "\n", { flag: "wx", mode: 0o600 });
+    lifecycleLog(`session header written for empty conversation ${match[1]}`);
+  } catch {}
+}
+
 async function startPi(nextCwd, nextLaunchCommand) {
   stopPi();
   cwd = expandHome((nextCwd || cwd).trim()) || termuxHome;
   launchCommand = (nextLaunchCommand || launchCommand).trim();
   if (!launchCommand) throw new Error("Pi launch command is empty");
+  await ensureResumableSessionFile(launchCommand, cwd);
   lastStderr = "";
   lastStdoutTail = "";
   lastExit = null;
@@ -543,6 +591,11 @@ function historyFromEntries(data) {
     id = entry.parentId == null ? null : String(entry.parentId);
   }
   branch.reverse();
+  // Failed attempts Pi retried (or recovered by compaction) are omitted from the model
+  // context with a context_edit; their error is not the outcome, so don't show it.
+  const recovered = new Set(branch
+    .filter(entry => entry?.type === "context_edit" && entry.replacement === null)
+    .map(entry => String(entry.targetId || "")));
 
   // get_entries intentionally returns the append-only session, including
   // messages that a compaction has replaced in the model context. Project the
@@ -608,10 +661,12 @@ function historyFromEntries(data) {
             if (callId) toolLines.set(callId, history.length - 1);
           }
         }
-        if (message.stopReason === "aborted" && !content.some(part => part?.type === "text" && String(part.text || "").trim())) {
-          add("system", "本轮任务已中止");
-        } else if (message.stopReason === "error" && message.errorMessage) {
-          add("system", `模型错误：${String(message.errorMessage)}`);
+        // A stopped turn needs no notice (the user pressed Stop); some providers report
+        // that abort as an error whose message is the AbortError's.
+        const errorMessage = String(message.errorMessage || "");
+        const abortLike = /^\s*(this operation was aborted|the operation was aborted|request (was )?aborted|aborted)\.?\s*$/i.test(errorMessage);
+        if (message.stopReason === "error" && errorMessage && !abortLike && !recovered.has(String(entry.id || ""))) {
+          add("system", `模型错误：${errorMessage}`);
         }
       } else if (role === "toolResult") {
         const callId = String(message.toolCallId || "");
@@ -1009,9 +1064,40 @@ function waitForCompactionEnd(timeoutMs) {
   });
 }
 
+// Prompts go to Pi one at a time. While Pi compacts before running a prompt it is not
+// yet "streaming", so a second prompt sent then would start a parallel run instead of
+// being queued. Once Pi answers the first, its run is active and the next one queues.
+let promptChain = Promise.resolve();
+
 async function submitPrompt(command) {
-  const deadline = Date.now() + PROMPT_TIMEOUT_MS;
   const generation = stopGeneration;
+  const previous = promptChain;
+  let release;
+  promptChain = new Promise(resolve => { release = resolve; });
+  const waiting = { message: command.message };
+  heldPrompts.add(waiting);
+  try {
+    await previous;
+  } finally {
+    heldPrompts.delete(waiting);
+  }
+  try {
+    if (generation !== stopGeneration) throw Object.assign(new Error("Stopped"), { stopped: true });
+    const response = await sendPrompt(command, generation);
+    // Pi swallows an abort that lands while it compacts before the prompt and then runs
+    // the prompt anyway. Stop means stop: abort the run that just started.
+    if (generation !== stopGeneration && response?.data?.disposition === "started") {
+      await rpc({ type: "abort" }, 60_000).catch(() => {});
+      throw Object.assign(new Error("Stopped"), { stopped: true });
+    }
+    return response;
+  } finally {
+    release();
+  }
+}
+
+async function sendPrompt(command, generation) {
+  const deadline = Date.now() + PROMPT_TIMEOUT_MS;
   for (;;) {
     try {
       return await rpc(command, Math.max(1000, deadline - Date.now()));
@@ -1079,6 +1165,11 @@ async function stopCurrentAgent() {
 
   stopFence = true;
   stopGeneration++;
+  // Stop cancels any open extension dialog, both in Pi and on screen.
+  for (const id of [...pendingUiRequests.keys()]) {
+    try { sendRaw({ type: "extension_ui_response", id, cancelled: true }); } catch {}
+    dismissUiRequest(id);
+  }
   const held = [...heldPrompts].map(item => String(item.message));
   for (const wake of compactionWaiters) wake();
   compactionWaiters.clear();
