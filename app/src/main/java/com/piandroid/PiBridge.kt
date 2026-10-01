@@ -518,7 +518,7 @@ class PiBridge(
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
                 val value = item.optJSONObject("value") ?: JSONObject().put("type", "raw").put("line", item.optString("value"))
-                add(parseEvent(item.optLong("seq"), value))
+                add(parseEvent(item.optLong("seq"), value).copy(receivedAt = item.optLong("receivedAt")))
             }
         }
         return PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
@@ -531,7 +531,7 @@ class PiBridge(
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
                 val value = item.optJSONObject("value") ?: JSONObject().put("type", "raw").put("line", item.optString("value"))
-                add(parseEvent(item.optLong("seq"), value))
+                add(parseEvent(item.optLong("seq"), value).copy(receivedAt = item.optLong("receivedAt")))
             }
         }
         PiEventBatch(parsed, root.optLong("latest", after), root.optBoolean("gap"))
@@ -1061,7 +1061,9 @@ data class PiEvent(
     val metaText: String = "",
     val isError: Boolean = false,
     /** Set on tool calls made from inside another tool (codemode scripts, MCP via codemode). */
-    val parentToolCallId: String = ""
+    val parentToolCallId: String = "",
+    /** Wall-clock ms when the Bridge received the event (same device clock as the app). */
+    val receivedAt: Long = 0L
 )
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)

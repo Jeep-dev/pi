@@ -7,10 +7,14 @@ const markdown = await readFile("app/src/main/java/com/piandroid/MarkdownContent
 const bridge = await readFile("app/src/main/assets/pi-android-bridge.mjs", "utf8");
 const extras = await readFile("app/src/main/java/com/piandroid/PiBridgeExtras.kt", "utf8");
 
-assert.ok(main.includes("key(activeSession.androidSessionId)"), "active Session must own the only PiScreen");
-assert.ok(main.includes("session = activeSession"), "PiScreen must receive the selected Session record");
+// Every Session keeps its own PiScreen state alive (parallel Sessions, instant switching);
+// each host is bound to its own runtime and only the selected one draws.
+assert.ok(main.includes("key(record.androidSessionId)"), "each Session must own its PiScreen host");
+assert.ok(main.includes("session = record"), "each PiScreen must receive its own Session record");
+assert.ok(main.includes("if (selected) runtimeManager.activate(record) else runtimeManager.runtime(record)"), "only the selected Session activates; others keep their own runtime");
+assert.ok(main.includes("visible = selected"), "only the selected Session may be visible");
+assert.ok(main.includes("if (!visible) return"), "a hidden Session must draw no UI, dialogs or input handlers");
 assert.ok(main.includes("autoStart = true"), "selected Session must activate its runtime");
-assert.ok(!main.includes("sessions.forEach { record ->\\n                        key(record.androidSessionId)"), "inactive Sessions must not retain hidden PiScreen trees");
 assert.ok(runtime.includes("val generation = ++conversationGeneration"), "activation must fence stale event batches");
 assert.ok(runtime.includes("connectCurrent(true, generation)"), "activation must refresh from its own Bridge endpoint");
 console.log("Active-session UI ownership guards passed");

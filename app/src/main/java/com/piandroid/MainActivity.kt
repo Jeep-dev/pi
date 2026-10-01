@@ -300,6 +300,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 多个 session 同时运行：每个 session 的界面常驻，切换即时、不再重新加载；工具计时按事件真实时间算，切换、重连后不再从 0 开始",
     "• 发送更稳：工作中发消息不再报 already processing；上下文快满、Pi 先压缩时不再误报 30 秒超时；压缩进行中发的消息等压缩完自动发出",
     "• 停止不再弹「模型错误：This operation was aborted」和「已停止…」；还没发出的排队消息退回输入框，不再错标 ✓；停止会关掉扩展弹出的对话框",
     "• Pi 自动重试或压缩后成功时，不再留下红色「模型错误」；压缩真失败才提示",
@@ -750,35 +751,40 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                         }
                     )
                 } else {
-                    // Render exactly one chat UI. Background Runtime objects remain
-                    // Activity-owned, but an inactive Session must never keep a hidden
-                    // Compose chat tree that can leak/replay another Session's UI state.
-                    key(activeSession.androidSessionId) {
-                        val runtime = runtimeManager.activate(activeSession)
-                        PiScreen(
-                            runtime = runtime,
-                            session = activeSession,
-                            sessions = sessions,
-                            activeAndroidSessionId = activeAndroidSessionId,
-                            autoStart = true,
-                            hostModifier = Modifier.fillMaxSize(),
-                            themeMode = themeMode,
-                            onTheme = { selected ->
-                                themeKey = selected.storageKey
-                                context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
-                                    .edit().putString("theme", selected.storageKey).apply()
-                            },
-                            onSelectSession = ::selectSession,
-                            onNewSession = {
-                                createSessionName = ""
-                                createSessionCwd = activeSession.cwd
-                                createSessionStartupArguments = ""
-                                createSessionOpen = true
-                            },
-                            onSessionUpdate = ::updateSession,
-                            onCanBindConversation = ::canBindConversation,
-                            onManageSession = ::requestSessionManagement
-                        )
+                    // Every Session keeps its own screen state and event collector alive, so
+                    // all of them run side by side and switching is instant: timers, streaming
+                    // replies and queues carry on. Only the selected one draws UI; a hidden
+                    // host emits no layout, dialogs or input handlers.
+                    sessions.forEach { record ->
+                        key(record.androidSessionId) {
+                            val selected = record.androidSessionId == activeSession.androidSessionId
+                            val runtime = if (selected) runtimeManager.activate(record) else runtimeManager.runtime(record)
+                            PiScreen(
+                                runtime = runtime,
+                                session = record,
+                                sessions = sessions,
+                                activeAndroidSessionId = activeAndroidSessionId,
+                                autoStart = true,
+                                visible = selected,
+                                hostModifier = Modifier.fillMaxSize(),
+                                themeMode = themeMode,
+                                onTheme = { picked ->
+                                    themeKey = picked.storageKey
+                                    context.getSharedPreferences("pi_ui", Context.MODE_PRIVATE)
+                                        .edit().putString("theme", picked.storageKey).apply()
+                                },
+                                onSelectSession = ::selectSession,
+                                onNewSession = {
+                                    createSessionName = ""
+                                    createSessionCwd = record.cwd
+                                    createSessionStartupArguments = ""
+                                    createSessionOpen = true
+                                },
+                                onSessionUpdate = ::updateSession,
+                                onCanBindConversation = ::canBindConversation,
+                                onManageSession = ::requestSessionManagement
+                            )
+                        }
                     }
                 }
             }
@@ -844,6 +850,7 @@ private fun PiScreen(
     sessions: List<PiSessionRecord>,
     activeAndroidSessionId: String,
     autoStart: Boolean,
+    visible: Boolean = true,
     hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
     onTheme: (PiThemeMode) -> Unit,
@@ -908,6 +915,10 @@ private fun PiScreen(
     // A model error is shown only once the run settles: Pi may still retry it or recover
     // by compacting, and then the error was never the outcome.
     var heldErrorNotice by remember { mutableStateOf<String?>(null) }
+    // Tool timers use the wall-clock time the Bridge received each event, so a timer keeps
+    // its real start across a session switch, a reconnect or an app restart.
+    val eventTime = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    fun eventNow(): Long = eventTime.get().takeIf { it > 0L } ?: System.currentTimeMillis()
     var followUpQueueSize by remember { mutableStateOf(0) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
@@ -940,7 +951,8 @@ private fun PiScreen(
         onSessionUpdate(session.androidSessionId, transform)
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(visible) {
+        if (!visible) return@LaunchedEffect
         delay(100)
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
@@ -1164,7 +1176,7 @@ private fun PiScreen(
                 collapsed = true,
                 toolName = toolName,
                 // The clock starts when the card appears, not when the tool finally runs.
-                toolStartedAt = android.os.SystemClock.uptimeMillis()
+                toolStartedAt = eventNow()
             )
         )
     }
@@ -1202,7 +1214,7 @@ private fun PiScreen(
     fun applyNestedTool(event: PiEvent): Boolean {
         val parentId = event.parentToolCallId
         if (parentId.isBlank()) return false
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = eventNow()
         val childId = event.toolCallId
         if (event.type == "tool_execution_start") nestedToolStarts[childId] = now
         val name = toolDisplayName(event.toolName).ifBlank { "tool" }
@@ -1223,7 +1235,7 @@ private fun PiScreen(
 
     fun startTool(event: PiEvent) {
         val toolCallId = event.toolCallId
-        val startedAt = android.os.SystemClock.uptimeMillis()
+        val startedAt = eventNow()
         val existingIndex = lines.indexOfLast {
             it.toolCallId == toolCallId && (it.role == "tool-draft" || it.role == "tool")
         }
@@ -1281,7 +1293,7 @@ private fun PiScreen(
         if (index < 0 && toolCallId.isNotBlank()) {
             index = lines.indexOfLast { it.role == "tool" && it.toolCallId == toolCallId }
         }
-        val endedAt = android.os.SystemClock.uptimeMillis()
+        val endedAt = eventNow()
         if (index >= 0) {
             val line = lines[index]
             lines[index] = line.copy(
@@ -1381,6 +1393,7 @@ private fun PiScreen(
             if (event.seq <= lastAppliedEventSeq) return
             lastAppliedEventSeq = event.seq
         }
+        eventTime.set(event.receivedAt)
         when (event.type) {
             "agent_start" -> {
                 agentRunning = true
@@ -1431,7 +1444,7 @@ private fun PiScreen(
                             lines[i] = lines[i].copy(
                                 text = "",
                                 streaming = false,
-                                toolEndedAt = android.os.SystemClock.uptimeMillis()
+                                toolEndedAt = eventNow()
                             )
                         }
                     }
@@ -2025,7 +2038,8 @@ private fun PiScreen(
         }
     }
 
-    LaunchedEffect(chatListState) {
+    LaunchedEffect(chatListState, visible) {
+        if (!visible) return@LaunchedEffect
         snapshotFlow {
             // Track every field that can change visible chat height. Tool cards grow via
             // toolArgs/toolOutput/toolMeta even while line count and line.text stay fixed.
@@ -2057,7 +2071,8 @@ private fun PiScreen(
 // Markdown and web-search output may grow after the ChatLine mutation has already
 // been processed. Any late remeasure that opens space below is followed again.
 // While the user is physically scrolling, this watcher stays idle.
-LaunchedEffect(chatListState) {
+LaunchedEffect(chatListState, visible) {
+    if (!visible) return@LaunchedEffect
     snapshotFlow {
         val layout = chatListState.layoutInfo
         val last = layout.visibleItemsInfo.lastOrNull()
@@ -2086,8 +2101,8 @@ LaunchedEffect(chatListState) {
         }
 }
 
-    LaunchedEffect(imeBottom) {
-        if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
+    LaunchedEffect(imeBottom, visible) {
+        if (visible && imeBottom > 0 && followOutput && lines.isNotEmpty()) {
             delay(80)
             chatListState.scrollToRealBottom { followOutput }
         }
@@ -2096,6 +2111,10 @@ LaunchedEffect(chatListState) {
     LaunchedEffect(followOutput) {
         if (followOutput) showScrollControls = false
     }
+
+    // A hidden Session keeps its state and event collector above, but draws nothing and
+    // owns no dialogs or input handlers.
+    if (!visible) return
 
     if (autoStart) pendingUi?.let { request ->
         fun sendUiResponse(action: suspend () -> Result<Unit>) {
@@ -2840,8 +2859,8 @@ LaunchedEffect(listState) {
                     }
                     "tool", "tool-draft" -> {
                         val colors = LocalPiColors.current
-                        var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
-                        LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = android.os.SystemClock.uptimeMillis(); delay(100) } }
+                        var toolNow by remember(line.toolCallId, line.toolStartedAt) { mutableLongStateOf(System.currentTimeMillis()) }
+                        LaunchedEffect(line.streaming, line.toolStartedAt) { while (line.streaming && line.toolStartedAt > 0L) { toolNow = System.currentTimeMillis(); delay(100) } }
                         val hasStructuredTool = line.toolName.isNotBlank() || line.toolArgs.isNotBlank() || line.toolOutput.isNotBlank() || line.toolDurationMs >= 0L
                         val toolOutput = if (hasStructuredTool) line.toolOutput else fullText
                         val outputHint = toolHiddenHint(toolOutput)

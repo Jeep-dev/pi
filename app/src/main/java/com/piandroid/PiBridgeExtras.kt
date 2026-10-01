@@ -102,7 +102,7 @@ suspend fun PiBridge.recoverySnapshot(): Result<PiRecoverySnapshot> = request("/
         for (i in 0 until eventArray.length()) {
             val item = eventArray.optJSONObject(i) ?: continue
             val value = item.optJSONObject("value") ?: continue
-            add(parseEvent(item.optLong("seq"), value))
+            add(parseEvent(item.optLong("seq"), value).copy(receivedAt = item.optLong("receivedAt")))
         }
     }
     val pendingArray = root.optJSONArray("pendingUi") ?: JSONArray()
