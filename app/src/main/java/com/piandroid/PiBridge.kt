@@ -966,7 +966,10 @@ internal fun Throwable?.isConnectRefusedFailure(): Boolean {
     var current = this
     val seen = HashSet<Throwable>()
     while (current != null && seen.add(current)) {
-        if (current is java.net.ConnectException && Regex("(?i)ECONNREFUSED|connection refused").containsMatchIn(current.message.orEmpty())) return true
+        // Android's ConnectException can omit the errno; its ErrnoException cause carries it.
+        val message = current.message.orEmpty()
+        if (Regex("(?i)\\bECONNREFUSED\\b").containsMatchIn(message)) return true
+        if (current is java.net.ConnectException && message.contains("connection refused", ignoreCase = true)) return true
         current = current.cause
     }
     return false
