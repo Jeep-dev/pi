@@ -300,6 +300,7 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 工作中输入 / 命令不再当成插话发给模型：扩展命令立即执行、不显示排队 ○；不存在的命令直接提示，不发出去",
     "• 适配 Pi 0.99：codemode 里调用的工具显示在同一张卡片内（● ✓ ✗），MCP 工具显示为 server/tool 并按行列出参数；被扩展直接处理的消息不再让状态卡在工作中；Bridge 丢弃不显示的大字段，重连更快",
     "• 回复边输出边按 Markdown 渲染，不再等输出完才排版",
     "• 工具图标换成统一的线条风格：read 眼睛、bash 终端、edit 笔、write 新建文件；出错时图标变红，不再用警告三角；工具参数生成完成后按正式格式显示，不再露出 JSON",
@@ -1879,6 +1880,24 @@ private fun PiScreen(
             "/settings" -> panel = Panel.Settings
             else -> {
                 followOutput = true
+                // Slash input is a command, not chat. Extension commands run immediately in Pi
+                // even mid-run, so they never join the steering queue; prompt templates and
+                // skills expand into a real message and keep the normal steer/follow-up path.
+                val remote = if (command.startsWith("/")) remoteCommands.firstOrNull { "/${it.name}" == command } else null
+                if (command.startsWith("/") && command.length > 1 && remote == null && remoteCommands.isNotEmpty()) {
+                    addSystem("没有 $command 这个命令")
+                    return
+                }
+                if (remote?.source == "extension") {
+                    lines.add(ChatLine("user", text))
+                    runtime.launchTask {
+                        bridge.prompt(text, if (currentState?.streaming == true) "steer" else null).fold(
+                            onSuccess = { disposition -> if (disposition == "started") status = "Working" },
+                            onFailure = { addSystem("命令发送失败：${it.message}") }
+                        )
+                    }
+                    return
+                }
                 val queued = currentState?.streaming == true || status == "Working"
                 val steering = queued && !followUp
                 if (steering) steeringQueueSize += 1
@@ -1886,7 +1905,15 @@ private fun PiScreen(
                 runtime.launchTask {
                     val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
                     bridge.prompt(text, behavior).fold(
-                        onSuccess = { disposition -> if (disposition != "handled") status = "Working" },
+                        onSuccess = { disposition ->
+                            if (disposition != "handled") status = "Working"
+                            else if (steering) {
+                                // An input handler consumed it: it never enters Pi's queue, so don't leave ○ behind.
+                                steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                                val index = lines.indexOfLast { it.role == "user" && it.delivery == "steering_queued" && it.text == text }
+                                if (index >= 0) lines[index] = lines[index].copy(delivery = "normal")
+                            }
+                        },
                         onFailure = {
                             if (steering) {
                                 steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
