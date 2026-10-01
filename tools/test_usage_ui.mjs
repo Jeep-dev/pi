@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const ui=await readFile('app/src/main/java/com/piandroid/MainActivity.kt','utf8');
+const bridge=await readFile('app/src/main/assets/pi-android-bridge.mjs','utf8');
+assert.match(ui,/"\/usage" -> sendExtensionCommand\("\/usage"\)/);
+assert.match(ui,/val extensionInput = extensionCommandInput\(text, remoteCommands\)[\s\S]*?sendExtensionCommand\(extensionInput\)[\s\S]*?return/);
+assert.match(ui,/else if \(event.subtype == "custom"\) \{\s*addSystem\(event.text\)/);
+assert.match(ui,/"extension_command_end" -> refreshMetaSoon\(\)/);
+assert.match(ui,/visibleExtensionLabel\(it\)/);
+assert.match(bridge,/response\?\.success === false/);
+assert.match(bridge,/type: "extension_command_end"/);
+console.log('Usage command routing, visible result, resource hiding and metadata refresh guards passed');

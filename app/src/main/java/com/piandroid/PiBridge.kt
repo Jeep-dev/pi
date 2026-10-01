@@ -662,7 +662,9 @@ class PiBridge(
             "message_end" -> {
                 val message = value.optJSONObject("message") ?: JSONObject()
                 PiEvent(
-                    seq, type, message.optString("role"), messageText(message),
+                    seq, type,
+                    if (message.optString("role") == "custom" && !message.optBoolean("display", true)) "hidden" else message.optString("role"),
+                    messageText(message),
                     stopReason = message.optString("stopReason"),
                     errorMessage = message.optString("errorMessage")
                 )

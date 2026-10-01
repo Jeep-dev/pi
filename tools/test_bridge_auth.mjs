@@ -35,6 +35,15 @@ process.stdin.on("data", chunk => {
       }
       continue;
     }
+    if (command.type === "prompt" && command.message === "/usage") {
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "custom", customType: "codex-usage", display: true, content: "Codex · Plus" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } }) + "\\n");
+      continue;
+    }
+    if (command.type === "prompt" && command.message === "/failed-command") {
+      process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: "prompt", success: false, error: "test command failed" }) + "\\n");
+      continue;
+    }
     if (command.type === "prompt" && command.message === "/tree-pending") {
       pendingTreeCommand = command.id;
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "async-tree-dialog", method: "select", title: "Session Tree", options: ["◆ latest"] }) + "\\n");
@@ -301,6 +310,21 @@ try {
     body: JSON.stringify({ id: "async-tree-dialog", value: "◆ latest" }),
   });
   assert.equal(completeDetachedCommand.status, 200);
+
+  const cursor = commandEvents.latest;
+  for (const message of ["/usage", "/failed-command"]) {
+    const response = await fetch(`http://127.0.0.1:${port}/command`, {
+      method: "POST", headers: startHeaders, body: JSON.stringify({ message }),
+    });
+    assert.equal(response.status, 202);
+  }
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const usageEvents = await fetch(`http://127.0.0.1:${port}/events?after=${cursor}&wait=0`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(response => response.json());
+  assert.ok(usageEvents.events.some(item => item.value?.message?.customType === "codex-usage"), "usage output must reach the UI");
+  assert.ok(usageEvents.events.some(item => item.value?.type === "extension_command_end"), "completed commands must refresh metadata");
+  assert.ok(usageEvents.events.some(item => item.value?.type === "extension_error" && item.value.error.includes("test command failed")), "failed RPC commands must not fail silently");
 
   const upload = await fetch(`http://127.0.0.1:${port}/upload?name=huge-reference.bin`, {
     method: "POST",

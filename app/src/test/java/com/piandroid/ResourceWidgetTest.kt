@@ -5,6 +5,24 @@ import org.junit.Test
 
 class ResourceWidgetTest {
     @Test
+    fun hidesUsageFromExtensionsOnly() {
+        assertEquals(
+            listOf(
+                LoadedResourceSection("Extensions", listOf("pi-android-mobile.ts", "pi-exa")),
+                LoadedResourceSection("Prompts", listOf("/usage")),
+            ),
+            parseLoadedResourceWidget(listOf(
+                "[Extensions]",
+                "codex-usage.ts, pi-android-mobile.ts, /home/user/.pi/agent/extensions/codex-usage.ts, pi-exa",
+                "[Prompts]",
+                "/usage",
+            ))
+        )
+        assertEquals(false, visibleExtensionLabel("codex-usage.ts"))
+        assertEquals(true, visibleExtensionLabel("pi-exa"))
+    }
+
+    @Test
     fun parsesNativeStyleSectionsAndDropsEmptyCategories() {
         assertEquals(
             listOf(

@@ -640,7 +640,7 @@ function historyFromEntries(data) {
       );
     } else if (entry?.type === "branch_summary") {
       add("system", `分支摘要：${String(entry.summary || "")}`);
-    } else if (entry?.type === "custom_message" && !String(entry.customType || "").startsWith("__android_")) {
+    } else if (entry?.type === "custom_message" && entry.display !== false && !String(entry.customType || "").startsWith("__android_")) {
       add("system", contentText(entry.content));
     }
   }
@@ -983,8 +983,14 @@ async function rpcResponse(res, command, timeoutMs) {
 function dispatchLongCommand(message) {
   if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
-  void rpc({ type: "prompt", message }, 24 * 60 * 60 * 1000).catch(error => {
+  void rpc({ type: "prompt", message }, 24 * 60 * 60 * 1000).then(response => {
+    if (response?.success === false) {
+      addEvent({ type: "extension_error", error: `Command failed: ${String(response.error || "unknown error")}` });
+    }
+    addEvent({ type: "extension_command_end" });
+  }).catch(error => {
     addEvent({ type: "extension_error", error: `Command failed: ${String(error?.message || error)}` });
+    addEvent({ type: "extension_command_end" });
   });
 }
 

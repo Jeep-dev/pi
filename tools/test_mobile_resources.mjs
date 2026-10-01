@@ -52,6 +52,7 @@ function handle(value) {
       assert.ok(!section(initialWidget, "Extensions").includes("llama.cpp"));
       assert.ok(!section(initialWidget, "Extensions").includes("review.md"));
       assert.ok(!section(initialWidget, "Extensions").includes("demo-skill.md"));
+      assert.ok(!section(initialWidget, "Extensions").includes("codex-usage.ts"));
       send({ id: "resources", type: "prompt", message: "/__android_loaded_resources" });
       return;
     }

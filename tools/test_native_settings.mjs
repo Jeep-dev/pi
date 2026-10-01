@@ -44,7 +44,13 @@ function rpc(command) {
 try {
   const levels = await rpc({ type: "get_available_thinking_levels" });
   assert.equal(levels.success, true, JSON.stringify(levels));
-  assert.ok(Array.isArray(levels.data?.levels) && levels.data.levels.includes("off"), "thinking levels must include off");
+  assert.ok(Array.isArray(levels.data?.levels) && levels.data.levels.length > 0, "model must expose supported thinking levels");
+  for (const level of levels.data.levels) {
+    const response = await rpc({ type: "set_thinking_level", level });
+    assert.equal(response.success, true, JSON.stringify(response));
+    const state = await rpc({ type: "get_state" });
+    assert.equal(state.data?.thinkingLevel, level, "supported thinking level did not round-trip");
+  }
 
   for (const [type, field] of [["set_steering_mode", "steeringMode"], ["set_follow_up_mode", "followUpMode"]]) {
     for (const mode of ["all", "one-at-a-time"]) {

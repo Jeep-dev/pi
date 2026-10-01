@@ -1,5 +1,5 @@
 name: Build Pi Android
-# v5.19.38 validation
+# v5.19.39 validation
 
 on:
   workflow_dispatch:
@@ -45,11 +45,12 @@ jobs:
           node-version: "22"
       - name: Validate bridge, mobile extension, and UI guards
         run: |
-          npm install --global --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
+          npm install --global --ignore-scripts @earendil-works/pi-coding-agent@0.99.1
           node --check app/src/main/assets/pi-android-bridge.mjs
           node tools/test_bridge_auth.mjs
           node tools/test_multi_session_bridge.mjs
           node tools/test_active_session_ui.mjs
+          node tools/test_usage_ui.mjs
           node tools/test_session_close_preserves_history.mjs
           node tools/test_mobile_resume.mjs
           node tools/test_stop_fence.mjs
@@ -76,5 +77,5 @@ jobs:
         run: chmod +x ./gradlew && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7
         with:
-          name: pi-android-v5.19.38-ci${{ github.run_number }}-apks
+          name: pi-android-v5.19.39-ci${{ github.run_number }}-apks
           path: app/build/outputs/apk/**/*.apk

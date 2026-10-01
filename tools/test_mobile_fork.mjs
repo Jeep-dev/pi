@@ -109,6 +109,7 @@ function handle(value) {
     if (header.parentSession !== sessionFile) fail("forked session did not record its parent session");
     completed = true;
     child.kill();
+    setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
   }
 }
 
@@ -125,11 +126,12 @@ child.stdout.on("data", (chunk) => {
 
 child.on("spawn", () => send({ id: "fork", type: "prompt", message: "/fork" }));
 child.on("exit", () => {
+  clearTimeout(timeout);
   rmSync(directory, { recursive: true, force: true });
   if (!completed) process.exitCode = 1;
   else console.log("Mobile /fork behavior test passed");
 });
-setTimeout(() => {
+const timeout = setTimeout(() => {
   if (!completed) {
     console.error("Mobile /fork behavior test timed out");
     child.kill();
