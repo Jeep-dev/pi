@@ -2423,7 +2423,8 @@ LaunchedEffect(chatListState, visible) {
                     )
                 }
                 if (panel == Panel.Chat && input.startsWith("/")) {
-                    CommandPalette(input, localCommands, remoteCommands, Modifier.align(Alignment.BottomCenter)) { name, remote -> input = ""; if (remote || name == "import") input = "/$name " else { keyboardController?.hide(); focusManager.clearFocus(); executeInput("/$name") } }
+                    CommandPalette(input, localCommands, remoteCommands, Modifier.align(Alignment.BottomCenter)) { name, needsArgs -> input = ""; // Extension commands and local commands run on tap; prompt templates and skills take text.
+                        if (needsArgs || name == "import") input = "/$name " else { keyboardController?.hide(); focusManager.clearFocus(); executeInput("/$name") } }
                 }
             }
             if (panel == Panel.Chat) {
@@ -2989,7 +2990,7 @@ LaunchedEffect(listState) {
 
 @Composable
 private fun CommandPalette(query: String, local: List<LocalCommand>, remote: List<PiCommand>, modifier: Modifier = Modifier, onPick: (String, Boolean) -> Unit) {
-    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
+    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to (it.source != "extension")) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
     val paletteShape = RoundedCornerShape(20.dp)
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp))
@@ -3000,8 +3001,8 @@ private fun CommandPalette(query: String, local: List<LocalCommand>, remote: Lis
             }
             LazyColumn(state = paletteState, modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)) {
                 items(choices) { choice ->
-                    val cmd = choice.first; val remoteChoice = choice.second
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onPick(cmd.name, remoteChoice) }.padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val cmd = choice.first; val needsArgs = choice.second
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onPick(cmd.name, needsArgs) }.padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("/${cmd.name}", color = Accent, fontFamily = FontFamily.Monospace, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(118.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(cmd.description, color = TextMuted, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     }
