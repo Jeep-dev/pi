@@ -300,7 +300,6 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
-    "• 执行扩展命令（如 /usage）不再在聊天里多出一条用户气泡",
     "• 多个 session 同时运行：每个 session 的界面常驻，切换即时、不再重新加载；工具计时按事件真实时间算，切换、重连后不再从 0 开始",
     "• 发送更稳：工作中发消息不再报 already processing；上下文快满、Pi 先压缩时不再误报 30 秒超时；压缩进行中发的消息等压缩完自动发出",
     "• 停止不再弹「模型错误：This operation was aborted」和「已停止…」；还没发出的排队消息退回输入框，不再错标 ✓；停止会关掉扩展弹出的对话框",
@@ -2025,8 +2024,7 @@ private fun PiScreen(
                     return
                 }
                 if (remote?.source == "extension") {
-                    // Like native Pi, an extension command is not a chat message: no user
-                    // bubble. Whatever the extension shows (notify, widget) appears itself.
+                    lines.add(ChatLine("user", text))
                     runtime.launchTask {
                         bridge.prompt(text, "steer").fold(
                             onSuccess = { disposition -> if (disposition == "started") status = "Working" },
