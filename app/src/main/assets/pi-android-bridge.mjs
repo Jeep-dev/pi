@@ -205,6 +205,7 @@ function attachJsonl(stream) {
 }
 
 function stopPi() {
+  promptEpoch += 1;
   stopFence = false;
   stopInProgress = null;
   addEvent({ type: "process_reset" });
@@ -372,6 +373,8 @@ function sendRaw(value) {
 
 // Model switches and prompt preflight can refresh provider OAuth over the network.
 const SLOW_RPC_TIMEOUT_MS = 30000;
+const PROMPT_PREFLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
+let promptEpoch = 0;
 
 function rpc(command, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
@@ -980,6 +983,23 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+function dispatchPrompt(command) {
+  if (stopFence) throw new Error("Stop in progress; prompt rejected");
+  if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
+  const epoch = promptEpoch;
+  void rpc(command, PROMPT_PREFLIGHT_TIMEOUT_MS).then(response => {
+    if (epoch !== promptEpoch) return;
+    if (response?.success === false) {
+      addEvent({ type: "extension_error", error: `发送失败：${String(response.error || "unknown error")}` });
+    }
+    addEvent({ type: "prompt_submission_end", disposition: response?.data?.disposition || "", success: response?.success !== false });
+  }).catch(error => {
+    if (epoch !== promptEpoch) return;
+    addEvent({ type: "extension_error", error: `发送失败：${String(error?.message || error)}` });
+    addEvent({ type: "prompt_submission_end", success: false });
+  });
+}
+
 function dispatchLongCommand(message) {
   if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
@@ -1007,6 +1027,7 @@ async function stopCurrentAgent() {
   }
 
   stopFence = true;
+  promptEpoch += 1;
   const operation = (async () => {
     let cleared = false;
     try {
@@ -1182,11 +1203,10 @@ const server = http.createServer(async (req, res) => {
         }).join("\n");
         message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
-      return rpcResponse(res, {
-        type: "prompt",
-        message,
-        ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
-      }, SLOW_RPC_TIMEOUT_MS);
+      const streamingBehavior = input.streamingBehavior || "steer";
+      if (!["steer", "followUp"].includes(streamingBehavior)) throw new Error("Invalid streamingBehavior");
+      dispatchPrompt({ type: "prompt", message, streamingBehavior });
+      return send(res, 200, { type: "response", command: "prompt", success: true, data: { disposition: "pending" } });
     }
 
     if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {

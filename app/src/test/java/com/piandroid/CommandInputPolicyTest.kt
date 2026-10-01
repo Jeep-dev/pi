@@ -10,6 +10,14 @@ class CommandInputPolicyTest {
         PiCommand("skill:demo", "Demo", "skill"),
     )
 
+    @Test fun ranksExactBeforePrefixBeforeSubstring() {
+        assertEquals(0, commandMatchRank("usage", "USAGE"))
+        assertEquals(1, commandMatchRank("usage", "u"))
+        assertEquals(2, commandMatchRank("resume", "u"))
+        assertEquals(3, commandMatchRank("model", "u"))
+        assertTrue(commandMatchRank("usage", "u") < commandMatchRank("quit", "u"))
+    }
+
     @Test fun resolvesExtensionCaseAndArguments() {
         assertEquals("/usage", extensionCommandInput("/Usage", commands))
         assertEquals("/usage", extensionCommandInput(" /USAGE ", commands))

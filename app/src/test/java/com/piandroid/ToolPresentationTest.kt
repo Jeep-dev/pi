@@ -89,6 +89,14 @@ class ToolPresentationTest {
     }
 
     @Test
+    fun providerAbortErrorsAreNotModelFailures() {
+        assertEquals("本轮任务已中止", assistantCompletionNotice("error", "", "This operation was aborted"))
+        assertEquals("本轮任务已中止", assistantCompletionNotice("error", "", "Error: This operation was aborted"))
+        assertEquals(null, assistantCompletionNotice("error", "partial answer", "AbortError"))
+        assertEquals("模型错误：provider unavailable", assistantCompletionNotice("error", "", "provider unavailable"))
+    }
+
+    @Test
     fun assistantErrorsAndEmptyAbortsHaveVisibleCompletionNotices() {
         assertEquals(
             "模型错误：provider unavailable",

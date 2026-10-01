@@ -659,6 +659,7 @@ class PiBridge(
                     toolName = delta.optString("toolName", delta.optJSONObject("toolCall")?.optString("name").orEmpty())
                 )
             }
+            "prompt_submission_end" -> PiEvent(seq, type, value.optString("disposition"), "", isError = !value.optBoolean("success", true))
             "message_end" -> {
                 val message = value.optJSONObject("message") ?: JSONObject()
                 PiEvent(

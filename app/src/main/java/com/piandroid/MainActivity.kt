@@ -250,6 +250,17 @@ internal data class LoadedResourceSection(val title: String, val items: List<Str
 internal fun visibleExtensionLabel(label: String): Boolean =
     label.replace('\\', '/').substringAfterLast('/') != "codex-usage.ts"
 
+internal fun commandMatchRank(name: String, query: String): Int {
+    val value = name.lowercase()
+    val needle = query.lowercase()
+    return when {
+        value == needle -> 0
+        value.startsWith(needle) -> 1
+        value.contains(needle) -> 2
+        else -> 3
+    }
+}
+
 internal fun extensionCommandInput(text: String, commands: List<PiCommand>): String? {
     val parts = text.trim().split(Regex("\\s+"), limit = 2)
     val name = parts.firstOrNull()?.takeIf { it.startsWith("/") }?.removePrefix("/") ?: return null
@@ -1409,6 +1420,10 @@ private fun PiScreen(
                 addSystem(event.text)
             }
             "extension_command_end" -> refreshMetaSoon()
+            "prompt_submission_end" -> {
+                if ((event.isError || event.subtype == "handled") && currentState?.streaming != true) status = "Ready"
+                refreshMetaSoon()
+            }
             "tool_execution_start" -> if (!applyNestedTool(event)) startTool(event)
             "tool_execution_update" -> if (!applyNestedTool(event)) updateTool(event)
             "tool_execution_end" -> if (!applyNestedTool(event)) finishTool(event)
@@ -2863,7 +2878,20 @@ LaunchedEffect(listState) {
 
 @Composable
 private fun CommandPalette(query: String, local: List<LocalCommand>, remote: List<PiCommand>, modifier: Modifier = Modifier, onPick: (String, Boolean) -> Unit) {
-    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name.lowercase() !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
+    val needle = query.removePrefix("/").trim().lowercase()
+    val localNames = local.map { it.name.lowercase() }.toSet()
+    val matches = buildList<Pair<LocalCommand, Boolean>> {
+        local.filter { it.name.contains(needle, ignoreCase = true) }.forEach { add(it to false) }
+        remote.filter { !it.name.startsWith("__") && it.name.lowercase() !in localNames && it.name.contains(needle, ignoreCase = true) }
+            .forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) }
+    }.distinctBy { it.first.name.lowercase() }
+    val choices = (if (needle.isBlank()) matches else matches.sortedWith(
+        compareBy<Pair<LocalCommand, Boolean>> { commandMatchRank(it.first.name, needle) }
+            .thenBy { it.first.name.lowercase() }
+    )).take(64)
+    if (choices.isEmpty()) return
+    val paletteState = rememberLazyListState()
+    LaunchedEffect(needle) { paletteState.scrollToItem(0) }
     val paletteShape = RoundedCornerShape(20.dp)
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp))

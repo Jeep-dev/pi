@@ -164,6 +164,19 @@ let diagnostics = "";
 child.stdout.on("data", chunk => { diagnostics += chunk; });
 child.stderr.on("data", chunk => { diagnostics += chunk; });
 
+async function promptRequest(url, options) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const before = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=0`, { headers }).then(r => r.json());
+  const response = await fetch(url, options);
+  if (response.status !== 200) return response;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const batch = await fetch(`http://127.0.0.1:${port}/events?after=${before.latest}&wait=0`, { headers }).then(r => r.json());
+    if (batch.events.some(item => item.value?.type === "prompt_submission_end")) return response;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error("prompt preflight did not complete");
+}
+
 try {
   let authorized;
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -336,7 +349,7 @@ try {
   const uploaded = await upload.json();
   assert.equal(await readFile(path.join(home, uploaded.path), "utf8"), "streamed-file");
 
-  const attachmentPrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const attachmentPrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({
@@ -366,13 +379,13 @@ try {
   });
   assert.equal(afterRestart.status, 200, "late exit from old Pi process must not detach the replacement process");
 
-  const treePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const treePrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({ message: "__tree_test__" }),
   });
   assert.equal(treePrompt.status, 200);
-  const widgetPrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const widgetPrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({ message: "__widget_test__" }),
@@ -417,7 +430,7 @@ try {
   });
   assert.equal(closeTree.status, 200);
 
-  const activePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const activePrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({ message: "__snapshot_active__" }),
@@ -447,7 +460,7 @@ try {
     "completed assistant deltas already represented by durable history must not be replayed",
   );
 
-  const racePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const racePrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({ message: "__snapshot_race__" }),
@@ -468,7 +481,7 @@ try {
   const pressureCursor = await fetch(`http://127.0.0.1:${port}/events?after=0&wait=0`, {
     headers: { Authorization: `Bearer ${token}` },
   }).then(response => response.json()).then(batch => batch.latest);
-  const pressurePrompt = await fetch(`http://127.0.0.1:${port}/prompt`, {
+  const pressurePrompt = await promptRequest(`http://127.0.0.1:${port}/prompt`, {
     method: "POST",
     headers: startHeaders,
     body: JSON.stringify({ message: "__event_pressure__" }),

@@ -226,8 +226,13 @@ internal fun assistantCompletionNotice(
     stopReason: String,
     text: String,
     errorMessage: String
-): String? = when {
-    stopReason == "error" && errorMessage.isNotBlank() -> "模型错误：$errorMessage"
-    stopReason == "aborted" && text.isBlank() -> "本轮任务已中止"
-    else -> null
+): String? {
+    val cancelled = stopReason == "aborted" || Regex(
+        "(?i)^(?:Error: )?(?:This operation was aborted|The operation was aborted|Request was aborted|Aborted|AbortError(?::.*)?)$"
+    ).matches(errorMessage.trim())
+    return when {
+        cancelled -> if (text.isBlank()) "本轮任务已中止" else null
+        stopReason == "error" && errorMessage.isNotBlank() -> "模型错误：$errorMessage"
+        else -> null
+    }
 }
