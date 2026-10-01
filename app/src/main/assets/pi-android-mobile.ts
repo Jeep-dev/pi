@@ -283,6 +283,7 @@ export default function (pi: any) {
       const sourceInfo = resource?.sourceInfo;
       const resourcePath = String(sourceInfo?.path || "");
       const source = String(sourceInfo?.source || "");
+      if (resourcePath.replace(/\\/g, "/").split("/").at(-1) === "codex-usage.ts") continue;
       if (!resourcePath || resourcePath.startsWith("<") || source === "builtin" || source === "sdk") continue;
       if (!byPath.has(resourcePath)) byPath.set(resourcePath, sourceInfo);
     }

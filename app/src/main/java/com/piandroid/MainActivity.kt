@@ -247,6 +247,9 @@ private const val ANDROID_RESOURCES_COMMAND = "__android_loaded_resources"
 private enum class Panel { Chat, Models, Thinking, Bash, Files, Diff, Stats, Settings, Themes, Changelog }
 internal data class LoadedResourceSection(val title: String, val items: List<String>)
 
+internal fun visibleExtensionLabel(label: String): Boolean =
+    label.replace('\\', '/').substringAfterLast('/') != "codex-usage.ts"
+
 internal fun parseLoadedResourceWidget(lines: List<String>): List<LoadedResourceSection> {
     val sections = mutableListOf<LoadedResourceSection>()
     var title: String? = null
@@ -257,7 +260,7 @@ internal fun parseLoadedResourceWidget(lines: List<String>): List<LoadedResource
         val items = rawItems
             .flatMap { it.removePrefix("  ").split(",") }
             .map { it.trim() }
-            .filter { it.isNotBlank() }
+            .filter { it.isNotBlank() && (currentTitle != "Extensions" || visibleExtensionLabel(it)) }
             .distinct()
         if (items.isNotEmpty()) sections += LoadedResourceSection(currentTitle, items)
         rawItems.clear()
@@ -996,6 +999,7 @@ private fun PiScreen(
             LocalCommand("new", "新建 session"),
             LocalCommand("name", "给当前 session 命名"),
             LocalCommand("session", "查看 session / token / cost"),
+            LocalCommand("usage", "查询 Codex 额度"),
             LocalCommand("tree", "只显示用户消息的 session 分支树"),
             LocalCommand("fork", "从以前的用户消息创建 fork"),
             LocalCommand("clone", "克隆当前 active branch"),
@@ -1455,7 +1459,7 @@ private fun PiScreen(
                             loadedResourceSections = parseLoadedResourceWidget(req.options)
                         }
                         ANDROID_EXTENSIONS_WIDGET -> {
-                            loadedExtensions = req.options.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                            loadedExtensions = req.options.map { it.trim() }.filter { it.isNotBlank() && visibleExtensionLabel(it) }.distinct()
                             // Old Pi/bridge versions only know the legacy widget.
                             // Do not let it overwrite a categorized snapshot.
                             if (!categorizedResourcesReceived) {
@@ -1704,6 +1708,7 @@ private fun PiScreen(
                     onFailure = { addSystem("/resume 失败：${it.message}") }
                 )
             }
+            "/usage" -> sendExtensionCommand("/usage")
             "/tree", "/fork", "/name", "/export", "/import", "/share", "/trust", "/reload", "/login", "/logout", "/quit" -> sendExtensionCommand(text)
             "/copy" -> runtime.launchTask {
                 bridge.lastAssistantText().fold(
@@ -2843,7 +2848,7 @@ LaunchedEffect(listState) {
 
 @Composable
 private fun CommandPalette(query: String, local: List<LocalCommand>, remote: List<PiCommand>, modifier: Modifier = Modifier, onPick: (String, Boolean) -> Unit) {
-    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
+    val needle = query.removePrefix("/").trim().lowercase(); val localNames = local.map { it.name }.toSet(); val choices = buildList<Pair<LocalCommand, Boolean>> { local.filter { it.name.contains(needle) }.forEach { add(it to false) }; remote.filter { !it.name.startsWith("__") && it.name.lowercase() !in localNames && it.name.contains(needle, ignoreCase = true) }.forEach { add(LocalCommand(it.name, it.description.ifBlank { it.source }) to true) } }.take(64); if (choices.isEmpty()) return; val paletteState = rememberLazyListState()
     val paletteShape = RoundedCornerShape(20.dp)
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val allowedHeight = minOf(360.dp, (maxHeight - 8.dp).coerceAtLeast(96.dp))
