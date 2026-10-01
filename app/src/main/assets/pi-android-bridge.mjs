@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const port = Number(process.env.PI_ANDROID_PORT || 17649);
-const bridgeVersion = "2026-09-30.1";
+const bridgeVersion = "2026-10-01.1";
 
 // Lifecycle lines go to stderr, which the launcher appends to bridge.log. They are
 // the evidence for why a Session dropped: which process ended, with what code or
@@ -124,6 +124,7 @@ function waitForEvent(after, timeoutMs) {
 
 function settlePending(id, value) {
   const item = pending.get(id);
+  if (process.env.PI_ANDROID_DEBUG_PROMPTS === "1") lifecycleLog(`RPC_RESPONSE id=${id} matched=${!!item} epoch=${promptEpoch}`);
   if (!item) return false;
   pending.delete(id);
   clearTimeout(item.timer);
@@ -182,7 +183,7 @@ function attachJsonl(stream) {
       lastStdoutTail = (lastStdoutTail + line.slice(-8000) + "\n").slice(-8000);
       try {
         const value = JSON.parse(line);
-        if (value.type === "response" && value.id && settlePending(value.id, value)) continue;
+        if (value.type === "response" && value.id) { settlePending(value.id, value); continue; }
         addEvent(slimEvent(value));
       } catch {
         addEvent({ type: "raw", line });
@@ -197,7 +198,7 @@ function attachJsonl(stream) {
       lastStdoutTail = (lastStdoutTail + rest + "\n").slice(-8000);
       try {
         const value = JSON.parse(rest);
-        if (value.type === "response" && value.id && settlePending(value.id, value)) return;
+        if (value.type === "response" && value.id) { settlePending(value.id, value); return; }
         addEvent(slimEvent(value));
       } catch { addEvent({ type: "raw", line: rest }); }
     }
@@ -373,18 +374,19 @@ function sendRaw(value) {
 
 // Model switches and prompt preflight can refresh provider OAuth over the network.
 const SLOW_RPC_TIMEOUT_MS = 30000;
-const PROMPT_PREFLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
+const PROMPT_PREFLIGHT_TIMEOUT_MS = 0; // Async preflight is cancelled by Stop/exit, not a wall-clock limit.
 let promptEpoch = 0;
 
-function rpc(command, timeoutMs = 15000) {
+function rpc(command, timeoutMs = 15000, cancelOnStop = false) {
   return new Promise((resolve, reject) => {
     if (!child || child.exitCode != null || !child.stdin.writable) return reject(new Error("Pi is not running"));
     const id = command.id || randomUUID();
-    const timer = setTimeout(() => {
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       pending.delete(id);
       reject(new Error(`RPC timeout after ${Math.round(timeoutMs / 1000)}s: ${command.type}`));
-    }, timeoutMs);
-    pending.set(id, { resolve, reject, timer, command: command.type });
+    }, timeoutMs) : undefined;
+    pending.set(id, { resolve, reject, timer, command: command.type, cancelOnStop });
+    if (process.env.PI_ANDROID_DEBUG_PROMPTS === "1") lifecycleLog(`RPC_SEND id=${id} type=${command.type} cancelOnStop=${cancelOnStop} epoch=${promptEpoch}`);
     try {
       sendRaw({ ...command, id });
     } catch (error) {
@@ -987,7 +989,8 @@ function dispatchPrompt(command) {
   if (stopFence) throw new Error("Stop in progress; prompt rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
   const epoch = promptEpoch;
-  void rpc(command, PROMPT_PREFLIGHT_TIMEOUT_MS).then(response => {
+  void rpc(command, PROMPT_PREFLIGHT_TIMEOUT_MS, true).then(response => {
+    if (process.env.PI_ANDROID_DEBUG_PROMPTS === "1") lifecycleLog(`PREFLIGHT_DONE epoch=${epoch} current=${promptEpoch} disposition=${response?.data?.disposition}`);
     if (epoch !== promptEpoch) return;
     if (response?.success === false) {
       addEvent({ type: "extension_error", error: `发送失败：${String(response.error || "unknown error")}` });
@@ -1028,6 +1031,12 @@ async function stopCurrentAgent() {
 
   stopFence = true;
   promptEpoch += 1;
+  for (const [id, item] of pending) {
+    if (!item.cancelOnStop) continue;
+    clearTimeout(item.timer);
+    pending.delete(id);
+    item.reject(new Error("Prompt cancelled by Stop"));
+  }
   const operation = (async () => {
     let cleared = false;
     try {
@@ -1120,6 +1129,8 @@ const server = http.createServer(async (req, res) => {
         port,
         endpointKey: process.env.PI_ANDROID_ENDPOINT_KEY || "",
         stopInProgress: !!stopInProgress,
+        pendingPromptCount: [...pending.values()].filter(item => item.cancelOnStop).length,
+        ...(process.env.PI_ANDROID_DEBUG_PROMPTS === "1" ? { promptEpoch, pendingRpc: [...pending.entries()].map(([id, item]) => ({ id, command: item.command, cancelOnStop: item.cancelOnStop })) } : {}),
         piRunning: !!child && child.exitCode == null,
         cwd,
         launchCommand,

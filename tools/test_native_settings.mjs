@@ -8,10 +8,11 @@ import { spawn } from "node:child_process";
 // exist in the Pi version CI installs and round-trip through get_state.
 const directory = mkdtempSync(join(tmpdir(), "pi-native-settings-"));
 const piBin = process.env.PI_BIN;
+const testEnv = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(directory, "agent") };
 const args = ["--mode", "rpc", "--no-session"];
 const child = piBin
-  ? spawn(process.execPath, [piBin, ...args], { cwd: directory, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, PI_OFFLINE: "1" } })
-  : spawn("pi", args, { cwd: directory, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, PI_OFFLINE: "1" } });
+  ? spawn(process.execPath, [piBin, ...args], { cwd: directory, stdio: ["pipe", "pipe", "inherit"], env: testEnv })
+  : spawn("pi", args, { cwd: directory, stdio: ["pipe", "pipe", "inherit"], env: testEnv });
 
 const waiting = new Map();
 let buffer = "";

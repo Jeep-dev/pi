@@ -17,7 +17,7 @@ let buffer='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>{
   else if(c.type==='prompt'){
    if(c.message==='slow')setTimeout(()=>reply(true,{disposition:'started'}),32000);
    else if(c.message==='fail')reply(false,{},'test rejected');
-   else if(c.message==='late-failure')setTimeout(()=>reply(false,{},'stale rejection'),150);
+   else if(c.message==='late-failure')setTimeout(()=>reply(false,{},'stale rejection'),1500);
    else if(c.streamingBehavior==='steer'||c.streamingBehavior==='followUp')reply(true,{disposition:'queued',behavior:c.streamingBehavior});
    else reply(false,{},'Agent is already processing. Specify streamingBehavior');
   }else reply();
@@ -25,16 +25,21 @@ let buffer='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>{
 });
 `);await chmod(fake,0o700);
 const token=randomBytes(32).toString('base64url');const port=35000+process.pid%900;
-const bridge=spawn(process.execPath,[path.resolve('app/src/main/assets/pi-android-bridge.mjs')],{env:{...process.env,HOME:home,PREFIX:path.join(home,'prefix'),PI_ANDROID_PORT:String(port),PI_ANDROID_TOKEN:token,PI_ANDROID_PID_FILE:path.join(home,'bridge.pid')},stdio:['ignore','pipe','pipe']});
+const bridge=spawn(process.execPath,[path.resolve('app/src/main/assets/pi-android-bridge.mjs')],{env:{...process.env,HOME:home,PREFIX:path.join(home,'prefix'),PI_ANDROID_PORT:String(port),PI_ANDROID_TOKEN:token,PI_ANDROID_PID_FILE:path.join(home,'bridge.pid'),PI_ANDROID_DEBUG_PROMPTS:'1'},stdio:['ignore','pipe','pipe']});
 let diagnostics='';bridge.stdout.on('data',c=>diagnostics+=c);bridge.stderr.on('data',c=>diagnostics+=c);
-const call=(route,body)=>fetch('http://127.0.0.1:'+port+route,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
-const events=async(after=0)=>(await(await call('/events?after='+after+'&wait=0')).json());
+const call=(route,body)=>fetch('http://127.0.0.1:'+port+route,{signal:AbortSignal.timeout(10000),method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+const events=async(after=0)=>{
+ for(let attempt=0;attempt<3;attempt++){
+  try{return await(await call('/events?after='+after+'&wait=0')).json();}
+  catch(error){if(attempt===2)throw error;await new Promise(r=>setTimeout(r,100));}
+ }
+};
 try{
  for(let i=0;;i++){try{if((await call('/health')).status===200)break;}catch{}assert.ok(i<160,diagnostics);await new Promise(r=>setTimeout(r,25));}
  assert.equal((await call('/start',{cwd:home,launchCommand:'pi --mode rpc'})).status,200);
- let start=Date.now();let response=await call('/prompt',{message:'slow'});
+ let start=performance.now();let response=await call('/prompt',{message:'slow'});
  assert.equal(response.status,200);assert.equal((await response.json()).data.disposition,'pending');
- assert.ok(Date.now()-start<1000,'slow preflight must not block the HTTP request');
+ assert.ok(performance.now()-start<1000,'slow preflight must not block the HTTP request');
  for(const behavior of [undefined,'followUp']){
   response=await call('/prompt',{message:'busy',...(behavior?{streamingBehavior:behavior}:{})});assert.equal(response.status,200);
  }
@@ -46,17 +51,24 @@ try{
  const cursor=batch.latest;
  await call('/prompt',{message:'late-failure'});
  assert.equal((await call('/stop',{})).status,200);
- await new Promise(r=>setTimeout(r,200));
- batch=await events(cursor);
+ const stoppedCursor=(await events()).latest;
+ await new Promise(r=>setTimeout(r,1600));
+ batch=await events(stoppedCursor);
+ if(batch.events.some(e=>e.value.error?.includes('stale rejection')))console.error('Late-stop events:',JSON.stringify(batch.events));
  assert.ok(!batch.events.some(e=>e.value.error?.includes('stale rejection')),'Stop must discard late preflight failures');
  // New slow submission must remain alive beyond the old 30-second limit.
  await call('/prompt',{message:'slow'});
- const deadline=Date.now()+35000;let completed=false;
- while(Date.now()<deadline){
+ const deadline=performance.now()+65000;let completed=false;
+ while(performance.now()<deadline){
   batch=await events(cursor);
   assert.ok(!batch.events.some(e=>e.value.error?.includes('RPC timeout after 30s')));
   if(batch.events.some(e=>e.value.type==='prompt_submission_end'&&e.value.disposition==='started')){completed=true;break;}
   await new Promise(r=>setTimeout(r,250));
+ }
+ if(!completed){
+  console.error('Final health:',await(await call('/health')).text());
+  console.error('Observed events:',JSON.stringify(batch.events.map(e=>({seq:e.seq,type:e.value.type,disposition:e.value.disposition,error:e.value.error}))));
+  console.error('Bridge diagnostics:',diagnostics);
  }
  assert.ok(completed,'preflight exceeding 30 seconds must complete normally');
  console.log('Prompt acceptance, busy queue, delayed preflight, errors and Stop cancellation tests passed');

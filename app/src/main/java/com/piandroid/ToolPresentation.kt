@@ -225,11 +225,12 @@ internal fun formatToolDuration(durationMs: Long): String {
 internal fun assistantCompletionNotice(
     stopReason: String,
     text: String,
-    errorMessage: String
+    errorMessage: String,
+    userRequestedStop: Boolean = false
 ): String? {
-    val cancelled = stopReason == "aborted" || Regex(
+    val cancelled = stopReason == "aborted" || (userRequestedStop && Regex(
         "(?i)^(?:Error: )?(?:This operation was aborted|The operation was aborted|Request was aborted|Aborted|AbortError(?::.*)?)$"
-    ).matches(errorMessage.trim())
+    ).matches(errorMessage.trim()))
     return when {
         cancelled -> if (text.isBlank()) "本轮任务已中止" else null
         stopReason == "error" && errorMessage.isNotBlank() -> "模型错误：$errorMessage"

@@ -7,12 +7,13 @@ const markdown = await readFile("app/src/main/java/com/piandroid/MarkdownContent
 const bridge = await readFile("app/src/main/assets/pi-android-bridge.mjs", "utf8");
 const extras = await readFile("app/src/main/java/com/piandroid/PiBridgeExtras.kt", "utf8");
 
-assert.ok(main.includes("key(activeSession.androidSessionId)"), "active Session must own the only PiScreen");
-assert.ok(main.includes("session = activeSession"), "PiScreen must receive the selected Session record");
-assert.ok(main.includes("autoStart = true"), "selected Session must activate its runtime");
-assert.ok(!main.includes("sessions.forEach { record ->\\n                        key(record.androidSessionId)"), "inactive Sessions must not retain hidden PiScreen trees");
-assert.ok(runtime.includes("val generation = ++conversationGeneration"), "activation must fence stale event batches");
-assert.ok(runtime.includes("connectCurrent(true, generation)"), "activation must refresh from its own Bridge endpoint");
+assert.ok(main.includes("key(record.androidSessionId)"), "each Session must retain its own keyed state host");
+assert.ok(main.includes("session = record"), "each host must receive its own Session record");
+assert.ok(main.includes("visible = selected"), "only the selected Session may render UI");
+assert.ok(main.includes("if (!visible) return"), "inactive hosts must omit dialogs/layout/input handlers");
+assert.ok(main.includes("autoStart = true"), "all open Sessions must activate their runtimes");
+assert.ok(runtime.includes("if (!refreshClient && (liveCwd.isBlank() || sameCwd(record.cwd, liveCwd) || !autoStart)) return"), "switching healthy Sessions must not reload history");
+assert.ok(runtime.includes("connectCurrent(true, generation)"), "explicit cwd changes still need a fenced fresh attachment");
 console.log("Active-session UI ownership guards passed");
 
 assert.ok(main.includes("awaitPointerEvent(PointerEventPass.Final)"), "Session drawer must wait for horizontal child scroll surfaces");
@@ -49,7 +50,9 @@ assert.ok(bridge.includes('url.pathname === "/stream"'), "bridge must serve the 
 // A frozen Termux must be woken, not replaced, and the keep-alive must survive it.
 const keepAlive = await readFile("app/src/main/java/com/piandroid/AgentKeepAliveService.kt", "utf8");
 assert.ok(runtime.includes("wakeTermuxIfDue()"), "runtime must wake a frozen Termux before giving up on it");
-assert.ok(/!lastHealthError\.isConnectRefusedFailure\(\)[\s\S]*?FROZEN_BRIDGE_GRACE_MS[\s\S]*?installAndStartBridge\(/.test(runtime), "only a Bridge that refuses connections may be relaunched without a grace window");
+assert.ok(/!canReplaceUnreachableBridge\([\s\S]*?wakeTermuxIfDue\(\)[\s\S]*?throw BridgeUnresponsive\(lastHealthError\)/.test(runtime), "unresponsive Bridges must be preserved indefinitely, not killed after a timer");
+assert.ok(!runtime.includes("FROZEN_BRIDGE_GRACE_MS"), "there must be no timed force-restart path for a live Bridge");
+assert.ok(runtime.includes("canReplaceRunningBridge(busy?.streaming, busy?.compacting)"), "an upgrade requires positive proof that Pi is idle");
 assert.ok(runtime.includes("isRetryableConnectFailure(error)"), "a failed first connect must retry");
 assert.ok(keepAlive.includes("endpoint.wakeTermux()"), "keep-alive must wake a Termux that stopped answering");
 assert.ok(!main.includes("AgentKeepAliveService.stop("), "only the keep-alive service may stop itself");
@@ -59,8 +62,8 @@ assert.equal(runtime.split("updatesMutable.emit(PiRuntimeUpdate.Reconnecting(").
 // and a port held by another Session's Bridge (401) is not "frozen".
 const piBridge = await readFile("app/src/main/java/com/piandroid/PiBridge.kt", "utf8");
 assert.ok(/if \(error\.isConnectRefusedFailure\(\)\) \{\s*if \(\+\+refused >= 2\) return null/.test(runtime), "patientHealth must give up quickly on a refused port");
-assert.ok(runtime.includes("!lastHealthError.isForeignBridgeFailure()"), "a 401 from a foreign Bridge must skip the frozen grace");
-assert.ok(runtime.includes("markAlive()"), "any proof of life must reset the frozen-Bridge window");
+assert.ok(runtime.includes("lastHealthError.isForeignBridgeFailure()"), "foreign-owner detection must remain part of the replacement policy");
+assert.ok(runtime.includes("markAlive()"), "proof-of-life telemetry must be recorded");
 assert.ok(piBridge.includes("val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis"), "waitForBridge must be bounded by wall-clock time");
 assert.ok(piBridge.includes("PI_ANDROID_PORT=$port"), "the launcher must clear a stale Bridge holding this port");
 assert.ok(piBridge.includes('"/data/data/com.termux/files/usr/bin/true"'), "waking Termux must not start a login shell");

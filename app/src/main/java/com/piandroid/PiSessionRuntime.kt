@@ -196,11 +196,7 @@ internal class PiSessionRuntime(
     // it, so no path can leave the header on "reconnecting" while Pi is healthy.
     private var degraded = false
 
-    // When the Bridge first held its port without answering, and when a probe last
-    // failed. Any proof of life (Ready, Recovered, an opened stream) clears it, so an
-    // old window can never make a later short freeze look like a 3 minute one.
-    @Volatile private var unresponsiveSinceMs = 0L
-    @Volatile private var lastUnansweredProbeAtMs = 0L
+    @Volatile private var lastProofOfLifeMs = 0L
     // Only touched under connectMutex: why the last patient probe failed.
     private var lastHealthError: Throwable? = null
 
@@ -259,7 +255,7 @@ internal class PiSessionRuntime(
     fun launchTask(block: suspend () -> Unit): Job? = taskGate.launch(scope, block)
 
     /** Request a connection without making the caller's coroutine own the work. */
-    fun ensureConnected(next: PiSessionRecord, autoStart: Boolean) {
+    fun ensureConnected(next: PiSessionRecord, autoStart: Boolean, refreshClient: Boolean = false) {
         update(next)
         synchronized(stateLock) {
             if (closed) return
@@ -267,35 +263,26 @@ internal class PiSessionRuntime(
                 autoStartRequested = true
                 recoveryEnabled = true
             }
+            // Session hosts retain their UI state and collect events while inactive.
+            // Selection/registry polling must not reconnect, reload history, bump the
+            // conversation generation, or break a healthy push stream.
             if (connected) {
-                val state = lastState
-                val snapshot = lastSnapshot
-                if (autoStart) {
-                    // A newly visible PiScreen starts with empty Compose state. Do not
-                    // replay a cached snapshot from the last time this Session was visible:
-                    // refresh from this Runtime's own Bridge endpoint and fence any event
-                    // batch that was in flight before activation.
-                    val generation = ++conversationGeneration
-                    scope.launch {
+                if (!refreshClient && (liveCwd.isBlank() || sameCwd(record.cwd, liveCwd) || !autoStart)) return
+                // Only a new UI client or an explicit cwd change needs a fresh snapshot.
+                if (connectionJob?.isActive == true) return
+                val generation = ++conversationGeneration
+                connectionJob = scope.launch {
+                    try {
                         val refreshed = runCatching { connectCurrent(true, generation) }
                         val ready = refreshed.getOrNull()
                         if (ready != null) {
-                            if (!publishReady(ready, generation)) {
-                                updatesMutable.emit(
-                                    PiRuntimeUpdate.Failed(
-                                        IllegalStateException("Pi conversation is already owned by another Android Session")
-                                    )
-                                )
+                            if (!publishReady(ready, generation) && isConversationGeneration(generation)) {
+                                updatesMutable.emit(PiRuntimeUpdate.Failed(IllegalStateException("Pi conversation ownership mismatch")))
                             }
-                        } else {
-                            val error = refreshed.exceptionOrNull()
-                            if (error != null && isConversationGeneration(generation)) {
-                                emitReconnecting(error)
-                            }
-                        }
+                        } else if (isConversationGeneration(generation)) refreshed.exceptionOrNull()?.let { emitReconnecting(it) }
+                    } finally {
+                        synchronized(stateLock) { connectionJob = null }
                     }
-                } else if (state != null && snapshot != null) {
-                    updatesMutable.tryEmit(PiRuntimeUpdate.Ready(PiRuntimeReady(state, snapshot)))
                 }
                 return
             }
@@ -573,30 +560,20 @@ internal class PiSessionRuntime(
         if (!bridgeUsable) {
             if (!allowStart) throw RuntimeUnavailable()
             val current = health
-            if (current == null && !lastHealthError.isConnectRefusedFailure() && !lastHealthError.isForeignBridgeFailure()) {
-                // Relaunching kills Pi and any running task, so only a Bridge that is
-                // provably gone (connection refused: nothing listens on the port) or
-                // one that belongs to another Session (401) is replaced at once.
-                // Anything else (a timeout from a frozen Termux, a reset) means our
-                // own process still holds the port; wake Termux and only replace a
-                // Bridge that stays like that while we keep probing.
-                val now = android.os.SystemClock.elapsedRealtime()
-                // A long gap between failed probes means the phone or this app slept;
-                // that time says nothing about the Bridge, so start the window again.
-                if (unresponsiveSinceMs == 0L || now - lastUnansweredProbeAtMs > PROBE_GAP_RESET_MS) {
-                    unresponsiveSinceMs = now
-                }
-                lastUnansweredProbeAtMs = now
-                if (now - unresponsiveSinceMs < FROZEN_BRIDGE_GRACE_MS) {
-                    wakeTermuxIfDue()
-                    throw BridgeUnresponsive(lastHealthError)
-                }
+            if (current == null && !canReplaceUnreachableBridge(
+                    lastHealthError.isConnectRefusedFailure(), lastHealthError.isForeignBridgeFailure()
+                )) {
+                // A timeout/reset never proves the process is dead. Replacing a
+                // frozen or busy Bridge kills its live Pi task; wake and retry instead.
+                wakeTermuxIfDue()
+                Log.w(PI_SESSION_IDENTITY_TAG, "BRIDGE_UNRESPONSIVE_PRESERVED androidSessionId=$runtimeOwnerSessionId lastAliveMs=$lastProofOfLifeMs")
+                throw BridgeUnresponsive(lastHealthError)
             }
             markAlive()
             if (current != null && current.piRunning) {
                 val busy = bridge.state(timeoutMs = 8_000).getOrNull()
-                check(busy?.streaming != true && busy?.compacting != true) {
-                    "Pi 正在工作，当前 bridge 版本需要升级；等本轮任务结束后再点连接"
+                check(canReplaceRunningBridge(busy?.streaming, busy?.compacting) && current.pendingPromptCount == 0) {
+                    "尚未确认 Pi 空闲，保留当前任务并继续重连"
                 }
                 bridge.commands().getOrDefault(emptyList())
                     .firstOrNull { it.name == "__android_checkpoint" }
@@ -732,8 +709,7 @@ internal class PiSessionRuntime(
     private fun isDegraded(): Boolean = synchronized(stateLock) { degraded }
 
     private fun markAlive() {
-        unresponsiveSinceMs = 0L
-        lastUnansweredProbeAtMs = 0L
+        lastProofOfLifeMs = android.os.SystemClock.elapsedRealtime()
     }
 
     /**
@@ -924,17 +900,19 @@ internal class PiSessionRuntime(
         const val RECONNECT_NOTICE_MS = 8_000L
         /** Only this long without any Bridge answer counts as a dead Bridge. */
         const val BRIDGE_DEAD_MS = 45_000L
-        /** A Bridge that holds its port but never answers is replaced only after this long. */
-        const val FROZEN_BRIDGE_GRACE_MS = 3 * 60_000L
         const val TERMUX_WAKE_INTERVAL_MS = 10_000L
-        /** Failed probes further apart than this mean the phone or app slept in between. */
-        const val PROBE_GAP_RESET_MS = 120_000L
         const val FIRST_CONNECT_RETRY_MIN_MS = 2_000L
         const val FIRST_CONNECT_RETRY_MAX_MS = 30_000L
     }
 }
 
-/** Activity-owned registry; Compose only receives stable per-session runtimes. */
+/** Process-owned registry shared by Activity and foreground keep-alive service. */
+internal object PiSessionRuntimeHost {
+    private var manager: PiSessionRuntimeManager? = null
+    @Synchronized fun get(context: Context): PiSessionRuntimeManager =
+        manager ?: PiSessionRuntimeManager(context.applicationContext).also { manager = it }
+}
+
 internal class PiSessionRuntimeManager(context: Context) {
     private val appContext = context.applicationContext
     private val managerJob = SupervisorJob()

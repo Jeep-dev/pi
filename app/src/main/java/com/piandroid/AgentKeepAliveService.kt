@@ -48,6 +48,8 @@ class AgentKeepAliveService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var monitorJob: Job? = null
+    private var thawJob: Job? = null
+    private val runtimeManager by lazy { PiSessionRuntimeHost.get(applicationContext) }
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
@@ -56,21 +58,25 @@ class AgentKeepAliveService : Service() {
         startForeground(NOTIFICATION_ID, notification("正在连接本机 Pi Agent…"))
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiAndroid:LongAgentTask")
-            .apply { acquire(MAX_WAKE_TIME_MS) }
+            .apply { setReferenceCounted(false); acquire(MAX_WAKE_TIME_MS) }
+        runtimeManager.register(PiSessionStore(applicationContext).loadOrCreateDefault())
+        // Thaw on its own cadence: slow probes must not delay Termux wake-ups.
+        thawJob = scope.launch {
+            while (isActive) {
+                wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
+                PiSessionStore(applicationContext).loadOrCreateDefault().firstOrNull()?.let { record ->
+                    PiBridge(applicationContext, record.port, record.token, record.androidSessionId)
+                        .wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)
+                }
+                delay(TERMUX_THAW_INTERVAL_MS)
+            }
+        }
         monitorJob = scope.launch {
             var failures = 0
             var idlePolls = 0
             while (isActive) {
                 wakeLock?.takeUnless { it.isHeld }?.acquire(MAX_WAKE_TIME_MS)
                 val records = PiSessionStore(applicationContext).loadOrCreateDefault()
-                // Poke Termux before probing: ColorOS freezes it (Bridge and Pi too)
-                // in the background, and only a delivered command thaws it. Without
-                // this Pi only got CPU after a probe had already timed out.
-                records.firstOrNull()?.let { record ->
-                    PiBridge(applicationContext, record.port, record.token, record.androidSessionId)
-                        .wakeTermux(minIntervalMs = TERMUX_THAW_INTERVAL_MS)
-                    delay(800)
-                }
                 val probes = records.map { record ->
                     async {
                         val endpoint = PiBridge(
@@ -81,9 +87,11 @@ class AgentKeepAliveService : Service() {
                         )
                         val healthResult = endpoint.health(timeoutMs = 2_500)
                         val health = healthResult.getOrNull()
-                        // A timeout means something holds the port but did not answer:
-                        // usually Termux frozen in the background, not a dead Session.
-                        val unanswered = health == null && healthResult.exceptionOrNull().isSocketTimeoutFailure()
+                        // Only positive offline evidence may count toward stopping.
+                        // Resets, timeouts, auth failures and malformed replies remain uncertain.
+                        val unanswered = health == null && !confirmedOffline(
+                            null, healthResult.exceptionOrNull().isConnectRefusedFailure()
+                        )
                         if (unanswered) endpoint.wakeTermux()
                         val state = if (health?.piRunning == true) endpoint.state(timeoutMs = 2_500).getOrNull() else null
                         Triple(record, health to state, unanswered)
@@ -91,7 +99,7 @@ class AgentKeepAliveService : Service() {
                 }.awaitAll()
                 val working = probes.count { (_, result, _) ->
                     val state = result.second
-                    state?.streaming == true || state?.compacting == true
+                    state?.streaming == true || state?.compacting == true || (result.first?.pendingPromptCount ?: 0) > 0
                 }
                 val running = probes.count { (_, result, _) -> result.first?.piRunning == true }
                 val unanswered = probes.count { (_, _, timedOut) -> timedOut }
@@ -137,6 +145,7 @@ class AgentKeepAliveService : Service() {
 
     override fun onDestroy() {
         monitorJob?.cancel()
+        thawJob?.cancel()
         scope.coroutineContext[Job]?.cancel()
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null

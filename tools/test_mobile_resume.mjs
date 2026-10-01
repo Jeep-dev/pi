@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fetch } from "./test_http.mjs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -208,6 +209,7 @@ function headers(record) {
 }
 async function request(record, pathname, init = {}) {
   return fetch(`http://127.0.0.1:${record.port}${pathname}`, {
+    signal: AbortSignal.timeout(10_000),
     ...init,
     headers: { ...headers(record), ...(init.headers || {}) },
   });
@@ -233,13 +235,13 @@ async function startPi(record, extra = "") {
   return { launchCommand, state: JSON.parse(text).state };
 }
 async function stopBridge(instance) {
-  await request(instance.record, "/shutdown", { method: "POST", body: "{}" }).catch(() => {});
+  await request(instance.record, "/shutdown", { method: "POST", body: "{}", signal: AbortSignal.timeout(2_000) }).catch(() => {});
   await new Promise(resolve => {
     if (instance.child.exitCode != null) return resolve();
     instance.child.once("exit", resolve);
     setTimeout(resolve, 1_000).unref?.();
   });
-  instance.child.kill("SIGTERM");
+  instance.child.kill("SIGKILL");
 }
 async function history(record) {
   const response = await request(record, "/history");

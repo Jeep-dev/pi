@@ -175,8 +175,8 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val permission = "com.termux.permission.RUN_COMMAND"
     private val permissionRequestCode = 7001
-    // Runtime ownership belongs to the Activity process, never to a Composable.
-    private val runtimeManager by lazy { PiSessionRuntimeManager(applicationContext) }
+    // Activity recreation must not cancel background Session runtimes.
+    private val runtimeManager by lazy { PiSessionRuntimeHost.get(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -221,7 +221,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         uiScope.cancel()
-        runtimeManager.close()
         super.onDestroy()
     }
 
@@ -764,17 +763,18 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                         }
                     )
                 } else {
-                    // Render exactly one chat UI. Background Runtime objects remain
-                    // Activity-owned, but an inactive Session must never keep a hidden
-                    // Compose chat tree that can leak/replay another Session's UI state.
-                    key(activeSession.androidSessionId) {
-                        val runtime = runtimeManager.activate(activeSession)
+                    // Keep each Session's state/effects alive; only the selected host renders UI.
+                    sessions.forEach { record ->
+                      key(record.androidSessionId) {
+                        val selected = record.androidSessionId == activeSession.androidSessionId
+                        val runtime = if (selected) runtimeManager.activate(record) else runtimeManager.runtime(record)
                         PiScreen(
                             runtime = runtime,
-                            session = activeSession,
+                            session = record,
                             sessions = sessions,
                             activeAndroidSessionId = activeAndroidSessionId,
                             autoStart = true,
+                            visible = selected,
                             hostModifier = Modifier.fillMaxSize(),
                             themeMode = themeMode,
                             onTheme = { selected ->
@@ -785,7 +785,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                             onSelectSession = ::selectSession,
                             onNewSession = {
                                 createSessionName = ""
-                                createSessionCwd = activeSession.cwd
+                                createSessionCwd = record.cwd
                                 createSessionStartupArguments = ""
                                 createSessionOpen = true
                             },
@@ -793,6 +793,7 @@ private fun PiTouchApp(runtimeManager: PiSessionRuntimeManager) {
                             onCanBindConversation = ::canBindConversation,
                             onManageSession = ::requestSessionManagement
                         )
+                      }
                     }
                 }
             }
@@ -858,6 +859,7 @@ private fun PiScreen(
     sessions: List<PiSessionRecord>,
     activeAndroidSessionId: String,
     autoStart: Boolean,
+    visible: Boolean,
     hostModifier: Modifier = Modifier,
     themeMode: PiThemeMode,
     onTheme: (PiThemeMode) -> Unit,
@@ -876,6 +878,7 @@ private fun PiScreen(
     var connecting by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Disconnected") }
     var intentionalQuit by remember { mutableStateOf(false) }
+    var userStopRequested by remember(runtime) { mutableStateOf(false) }
     // Set once /quit actually stopped Pi, so the screen does not reconnect by itself.
     var quitByUser by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf(Panel.Chat) }
@@ -1317,7 +1320,7 @@ private fun PiScreen(
                 Log.w("PiChatEvents", "Dropping orphan assistant message_end")
             }
         }
-        assistantCompletionNotice(stopReason, text, errorMessage)?.let(::addSystem)
+        assistantCompletionNotice(stopReason, text, errorMessage, userStopRequested)?.let(::addSystem)
     }
 
     fun toggleLine(index: Int) {
@@ -1370,6 +1373,7 @@ private fun PiScreen(
         }
         when (event.type) {
             "agent_start" -> {
+                userStopRequested = false
                 status = "Working"
                 updateSessionRecord { it.copy(status = PiSessionStatus.WORKING, lastActivity = System.currentTimeMillis(), lastError = "") }
                 AgentKeepAliveService.start(bridge.applicationContext())
@@ -1640,9 +1644,10 @@ private fun PiScreen(
             runtime.update(session)
             return@LaunchedEffect
         }
+        val refreshClient = !screenAttached && runtime.isConnected()
         screenAttached = true
         attachedLaunch = launchKey
-        runtime.ensureConnected(session, autoStart)
+        runtime.ensureConnected(session, autoStart, refreshClient = refreshClient)
     }
 
     fun sendExtensionCommand(text: String) {
@@ -1882,6 +1887,7 @@ private fun PiScreen(
                 )
             }
             "/abort" -> {
+                userStopRequested = true
                 status = "Stopping"
                 val stop = runtime.stopCurrentAgent()
                 scope.launch {
@@ -1935,7 +1941,8 @@ private fun PiScreen(
         }
     }
 
-    LaunchedEffect(chatListState) {
+    LaunchedEffect(chatListState, visible) {
+        if (!visible) return@LaunchedEffect
         snapshotFlow {
             // Track every field that can change visible chat height. Tool cards grow via
             // toolArgs/toolOutput/toolMeta even while line count and line.text stay fixed.
@@ -1967,7 +1974,8 @@ private fun PiScreen(
 // Markdown and web-search output may grow after the ChatLine mutation has already
 // been processed. Any late remeasure that opens space below is followed again.
 // While the user is physically scrolling, this watcher stays idle.
-LaunchedEffect(chatListState) {
+LaunchedEffect(chatListState, visible) {
+    if (!visible) return@LaunchedEffect
     snapshotFlow {
         val layout = chatListState.layoutInfo
         val last = layout.visibleItemsInfo.lastOrNull()
@@ -1996,8 +2004,8 @@ LaunchedEffect(chatListState) {
         }
 }
 
-    LaunchedEffect(imeBottom) {
-        if (imeBottom > 0 && followOutput && lines.isNotEmpty()) {
+    LaunchedEffect(imeBottom, visible) {
+        if (visible && imeBottom > 0 && followOutput && lines.isNotEmpty()) {
             delay(80)
             chatListState.scrollToRealBottom { followOutput }
         }
@@ -2006,6 +2014,9 @@ LaunchedEffect(chatListState) {
     LaunchedEffect(followOutput) {
         if (followOutput) showScrollControls = false
     }
+
+    // Retain state and the event collector above, but no inactive dialogs/layout/input handlers.
+    if (!visible) return
 
     if (autoStart) pendingUi?.let { request ->
         fun sendUiResponse(action: suspend () -> Result<Unit>) {
@@ -2221,7 +2232,7 @@ LaunchedEffect(chatListState) {
                     Panel.Thinking -> ThinkingPanel(thinkingLevels, currentState?.thinkingLevel.orEmpty(), { panel = Panel.Chat }) { level -> runtime.launchTask { bridge.setThinking(level).fold(onSuccess = { refreshMeta(); panel = Panel.Chat; addSystem("Thinking = $level") }, onFailure = { addSystem("Thinking 设置失败：${it.message}") }) } }
                     Panel.Bash -> BashPanel(bashInput, bashOutput, bashRunning, { bashInput = it }, { panel = Panel.Chat }, {
                         val command = bashInput.trim(); if (command.isNotBlank()) runtime.launchTask { bashRunning = true; bashOutput = "$ $command\n"; bridge.bash(command).fold(onSuccess = { bashOutput += it.output + "\n[exit ${it.exitCode}]" }, onFailure = { bashOutput += "ERROR: ${it.message}" }); bashRunning = false; refreshMeta() }
-                    }, { val stop = runtime.stopCurrentAgent(); scope.launch { stop.await(); bashRunning = false } })
+                    }, { userStopRequested = true; val stop = runtime.stopCurrentAgent(); scope.launch { stop.await(); bashRunning = false } })
                     Panel.Files -> FilesPanel(currentPath, files, selectedFile, fileText, fileLoading, fileTruncated, { panel = Panel.Chat }, { item ->
                         if (item.type == "directory") { currentPath = item.path; selectedFile = ""; fileText = ""; fileLoading = false; fileTruncated = false; runtime.launchTask { bridge.files(currentPath).onSuccess { files = it } } }
                         else { val requested = item.path; selectedFile = requested; fileText = ""; fileLoading = true; fileTruncated = false; runtime.launchTask { bridge.file(requested).fold(onSuccess = { loaded -> if (selectedFile == requested) { fileText = loaded.content; fileTruncated = loaded.truncated; fileLoading = false } }, onFailure = { if (selectedFile == requested) { selectedFile = ""; fileText = ""; fileLoading = false }; addSystem(it.message.orEmpty()) }) } }

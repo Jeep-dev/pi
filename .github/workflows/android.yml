@@ -50,6 +50,8 @@ jobs:
           node tools/test_bridge_auth.mjs
           node tools/test_multi_session_bridge.mjs
           node tools/test_active_session_ui.mjs
+          node tools/test_session_switch_retention.mjs
+          node tools/test_keepalive_policy.mjs
           node tools/test_usage_ui.mjs
           node tools/test_prompt_submission.mjs
           node tools/test_session_close_preserves_history.mjs

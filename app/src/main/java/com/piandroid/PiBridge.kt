@@ -26,7 +26,7 @@ class PiBridge(
     private val termux = "com.termux"
     private val service = "com.termux.app.RunCommandService"
     private val port = endpointPort
-    private val expectedBridgeVersion = "2026-09-30.1"
+    private val expectedBridgeVersion = "2026-10-01.1"
     private val requiredBridgeCapabilities = setOf(
         "file-reference-v1",
         "durable-history-v1",
@@ -183,6 +183,7 @@ class PiBridge(
             port = root.optInt("port"),
             runtimeOwnerSessionId = root.optString("endpointKey"),
             stopInProgress = root.optBoolean("stopInProgress"),
+            pendingPromptCount = root.optInt("pendingPromptCount", 0),
             compatible = root.optString("bridgeVersion") == expectedBridgeVersion &&
                 (root.optJSONArray("capabilities") ?: JSONArray()).let { array ->
                     requiredBridgeCapabilities.all { required -> (0 until array.length()).any { array.optString(it) == required } }
@@ -965,7 +966,7 @@ internal fun Throwable?.isConnectRefusedFailure(): Boolean {
     var current = this
     val seen = HashSet<Throwable>()
     while (current != null && seen.add(current)) {
-        if (current is java.net.ConnectException) return true
+        if (current is java.net.ConnectException && Regex("(?i)ECONNREFUSED|connection refused").containsMatchIn(current.message.orEmpty())) return true
         current = current.cause
     }
     return false
@@ -984,6 +985,7 @@ data class PiHealth(
     val port: Int = 0,
     val runtimeOwnerSessionId: String = "",
     val stopInProgress: Boolean = false,
+    val pendingPromptCount: Int = 0,
     /** Bridge build matches this APK; an incompatible bridge must be replaced (only while Pi is idle). */
     val compatible: Boolean = true
 )

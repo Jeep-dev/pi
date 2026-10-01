@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fetch } from "./test_http.mjs";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
