@@ -225,9 +225,17 @@ internal fun formatToolDuration(durationMs: Long): String {
 internal fun assistantCompletionNotice(
     stopReason: String,
     text: String,
-    errorMessage: String
+    errorMessage: String,
+    userStopped: Boolean = false
 ): String? = when {
+    // The user pressed Stop. Some providers report that abort as an error whose message is
+    // the AbortError's ("This operation was aborted"); neither is worth a bubble.
+    userStopped && (stopReason == "aborted" || (stopReason == "error" && errorMessage.isAbortMessage())) -> null
     stopReason == "error" && errorMessage.isNotBlank() -> "模型错误：$errorMessage"
     stopReason == "aborted" && text.isBlank() -> "本轮任务已中止"
     else -> null
 }
+
+private val abortMessage = Regex("""^\s*(this operation was aborted|request (was )?aborted|the operation was aborted|aborted)\.?\s*$""", RegexOption.IGNORE_CASE)
+
+internal fun String.isAbortMessage(): Boolean = abortMessage.matches(this)

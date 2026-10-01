@@ -263,10 +263,15 @@ class PiBridge(
         }
 
     /** Stop the active agent, clear Pi's queues, and fence new work in the bridge. */
-    suspend fun stop(): Result<Unit> = request("/stop", "{}", 70_000).map { Unit }
+    /** Stops the run and returns the queued messages Pi dropped, so they can be handed back. */
+    suspend fun stop(): Result<PiQueue> = request("/stop", "{}", 70_000).mapCatching { raw ->
+        val restored = runCatching { JSONObject(raw).optJSONObject("restored") }.getOrNull() ?: JSONObject()
+        fun strings(key: String) = restored.optJSONArray(key)?.let { array -> List(array.length()) { index -> array.optString(index) } }.orEmpty()
+        PiQueue(steering = strings("steering"), followUp = strings("followUp"))
+    }
 
     // Kept as a source-compatible alias for older callers.
-    suspend fun abort(): Result<Unit> = stop()
+    suspend fun abort(): Result<Unit> = stop().map { Unit }
 
     suspend fun clearQueue(): Result<PiQueue> = request("/clear-queue", "{}", 8_000).mapCatching { raw ->
         val data = JSONObject(raw).optJSONObject("data") ?: JSONObject()
@@ -776,6 +781,7 @@ class PiBridge(
             "stderr" -> PiEvent(seq, type, "", value.optString("text"))
             "process_exit" -> PiEvent(seq, type, "", "Pi 进程退出：${value.optString("code", value.optString("signal"))}\n${value.optString("stderr")}".trim())
             "extension_error" -> PiEvent(seq, type, "", value.optString("error", value.toString()))
+            "prompt_failed" -> PiEvent(seq, type, "", value.optString("error"), metaText = value.optString("message"))
             "extension_ui_request" -> {
                 val method = value.optString("method")
                 val optionsArray = if (method == "setWidget") {

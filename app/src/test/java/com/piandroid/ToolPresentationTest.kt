@@ -96,5 +96,9 @@ class ToolPresentationTest {
         )
         assertEquals("本轮任务已中止", assistantCompletionNotice("aborted", "", ""))
         assertEquals(null, assistantCompletionNotice("aborted", "partial answer", ""))
+        assertEquals(null, assistantCompletionNotice("aborted", "", "", userStopped = true))
+        assertEquals(null, assistantCompletionNotice("error", "", "This operation was aborted", userStopped = true))
+        assertEquals("模型错误：This operation was aborted", assistantCompletionNotice("error", "", "This operation was aborted"))
+        assertEquals("模型错误：rate limited", assistantCompletionNotice("error", "", "rate limited", userStopped = true))
     }
 }

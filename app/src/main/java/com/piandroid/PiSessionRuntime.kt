@@ -181,7 +181,7 @@ internal class PiSessionRuntime(
     private var recoveryEnabled = true
     private var connectionJob: Job? = null
     private var eventJob: Job? = null
-    private var stopJob: Deferred<Result<Unit>>? = null
+    private var stopJob: Deferred<Result<PiQueue>>? = null
     private var eventCursor = 0L
     private var conversationGeneration = 0L
     private var lastState: PiState? = null
@@ -344,7 +344,7 @@ internal class PiSessionRuntime(
         }
     }
 
-    fun stopCurrentAgent(): Deferred<Result<Unit>> {
+    fun stopCurrentAgent(): Deferred<Result<PiQueue>> {
         synchronized(stateLock) {
             stopJob?.takeIf { it.isActive }?.let { return it }
             val job = scope.async {

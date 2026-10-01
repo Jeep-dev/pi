@@ -74,8 +74,15 @@ const persistentUiEvents = new Map();
 let latestQueueEvent = null;
 let stopFence = false;
 let stopInProgress = null;
+// Bumped by every Stop so prompts the bridge is still holding never run afterwards.
+let stopGeneration = 0;
+// Prompts held in the bridge until a running compaction finishes.
+const heldPrompts = new Set();
+let compactionActive = false;
+const compactionWaiters = new Set();
 
 function addEvent(value) {
+  trackCompaction(value);
   const event = { seq: ++sequence, receivedAt: Date.now(), value };
   const byteSize = Buffer.byteLength(JSON.stringify(value));
   Object.defineProperty(event, "byteSize", { value: byteSize });
@@ -980,6 +987,76 @@ async function rpcResponse(res, command, timeoutMs) {
   }
 }
 
+// Pi answers `prompt` only after preflight, which can include compacting a nearly
+// full context or running an extension command; both can take minutes.
+const PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+// How long /prompt holds the HTTP request before reporting the prompt as pending.
+const PROMPT_ACK_WAIT_MS = Number(process.env.PI_ANDROID_PROMPT_ACK_MS) > 0 ? Number(process.env.PI_ANDROID_PROMPT_ACK_MS) : 12_000;
+function trackCompaction(value) {
+  if (value?.type === "compaction_start") compactionActive = true;
+  if (value?.type === "compaction_end" || value?.type === "agent_settled" || value?.type === "process_exit" || value?.type === "process_reset") {
+    compactionActive = false;
+    for (const wake of compactionWaiters) wake();
+    compactionWaiters.clear();
+  }
+}
+
+function waitForCompactionEnd(timeoutMs) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); compactionWaiters.delete(done); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    compactionWaiters.add(done);
+  });
+}
+
+async function submitPrompt(command) {
+  const deadline = Date.now() + PROMPT_TIMEOUT_MS;
+  const generation = stopGeneration;
+  for (;;) {
+    try {
+      return await rpc(command, Math.max(1000, deadline - Date.now()));
+    } catch (error) {
+      const message = String(error?.message || error);
+      // RPC mode rejects prompts during compaction; native Pi queues them. Do the same.
+      if (/compaction is in progress/i.test(message) && Date.now() < deadline) {
+        const held = { message: command.message };
+        heldPrompts.add(held);
+        try {
+          await waitForCompactionEnd(Math.min(5_000, Math.max(0, deadline - Date.now())));
+        } finally {
+          heldPrompts.delete(held);
+        }
+        // Stop hands held prompts back to the app (see stopCurrentAgent); never send them.
+        if (generation !== stopGeneration) throw Object.assign(new Error("Stopped"), { stopped: true });
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function promptResponse(res, command) {
+  const submitted = submitPrompt(command);
+  let settled = false;
+  submitted.then(() => { settled = true; }, () => { settled = true; });
+  const early = await Promise.race([
+    submitted.then(response => ({ response }), error => ({ error })),
+    new Promise(resolve => setTimeout(() => resolve(null), PROMPT_ACK_WAIT_MS)),
+  ]);
+  if (early?.response) return send(res, 200, early.response);
+  if (early?.error?.stopped) return send(res, 200, { type: "response", command: "prompt", success: true, data: { disposition: "stopped" } });
+  if (early?.error) return send(res, 500, { ok: false, error: String(early.error?.message || early.error) });
+  // Still in preflight (compaction or a long extension command): the prompt is accepted
+  // and will run. Report it as pending and surface a later failure as an event.
+  send(res, 200, { type: "response", command: "prompt", success: true, data: { disposition: "pending" } });
+  if (!settled) {
+    submitted.catch(error => {
+      if (error?.stopped) return;
+      addEvent({ type: "prompt_failed", message: command.message, error: String(error?.message || error) });
+    });
+  }
+}
+
 function dispatchLongCommand(message) {
   if (stopFence) throw new Error("Stop in progress; command rejected");
   if (!child || child.exitCode != null || !child.stdin.writable) throw new Error("Pi is not running");
@@ -1001,14 +1078,24 @@ async function stopCurrentAgent() {
   }
 
   stopFence = true;
+  stopGeneration++;
+  const held = [...heldPrompts].map(item => String(item.message));
+  for (const wake of compactionWaiters) wake();
+  compactionWaiters.clear();
   const operation = (async () => {
     let cleared = false;
+    let restored = { steering: [], followUp: [] };
     try {
-      await rpc({ type: "clear_queue" }, 8_000);
+      const queue = await rpc({ type: "clear_queue" }, 8_000);
       cleared = true;
+      restored = {
+        steering: Array.isArray(queue?.data?.steering) ? queue.data.steering.map(String) : [],
+        followUp: Array.isArray(queue?.data?.followUp) ? queue.data.followUp.map(String) : [],
+      };
     } catch (error) {
       addEvent({ type: "extension_error", error: `Stop queue clear failed: ${String(error?.message || error)}` });
     }
+    restored.steering = [...held, ...restored.steering];
 
     const [bashResult, abortResult] = await Promise.allSettled([
       rpc({ type: "abort_bash" }, 8_000),
@@ -1025,6 +1112,7 @@ async function stopCurrentAgent() {
     }
     return {
       cleared,
+      restored,
       aborted: true,
       bashAborted: bashResult.status === "fulfilled",
     };
@@ -1176,11 +1264,11 @@ const server = http.createServer(async (req, res) => {
         }).join("\n");
         message = `${message || "请检查这些附件。"}\n\n文件引用（内容没有内嵌到消息中，请按需使用 read/bash 工具读取）：\n${attachmentText}`;
       }
-      return rpcResponse(res, {
+      return promptResponse(res, {
         type: "prompt",
         message,
         ...(input.streamingBehavior ? { streamingBehavior: input.streamingBehavior } : {}),
-      }, SLOW_RPC_TIMEOUT_MS);
+      });
     }
 
     if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/stop")) {

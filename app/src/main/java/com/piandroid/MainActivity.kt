@@ -300,6 +300,8 @@ private data class ChatLine(
     val toolDurationMs: Long = -1L
 )
 private val ANDROID_CHANGELOG = listOf(
+    "• 发送更稳：工作中发消息不再报 already processing；上下文快满、Pi 先压缩时不再误报 30 秒超时；压缩进行中发的消息等压缩完自动发出",
+    "• 停止不再弹「模型错误：This operation was aborted」和「已停止…」；还没发出的排队消息退回输入框，不再错标 ✓",
     "• 工作中输入 / 命令不再当成插话发给模型：扩展命令立即执行、不显示排队 ○；不存在的命令直接提示，不发出去",
     "• 适配 Pi 0.99：codemode 里调用的工具显示在同一张卡片内（● ✓ ✗），MCP 工具显示为 server/tool 并按行列出参数；被扩展直接处理的消息不再让状态卡在工作中；Bridge 丢弃不显示的大字段，重连更快",
     "• 回复边输出边按 Markdown 渲染，不再等输出完才排版",
@@ -894,6 +896,11 @@ private fun PiScreen(
     // Highest bridge event sequence already rendered by this PiScreen.
     var lastAppliedEventSeq by remember { mutableLongStateOf(0L) }
     var steeringQueueSize by remember { mutableStateOf(0) }
+    // Pi is inside a run (agent_start .. agent_settled). Status text alone goes stale
+    // across compactions and reconnects.
+    var agentRunning by remember { mutableStateOf(false) }
+    // When the user last pressed Stop; the abort that follows is not an error to report.
+    var stopRequestedAt by remember { mutableStateOf(0L) }
     var followUpQueueSize by remember { mutableStateOf(0) }
 
     var bashInput by rememberSaveable { mutableStateOf("") }
@@ -1296,7 +1303,8 @@ private fun PiScreen(
                 Log.w("PiChatEvents", "Dropping orphan assistant message_end")
             }
         }
-        assistantCompletionNotice(stopReason, text, errorMessage)?.let(::addSystem)
+        val userStopped = stopRequestedAt > 0L && android.os.SystemClock.uptimeMillis() - stopRequestedAt < 120_000L
+        assistantCompletionNotice(stopReason, text, errorMessage, userStopped)?.let(::addSystem)
     }
 
     fun toggleLine(index: Int) {
@@ -1349,6 +1357,7 @@ private fun PiScreen(
         }
         when (event.type) {
             "agent_start" -> {
+                agentRunning = true
                 status = "Working"
                 updateSessionRecord { it.copy(status = PiSessionStatus.WORKING, lastActivity = System.currentTimeMillis(), lastError = "") }
                 AgentKeepAliveService.start(bridge.applicationContext())
@@ -1361,6 +1370,7 @@ private fun PiScreen(
                 reconcileSteeringQueue(event.steeringCount)
             }
             "agent_settled" -> {
+                agentRunning = false
                 settleStreams()
                 steeringQueueSize = 0
                 followUpQueueSize = 0
@@ -1401,6 +1411,7 @@ private fun PiScreen(
             "tool_execution_end" -> if (!applyNestedTool(event)) finishTool(event)
             "stderr", "extension_error" -> addSystem(event.text)
             "process_exit" -> {
+                agentRunning = false
                 settleStreams()
                 currentState = currentState?.copy(streaming = false, compacting = false)
                 addSystem(event.text)
@@ -1425,7 +1436,13 @@ private fun PiScreen(
                 if (event.stopReason == "success" && event.subtype != "manual") {
                     loadHistory(preservePending = true)
                 }
-                status = if (currentState?.streaming == true) "Working" else "Ready"
+                status = if (agentRunning || currentState?.streaming == true) "Working" else "Ready"
+            }
+            "prompt_failed" -> {
+                // A message accepted as pending (Pi was compacting) failed afterwards.
+                val index = lines.indexOfLast { it.role == "user" && it.text == event.metaText }
+                if (index >= 0) lines[index] = lines[index].copy(delivery = "steering_failed")
+                addSystem("发送失败：${event.text}")
             }
             "extension_ui_request" -> {
                 val req = event.uiRequest
@@ -1509,6 +1526,8 @@ private fun PiScreen(
         ready.snapshot.editorText?.let { input = it }
         connected = true
         connecting = false
+        // Pi's own state is authoritative after a (re)connect; replayed events may be partial.
+        agentRunning = currentState?.streaming == true
         status = when {
             currentState?.compacting == true -> "Compacting"
             currentState?.streaming == true -> "Working"
@@ -1623,6 +1642,66 @@ private fun PiScreen(
         }
     }
 
+    /**
+     * Stop clears Pi's queue. Like native Pi, the messages that never ran go back into the
+     * input box instead of staying in the chat with a delivered mark.
+     */
+    fun restoreClearedQueue(restored: PiQueue) {
+        val texts = restored.steering + restored.followUp
+        if (texts.isEmpty()) return
+        texts.forEach { text ->
+            val index = lines.indexOfLast {
+                it.role == "user" && it.text == text &&
+                    it.delivery in setOf("steering", "steering_queued", "steering_sent", "follow_up", "normal")
+            }
+            if (index >= 0) lines.removeAt(index)
+        }
+        input = (texts + input).filter { it.isNotBlank() }.joinToString("\n")
+        steeringQueueSize = 0
+        followUpQueueSize = 0
+    }
+
+    /**
+     * Sends a chat message. It always carries a streaming behavior: Pi ignores it when idle
+     * and needs it when busy, so a stale idea of "busy" here can no longer make Pi reject the
+     * message. The mark next to the bubble is a guess until Pi's disposition settles it.
+     */
+    fun sendPrompt(text: String, displayText: String, attachments: List<PiAttachment>, followUp: Boolean) {
+        followOutput = true
+        val busyNow = agentRunning || currentState?.streaming == true || currentState?.compacting == true ||
+            status == "Working" || status == "Compacting" || status == "Stopping"
+        val steering = busyNow && !followUp
+        if (steering) steeringQueueSize += 1
+        lines.add(ChatLine("user", displayText, delivery = when { steering -> "steering_queued"; busyNow -> "follow_up"; else -> "normal" }))
+        fun mark(delivery: String) {
+            val index = lines.indexOfLast { it.role == "user" && it.text == displayText }
+            if (index >= 0 && lines[index].delivery != delivery) lines[index] = lines[index].copy(delivery = delivery)
+        }
+        runtime.launchTask {
+            bridge.prompt(text, if (followUp) "followUp" else "steer", attachments).fold(
+                onSuccess = { disposition ->
+                    when (disposition) {
+                        // Pi queued it behind the running turn.
+                        "queued" -> if (!busyNow) mark(if (followUp) "follow_up" else "steering_queued")
+                        // Pi started a run with it, or an extension consumed it: not queued.
+                        "started", "handled", "" -> {
+                            if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                            if (busyNow) mark("normal")
+                        }
+                        // "pending": Pi is compacting first; "stopped": Stop handed it back.
+                        else -> Unit
+                    }
+                    if (disposition == "started" || disposition.isEmpty()) status = "Working"
+                },
+                onFailure = {
+                    if (steering) steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
+                    mark("steering_failed")
+                    addSystem("发送失败：${it.message}")
+                }
+            )
+        }
+    }
+
     fun executeInput(raw: String, attachments: List<PiAttachment> = emptyList(), followUp: Boolean = false) {
         val text = raw.trim()
         if (text.isBlank() && attachments.isEmpty()) return
@@ -1636,32 +1715,8 @@ private fun PiScreen(
             return
         }
         if (attachments.isNotEmpty()) {
-            followOutput = true
-            val queued = currentState?.streaming == true || status == "Working"
-            val steering = queued && !followUp
-            if (steering) steeringQueueSize += 1
             val attachmentSummary = attachments.joinToString(", ") { "[附件: ${it.name}]" }
-            lines.add(
-                ChatLine(
-                    "user",
-                    listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"),
-                    delivery = when { steering -> "steering_queued"; queued -> "follow_up"; else -> "normal" }
-                )
-            )
-            runtime.launchTask {
-                val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
-                bridge.prompt(text, behavior, attachments).fold(
-                    // "handled": an extension consumed it and no run follows, so don't sit on Working.
-                    onSuccess = { disposition -> if (disposition != "handled") status = "Working" },
-                    onFailure = {
-                        if (steering) {
-                            steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
-                            markSteeringFailed(listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"))
-                        }
-                        addSystem("发送附件失败：${it.message}")
-                    }
-                )
-            }
+            sendPrompt(text, listOf(text, attachmentSummary).filter { it.isNotBlank() }.joinToString("\n"), attachments, followUp)
             return
         }
         if (text.startsWith("!")) {
@@ -1854,11 +1909,12 @@ private fun PiScreen(
             }
             "/abort" -> {
                 status = "Stopping"
+                stopRequestedAt = android.os.SystemClock.uptimeMillis()
                 val stop = runtime.stopCurrentAgent()
                 scope.launch {
                     stop.await().fold(
-                        onSuccess = { addSystem("已停止当前任务并清空队列") },
-                        onFailure = { addSystem("取消失败：${it.message}") }
+                        onSuccess = { restored -> restoreClearedQueue(restored) },
+                        onFailure = { addSystem("停止失败：${it.message}") }
                     )
                 }
             }
@@ -1883,46 +1939,24 @@ private fun PiScreen(
                 // Slash input is a command, not chat. Extension commands run immediately in Pi
                 // even mid-run, so they never join the steering queue; prompt templates and
                 // skills expand into a real message and keep the normal steer/follow-up path.
-                val remote = if (command.startsWith("/")) remoteCommands.firstOrNull { "/${it.name}" == command } else null
-                if (command.startsWith("/") && command.length > 1 && remote == null && remoteCommands.isNotEmpty()) {
+                // A path such as /sdcard/a.txt is not a command and goes out as text.
+                val looksLikeCommand = Regex("^/[\\w:.-]+$").matches(command)
+                val remote = if (looksLikeCommand) remoteCommands.firstOrNull { "/${it.name}".equals(command, ignoreCase = true) } else null
+                if (looksLikeCommand && remote == null && remoteCommands.isNotEmpty()) {
                     addSystem("没有 $command 这个命令")
                     return
                 }
                 if (remote?.source == "extension") {
                     lines.add(ChatLine("user", text))
                     runtime.launchTask {
-                        bridge.prompt(text, if (currentState?.streaming == true) "steer" else null).fold(
+                        bridge.prompt(text, "steer").fold(
                             onSuccess = { disposition -> if (disposition == "started") status = "Working" },
                             onFailure = { addSystem("命令发送失败：${it.message}") }
                         )
                     }
                     return
                 }
-                val queued = currentState?.streaming == true || status == "Working"
-                val steering = queued && !followUp
-                if (steering) steeringQueueSize += 1
-                lines.add(ChatLine("user", text, delivery = when { steering -> "steering_queued"; queued -> "follow_up"; else -> "normal" }))
-                runtime.launchTask {
-                    val behavior = when { steering -> "steer"; queued -> "followUp"; else -> null }
-                    bridge.prompt(text, behavior).fold(
-                        onSuccess = { disposition ->
-                            if (disposition != "handled") status = "Working"
-                            else if (steering) {
-                                // An input handler consumed it: it never enters Pi's queue, so don't leave ○ behind.
-                                steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
-                                val index = lines.indexOfLast { it.role == "user" && it.delivery == "steering_queued" && it.text == text }
-                                if (index >= 0) lines[index] = lines[index].copy(delivery = "normal")
-                            }
-                        },
-                        onFailure = {
-                            if (steering) {
-                                steeringQueueSize = (steeringQueueSize - 1).coerceAtLeast(0)
-                                markSteeringFailed(text)
-                            }
-                            addSystem("发送失败：${it.message}")
-                        }
-                    )
-                }
+                sendPrompt(text, text, emptyList(), followUp)
             }
         }
     }
