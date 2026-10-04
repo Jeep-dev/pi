@@ -22,8 +22,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.text.InlineTextContent
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.foundation.text.appendInlineContent
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -38,6 +45,7 @@ private sealed interface MarkdownBlock {
     data class ListBlock(val ordered: Boolean, val items: List<String>) : MarkdownBlock
     data class Quote(val text: String) : MarkdownBlock
     data object Rule : MarkdownBlock
+    data class Math(val latex: String, val raw: String, val closed: Boolean) : MarkdownBlock
 }
 
 private fun cells(line: String): List<String> = line.trim().trim('|').split('|').map(String::trim)
@@ -60,6 +68,12 @@ private fun parseMarkdownBlocks(source: String): List<MarkdownBlock> {
             while (index < lines.size && !lines[index].trimStart().startsWith("```")) body += lines[index++]
             if (index < lines.size) index++
             blocks += MarkdownBlock.Code(language, body.joinToString("\n"))
+            continue
+        }
+        val math = displayMathAt(lines, index)
+        if (math != null) {
+            blocks += MarkdownBlock.Math(math.latex, math.raw, math.closed)
+            index = math.nextLine
             continue
         }
         val heading = Regex("^(#{1,6})\\s+(.+)$").find(line)
@@ -104,6 +118,7 @@ private fun parseMarkdownBlocks(source: String): List<MarkdownBlock> {
         index++
         while (index < lines.size && lines[index].isNotBlank() &&
             !lines[index].trimStart().startsWith("```") &&
+            displayMathAt(lines, index) == null &&
             !lines[index].matches(Regex("^(#{1,6})\\s+.*$")) &&
             !lines[index].matches(Regex("^\\s*[-*+]\\s+.*$")) &&
             !lines[index].matches(Regex("^\\s*\\d+[.)]\\s+.*$")) &&
@@ -115,49 +130,106 @@ private fun parseMarkdownBlocks(source: String): List<MarkdownBlock> {
     return blocks
 }
 
-private fun inlineMarkdown(source: String, colors: PiColors) = buildAnnotatedString {
-    var index = 0
-    while (index < source.length) {
-        when {
-            source.startsWith("**", index) -> {
-                val end = source.indexOf("**", index + 2)
-                if (end > index + 2) {
-                    pushStyle(SpanStyle(fontWeight = FontWeight.Bold, color = colors.markdownStrong))
-                    append(source.substring(index + 2, end)); pop(); index = end + 2
-                } else { append("**"); index += 2 }
+private class InlineText(val text: AnnotatedString, val content: Map<String, InlineTextContent>)
+
+private class InlineMarkdownBuilder(
+    private val colors: PiColors,
+    private val fontSizePx: Float,
+    private val density: Density,
+    private val mathColor: Color,
+    private val maxWidthPx: Float
+) {
+    val builder = AnnotatedString.Builder()
+    val content = mutableMapOf<String, InlineTextContent>()
+
+    private fun appendMath(latex: String, raw: String, color: Color) {
+        // A formula wider than the line is shrunk to fit; Compose cannot wrap a placeholder.
+        val formula = MathFormula.of(latex, fontSizePx, color, display = false)?.let {
+            if (it.width <= maxWidthPx) it else MathFormula.of(latex, fontSizePx * maxWidthPx / it.width * 0.98f, color, display = false)
+        }
+        if (formula == null) { builder.append(raw); return }
+        val id = "math${content.size}"
+        builder.appendInlineContent(id, raw.replace('\n', ' '))
+        content[id] = formula.inlineContent(density)
+    }
+
+    fun append(source: String, color: Color = mathColor) {
+        var index = 0
+        while (index < source.length) {
+            val math = findInlineMath(source, index)
+            when {
+                math != null -> {
+                    appendMath(math.latex, source.substring(index, math.end), color)
+                    index = math.end
+                }
+                source.startsWith("\\$", index) -> { builder.append('$'); index += 2 }
+                source.startsWith("**", index) -> {
+                    val end = source.indexOf("**", index + 2)
+                    if (end > index + 2) {
+                        builder.pushStyle(SpanStyle(fontWeight = FontWeight.Bold, color = colors.markdownStrong))
+                        append(source.substring(index + 2, end), colors.markdownStrong); builder.pop(); index = end + 2
+                    } else { builder.append("**"); index += 2 }
+                }
+                source[index] == '`' -> {
+                    val end = source.indexOf('`', index + 1)
+                    if (end > index + 1) {
+                        builder.pushStyle(SpanStyle(color = colors.markdownCyan, background = colors.markdownInlineCodeBg, fontFamily = FontFamily.Monospace))
+                        builder.append(source.substring(index + 1, end)); builder.pop(); index = end + 1
+                    } else { builder.append('`'); index++ }
+                }
+                source[index] == '[' -> {
+                    val close = source.indexOf(']', index + 1)
+                    val openUrl = if (close >= 0 && close + 1 < source.length && source[close + 1] == '(') close + 1 else -1
+                    val closeUrl = if (openUrl >= 0) source.indexOf(')', openUrl + 1) else -1
+                    if (closeUrl > openUrl) {
+                        builder.pushStyle(SpanStyle(color = colors.markdownCyan)); builder.append(source.substring(index + 1, close)); builder.pop()
+                        builder.pushStyle(SpanStyle(color = colors.markdownMuted)); builder.append(" (${source.substring(openUrl + 1, closeUrl)})"); builder.pop()
+                        index = closeUrl + 1
+                    } else { builder.append(source[index]); index++ }
+                }
+                else -> { builder.append(source[index]); index++ }
             }
-            source[index] == '`' -> {
-                val end = source.indexOf('`', index + 1)
-                if (end > index + 1) {
-                    pushStyle(SpanStyle(color = colors.markdownCyan, background = colors.markdownInlineCodeBg, fontFamily = FontFamily.Monospace))
-                    append(source.substring(index + 1, end)); pop(); index = end + 1
-                } else { append('`'); index++ }
-            }
-            source[index] == '[' -> {
-                val close = source.indexOf(']', index + 1)
-                val openUrl = if (close >= 0 && close + 1 < source.length && source[close + 1] == '(') close + 1 else -1
-                val closeUrl = if (openUrl >= 0) source.indexOf(')', openUrl + 1) else -1
-                if (closeUrl > openUrl) {
-                    pushStyle(SpanStyle(color = colors.markdownCyan)); append(source.substring(index + 1, close)); pop()
-                    pushStyle(SpanStyle(color = colors.markdownMuted)); append(" (${source.substring(openUrl + 1, closeUrl)})"); pop()
-                    index = closeUrl + 1
-                } else { append(source[index]); index++ }
-            }
-            else -> { append(source[index]); index++ }
         }
     }
+}
+
+private fun inlineMarkdown(source: String, colors: PiColors, fontSize: TextUnit, density: Density, color: Color, maxWidthPx: Float = Float.MAX_VALUE): InlineText {
+    val inline = InlineMarkdownBuilder(colors, with(density) { fontSize.toPx() }, density, color, maxWidthPx)
+    inline.append(source)
+    return InlineText(inline.builder.toAnnotatedString(), inline.content)
+}
+
+@Composable
+private fun MarkdownText(
+    source: String,
+    color: Color,
+    fontSize: TextUnit,
+    lineHeight: TextUnit,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null
+) {
+    val colors = LocalPiColors.current
+    val density = LocalDensity.current
+    // Shrink formulas wider than the screen. Not BoxWithConstraints: quotes and tables measure
+    // their rows by intrinsic size, which a SubcomposeLayout cannot answer (it crashed the app).
+    val maxWidthPx = with(density) { (LocalConfiguration.current.screenWidthDp.dp - 48.dp).toPx() }
+    val inline = remember(source, colors, fontSize, density, color, maxWidthPx) { inlineMarkdown(source, colors, fontSize, density, color, maxWidthPx) }
+    Text(inline.text, color = color, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, inlineContent = inline.content, modifier = modifier)
 }
 
 @Composable
 fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
     val colors = LocalPiColors.current
+    val context = LocalContext.current
+    remember { MathFormula.init(context) }
     val blocks = remember(text) { parseMarkdownBlocks(text) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Paragraph -> Text(inlineMarkdown(block.text, colors), color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
-                is MarkdownBlock.Heading -> Text(
-                    inlineMarkdown(block.text, colors),
+                is MarkdownBlock.Paragraph -> MarkdownText(block.text, color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
+                is MarkdownBlock.Math -> MathBlockContent(block.latex, block.raw, block.closed, colors)
+                is MarkdownBlock.Heading -> MarkdownText(
+                    block.text,
                     color = colors.markdownStrong,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = when (block.level) { 1 -> 20.sp; 2 -> 18.sp; else -> 16.sp },
@@ -172,12 +244,12 @@ fun PiMarkdown(text: String, modifier: Modifier = Modifier) {
                 is MarkdownBlock.ListBlock -> Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     block.items.forEachIndexed { i, item -> Row {
                         Text(if (block.ordered) "${i + 1}." else "•", color = colors.markdownMuted, fontSize = 15.sp, lineHeight = 23.sp, modifier = Modifier.width(if (block.ordered) 24.dp else 16.dp))
-                        Text(inlineMarkdown(item, colors), color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
+                        MarkdownText(item, color = colors.markdownText, fontSize = 15.sp, lineHeight = 23.sp)
                     } }
                 }
                 is MarkdownBlock.Quote -> Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                     Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(colors.markdownAccent.copy(alpha = 0.5f)))
-                    Text(inlineMarkdown(block.text, colors), color = colors.markdownMuted, fontSize = 14.5.sp, lineHeight = 22.sp, modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp))
+                    MarkdownText(block.text, color = colors.markdownMuted, fontSize = 14.5.sp, lineHeight = 22.sp, modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp))
                 }
                 MarkdownBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp).background(colors.markdownBorder))
             }
@@ -206,8 +278,8 @@ private fun MarkdownTable(rows: List<List<String>>, colors: PiColors) {
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
-                        Text(
-                            inlineMarkdown(row.getOrNull(column).orEmpty(), colors),
+                        MarkdownText(
+                            row.getOrNull(column).orEmpty(),
                             color = if (rowIndex == 0) colors.markdownStrong else colors.markdownText,
                             fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
                             fontSize = 13.sp,
