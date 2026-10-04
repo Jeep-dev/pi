@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -24,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.text.InlineTextContent
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -149,7 +149,7 @@ private class InlineMarkdownBuilder(
         }
         if (formula == null) { builder.append(raw); return }
         val id = "math${content.size}"
-        builder.appendInlineContent(id, raw)
+        builder.appendInlineContent(id, raw.replace('\n', ' '))
         content[id] = formula.inlineContent(density)
     }
 
@@ -210,16 +210,11 @@ private fun MarkdownText(
 ) {
     val colors = LocalPiColors.current
     val density = LocalDensity.current
-    val inline = remember(source, colors, fontSize, density, color) { inlineMarkdown(source, colors, fontSize, density, color) }
-    if (inline.content.isEmpty()) {
-        Text(inline.text, color = color, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, modifier = modifier)
-        return
-    }
-    BoxWithConstraints(modifier) {
-        val maxWidthPx = constraints.maxWidth.toFloat()
-        val fitted = remember(inline, maxWidthPx) { inlineMarkdown(source, colors, fontSize, density, color, maxWidthPx) }
-        Text(fitted.text, color = color, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, inlineContent = fitted.content)
-    }
+    // Shrink formulas wider than the screen. Not BoxWithConstraints: quotes and tables measure
+    // their rows by intrinsic size, which a SubcomposeLayout cannot answer (it crashed the app).
+    val maxWidthPx = with(density) { (LocalConfiguration.current.screenWidthDp.dp - 48.dp).toPx() }
+    val inline = remember(source, colors, fontSize, density, color, maxWidthPx) { inlineMarkdown(source, colors, fontSize, density, color, maxWidthPx) }
+    Text(inline.text, color = color, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, inlineContent = inline.content, modifier = modifier)
 }
 
 @Composable

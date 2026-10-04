@@ -6,12 +6,10 @@ import android.util.LruCache
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material3.Text
@@ -24,6 +22,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
@@ -112,7 +111,7 @@ internal class MathFormula private constructor(
         val native = canvas.nativeCanvas
         val save = native.save()
         native.translate(left, top)
-        drawable.draw(native)
+        runCatching { drawable.draw(native) }
         native.restoreToCount(save)
     }
 
@@ -138,10 +137,7 @@ internal class MathFormula private constructor(
         fun init(context: Context) {
             if (ready) return
             synchronized(this) {
-                if (!ready) {
-                    JLatexMathAndroid.init(context.applicationContext)
-                    ready = true
-                }
+                if (!ready) ready = runCatching { JLatexMathAndroid.init(context.applicationContext) }.isSuccess
             }
         }
 
@@ -174,12 +170,13 @@ internal fun MathBlockContent(latex: String, raw: String, closed: Boolean, color
         Text(raw, color = if (closed) colors.markdownText else colors.markdownMuted, fontSize = 15.sp, lineHeight = 23.sp)
         return
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val width = maxWidth
-        Box(Modifier.horizontalScroll(rememberScrollState())) {
-            Box(Modifier.widthIn(min = width).padding(vertical = 2.dp), contentAlignment = Alignment.Center) {
-                Canvas(Modifier.size(with(density) { formula.width.toDp() }, with(density) { formula.height.toDp() })) { formula.draw(this, 0f) }
-            }
-        }
+    // Centered when it fits, scrollable from the left when wider. No BoxWithConstraints: a
+    // SubcomposeLayout crashes under parents that measure by intrinsic size.
+    val canvas = Modifier.size(with(density) { formula.width.toDp() }, with(density) { formula.height.toDp() })
+    val available = with(density) { (LocalConfiguration.current.screenWidthDp.dp - 48.dp).toPx() }
+    if (formula.width <= available) Box(Modifier.fillMaxWidth().padding(vertical = 2.dp), contentAlignment = Alignment.Center) {
+        Canvas(canvas) { formula.draw(this, 0f) }
+    } else Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 2.dp)) {
+        Canvas(canvas) { formula.draw(this, 0f) }
     }
 }
