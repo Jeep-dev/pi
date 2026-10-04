@@ -10,7 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
-// v5.19.38 build 138: wake frozen Termux instead of restarting the Bridge, retry the first connect, keep the keep-alive while Pi does not answer.
+// v5.19.41 build 141: render LaTeX math ($…$, $$…$$, \(…\), \[…\]) in chat Markdown.
 android {
     namespace = "com.piandroid"
     compileSdk = 35
@@ -24,8 +24,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 140
-        versionName = "5.19.40"
+        versionCode = 141
+        versionName = "5.19.41"
     }
 
     signingConfigs {
@@ -68,5 +68,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
+    implementation("ru.noties:jlatexmath-android:0.2.0")
+    implementation("ru.noties:jlatexmath-android:0.2.0")
     testImplementation("junit:junit:4.13.2")
 }
