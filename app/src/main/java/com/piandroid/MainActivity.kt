@@ -135,6 +135,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
@@ -2792,8 +2793,17 @@ private fun WelcomeState(cwd: String, model: String, connected: Boolean, onQuick
 
 @Composable
 private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: String, model: String, resourceSections: List<LoadedResourceSection>, connected: Boolean, hideThinking: Boolean, onQuickCommand: (String) -> Unit, onFollowChange: (Boolean) -> Unit, onUserScrollActivity: () -> Unit, onToggleLine: (Int) -> Unit) {
-    fun isAtBottom(): Boolean = !listState.canScrollForward
-    val userScrollLock = remember(listState) {
+    // "At the bottom" has slack: while Pi streams, the last card keeps growing, so the
+    // exact bottom moves away under the finger and follow never re-engaged.
+    val followSlackPx = with(LocalDensity.current) { 56.dp.toPx() }
+    fun isAtBottom(): Boolean {
+        if (!listState.canScrollForward) return true
+        val layout = listState.layoutInfo
+        val last = layout.visibleItemsInfo.lastOrNull() ?: return false
+        return last.index == layout.totalItemsCount - 1 &&
+            last.offset + last.size - layout.viewportEndOffset <= followSlackPx
+    }
+    val userScrollLock = remember(listState, followSlackPx) {
     object : NestedScrollConnection {
         override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
             // Merely touching/dragging at the bottom must not disable follow.
@@ -2806,9 +2816,19 @@ private fun ChatPanel(lines: List<ChatLine>, listState: LazyListState, cwd: Stri
             val userActuallyMoved = source == NestedScrollSource.UserInput && verticalMovement
             if (userActuallyMoved) {
                 onUserScrollActivity()
-                onFollowChange(isAtBottom())
+                // Only pulling older content into view stops following; dragging
+                // towards the end resumes it as soon as the end is (nearly) reached.
+                if (consumed.y > 0f) onFollowChange(false)
+                else if (isAtBottom()) onFollowChange(true)
             }
             return Offset.Zero
+        }
+
+        override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+            // A fling that lands at the end resumes following even if new output
+            // arrived meanwhile and the list is a few pixels short of the true end.
+            if (isAtBottom()) onFollowChange(true)
+            return Velocity.Zero
         }
     }
 }
