@@ -10,6 +10,7 @@ val signingKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val signingKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 val hasCiSigning = listOf(signingPath, signingStorePassword, signingKeyAlias, signingKeyPassword).all { !it.isNullOrBlank() }
 
+// v5.19.44 build 144: chat follows new output again after scrolling back near the end, even while it streams.
 // v5.19.42 build 142: LaTeX math in chat Markdown; no SubcomposeLayout under intrinsic-measured tables/quotes.
 android {
     namespace = "com.piandroid"
@@ -24,8 +25,8 @@ android {
         applicationId = "com.piandroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 142
-        versionName = "5.19.42"
+        versionCode = 144
+        versionName = "5.19.44"
     }
 
     signingConfigs {
