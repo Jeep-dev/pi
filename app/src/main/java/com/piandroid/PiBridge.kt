@@ -2,6 +2,7 @@ package com.piandroid
 
 import android.content.Context
 import android.content.Intent
+import android.app.PendingIntent
 import android.net.Uri
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -48,6 +50,7 @@ class PiBridge(
         endpointToken?.takeIf { it.length >= 32 } ?: PiBridge.endpointToken(context, runtimeOwnerSessionId)
     }
     private var nextId = 3000
+    @Volatile private var launchResult: kotlinx.coroutines.CompletableDeferred<TermuxCommandResult>? = null
     private val remoteBridgeDir = if (runtimeOwnerSessionId == DEFAULT_ENDPOINT_KEY) {
         "~/.pi/android"
     } else {
@@ -114,9 +117,15 @@ class PiBridge(
                 { (command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 &); true; } &&
                 rm -f $remotePidFile &&
                 export PI_ANDROID_TOKEN='$authToken' PI_ANDROID_PORT=$port PI_ANDROID_ENDPOINT_KEY='$runtimeOwnerSessionId' PI_ANDROID_PID_FILE=$remotePidFile &&
-                exec /data/data/com.termux/files/usr/bin/node $remoteBridgeScript >> $remoteLogFile 2>&1
+                { [ -x $TERMUX_NODE ] || { echo "$LAUNCHER_NODE_MISSING" >&2; echo "[${d}(date -u +%Y-%m-%dT%H:%M:%SZ)] launcher: $TERMUX_NODE missing" >> $remoteLogFile; exit 127; }; } &&
+                exec $TERMUX_NODE $remoteBridgeScript >> $remoteLogFile 2>&1
             """.trimIndent().replace("\n", " ")
-            runTermux(command).getOrThrow()
+            // Ask Termux to report back: a refused command (allow-external-apps off,
+            // bash missing) or a Bridge that exits at once is otherwise only seen
+            // as a 30s "Bridge 启动超时" with no reason.
+            val (result, pendingIntent) = TermuxCommandResults.register(context)
+            launchResult = result
+            runTermuxExecutable(TERMUX_BASH, arrayOf("-lc", command), pendingIntent).getOrThrow()
         }
     }
 
@@ -133,7 +142,21 @@ class PiBridge(
         // stretch "30s" of attempts to almost three minutes.
         val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis
         var lastSeenVersion = ""
+        val launch = launchResult
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (launch != null && launch.isCompleted) {
+                // The launcher already ended: Termux refused it or the Bridge died.
+                val result = launch.await()
+                val failure = result.toFailure(remoteLogFile)
+                if (failure is TermuxSetupException) return Result.failure(failure)
+                val tail = readBridgeLogTail()
+                return Result.failure(
+                    IllegalStateException(
+                        failure.message + tail.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty(),
+                        failure
+                    )
+                )
+            }
             val remaining = (deadline - android.os.SystemClock.elapsedRealtime()).toInt().coerceIn(250, 1200)
             request("/health", null, remaining).onSuccess { raw ->
                 val root = runCatching { JSONObject(raw) }.getOrNull()
@@ -843,15 +866,31 @@ class PiBridge(
         return runTermuxExecutable("/data/data/com.termux/files/usr/bin/true", emptyArray())
     }
 
-    private suspend fun runTermux(command: String): Result<Unit> =
-        runTermuxExecutable("/data/data/com.termux/files/usr/bin/bash", arrayOf("-lc", command))
+    /** The last lines of this Bridge's log, read back through Termux; empty when unavailable. */
+    private suspend fun readBridgeLogTail(): String {
+        val (result, pendingIntent) = TermuxCommandResults.register(context)
+        runTermuxExecutable(TERMUX_BASH, arrayOf("-c", "tail -n 12 $remoteLogFile 2>/dev/null"), pendingIntent)
+            .onFailure { return "" }
+        return withTimeoutOrNull(4_000) { result.await() }?.stdout?.trim()?.takeLast(1_200).orEmpty()
+    }
 
-    private suspend fun runTermuxExecutable(path: String, arguments: Array<String>): Result<Unit> = withContext(Dispatchers.IO) {
+    private suspend fun runTermuxExecutable(
+        path: String,
+        arguments: Array<String>,
+        resultIntent: PendingIntent? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        // Reinstalling Termux (for example switching between its F-Droid and GitHub
+        // builds) drops this grant without telling us; startService would then only
+        // throw a bare SecurityException.
+        if (!hasRunCommandPermission(context)) {
+            return@withContext Result.failure(TermuxSetupException(RUN_COMMAND_PERMISSION_MISSING))
+        }
         try {
             val intent = Intent("com.termux.RUN_COMMAND").setClassName(termux, service)
                 .putExtra("com.termux.RUN_COMMAND_PATH", path)
                 .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arguments)
                 .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+            if (resultIntent != null) intent.putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultIntent)
             val started = try {
                 context.startService(intent)
             } catch (backgroundStart: IllegalStateException) {
@@ -864,7 +903,7 @@ class PiBridge(
             }
             Result.success(Unit)
         } catch (_: SecurityException) {
-            Result.failure(TermuxSetupException("请给 Pi Android 开启 Termux 的 RUN_COMMAND 权限，并确认 ~/.termux/termux.properties 中 allow-external-apps=true"))
+            Result.failure(TermuxSetupException(RUN_COMMAND_PERMISSION_MISSING))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -1068,3 +1107,13 @@ data class PiEvent(
 data class PiEventBatch(val events: List<PiEvent>, val latest: Long, val gap: Boolean)
 data class PiFile(val name: String, val type: String, val path: String)
 data class PiFileContent(val content: String, val truncated: Boolean)
+
+internal const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
+internal const val TERMUX_NODE = "/data/data/com.termux/files/usr/bin/node"
+internal const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
+internal const val RUN_COMMAND_PERMISSION_MISSING =
+    "Pi 没有“在 Termux 环境中运行命令”权限（重装或换装 Termux 后系统会收回它）。回到 Pi 会自动弹出授权，点允许即可"
+
+internal fun hasRunCommandPermission(context: Context): Boolean =
+    context.checkPermission(RUN_COMMAND_PERMISSION, android.os.Process.myPid(), android.os.Process.myUid()) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED

@@ -21,6 +21,9 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains a user-started local coding agent during long tasks" />
         </service>
+        <receiver
+            android:name=".TermuxResultReceiver"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

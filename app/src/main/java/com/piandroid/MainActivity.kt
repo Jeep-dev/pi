@@ -191,12 +191,14 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = 0
         }
-        requestTermuxPermissionIfNeeded()
         setContent { PiTouchApp(runtimeManager) }
     }
 
     override fun onStart() {
         super.onStart()
+        // Checked on every return, not only at launch: reinstalling Termux revokes
+        // the grant while Pi keeps running, and every Bridge start then fails.
+        requestTermuxPermissionIfNeeded(askNotifications = !started)
         // Coming back from the background: thaw Termux now and let every Session
         // probe its Bridge at once instead of finishing a backoff or a 25s read.
         if (started) runtimeManager.onForeground()
@@ -225,17 +227,32 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun requestTermuxPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    private var permissionRequestInFlight = false
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != permissionRequestCode) return
+        permissionRequestInFlight = false
+        val granted = permissions.indices.any {
+            permissions[it] == permission && grantResults.getOrNull(it) == PackageManager.PERMISSION_GRANTED
+        }
+        if (granted) runtimeManager.onForeground()
+    }
+
+    private fun requestTermuxPermissionIfNeeded(askNotifications: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || permissionRequestInFlight) return
         val requested = mutableListOf<String>()
         val installed = runCatching { packageManager.getPackageInfo("com.termux", 0) }.isSuccess
         if (installed && checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) requested += permission
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        if (askNotifications && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requested += android.Manifest.permission.POST_NOTIFICATIONS
         }
-        if (requested.isNotEmpty()) requestPermissions(requested.toTypedArray(), permissionRequestCode)
+        if (requested.isNotEmpty()) {
+            permissionRequestInFlight = true
+            requestPermissions(requested.toTypedArray(), permissionRequestCode)
+        }
     }
 }
 
